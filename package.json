@@ -40,5 +40,9 @@
   "nodemonConfig": {
     "watch": ["src"],
     "ext": "js,json"
+  },
+  "node-pg-migrate": {
+    "migrations-dir": "migrations",
+    "migration-file-language": "js"
   }
 }

@@ -1,5 +1,4 @@
-/* eslint-disable camelcase */
-exports.up = (pgm) => {
+export const up = (pgm) => {
   pgm.sql(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`);
 
   pgm.createTable('global_usuarios', {
@@ -39,7 +38,7 @@ exports.up = (pgm) => {
   `);
 };
 
-exports.down = (pgm) => {
+export const down = (pgm) => {
   pgm.dropTable('permisos');
   pgm.dropTable('acciones');
   pgm.dropTable('modulos');

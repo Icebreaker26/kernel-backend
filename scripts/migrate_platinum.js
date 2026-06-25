@@ -29,7 +29,8 @@ const CLEAN   =  process.argv.includes('--clean');
 if (DRY_RUN) console.log('=== DRY RUN — pasa --run para ejecutar. ===\n');
 if (CLEAN && !DRY_RUN) console.log('=== --clean activo: se borrarán todos los datos antes de sincronizar. ===\n');
 
-const OLD_URL = 'postgresql://postgres:cmTgHEEopuMzMokgGxxqoTcoxFxCKUVK@switchyard.proxy.rlwy.net:39998/railway';
+const OLD_URL = process.env.PLATINUM_DATABASE_URL;
+if (!OLD_URL) { console.error('[ERROR] Falta variable de entorno PLATINUM_DATABASE_URL'); process.exit(1); }
 const oldPool = new Pool({ connectionString: OLD_URL, ssl: { rejectUnauthorized: false } });
 const newPool = new Pool({ connectionString: process.env.DATABASE_URL });
 

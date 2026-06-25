@@ -612,7 +612,7 @@ export const reporteParticipantes = async (req, res, next) => {
       ciudad:        a.ciudad ?? '',
       empresa:       a.nombre_empresa ?? '',
       clase_cuota:   a.clase_cuota === '1' ? 'Quincenal' : a.clase_cuota === '2' ? 'Mensual' : a.clase_cuota ?? '',
-      valor_cuota:   VALOR_CUOTA[a.clase_cuota] ?? 0,
+      valor_cuota:   (VALOR_CUOTA[a.clase_cuota] ?? 0) * a.boletos_activos,
       bonos:         a.boletos_activos,
       numeros:       (a.numeros_activos ?? []).map((n) => String(n).padStart(3, '0')).join(', '),
     }));

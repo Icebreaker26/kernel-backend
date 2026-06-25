@@ -2,7 +2,7 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import pool from '../../../db/database.js';
 import { env } from '../../../config/env.js';
-import { loginSchema } from '../schemas/authSchema.js';
+import { loginSchema, registerSchema } from '../schemas/authSchema.js';
 
 export const login = async (req, res, next) => {
   try {
@@ -42,6 +42,28 @@ export const login = async (req, res, next) => {
 export const logout = (_req, res) => {
   res.clearCookie('token');
   res.json({ message: 'Sesión cerrada' });
+};
+
+export const register = async (req, res, next) => {
+  try {
+    const { nombre, email, password, rol } = registerSchema.parse(req.body);
+
+    const { rows: existing } = await pool.query(
+      'SELECT id FROM global_usuarios WHERE email = $1', [email]
+    );
+    if (existing.length) return res.status(409).json({ error: 'El email ya está registrado' });
+
+    const password_hash = await bcrypt.hash(password, 10);
+    const { rows } = await pool.query(
+      `INSERT INTO global_usuarios (nombre, email, password_hash, rol, is_active, is_approved)
+       VALUES ($1, $2, $3, $4, true, false)
+       RETURNING id, nombre, email, rol`,
+      [nombre, email, password_hash, rol]
+    );
+    res.status(201).json({ ...rows[0], message: 'Registro exitoso. Pendiente de aprobación.' });
+  } catch (err) {
+    next(err);
+  }
 };
 
 export const me = async (req, res, next) => {

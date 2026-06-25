@@ -11,7 +11,11 @@ router.get('/', checkPermission('perfil', 'READ'), ctrl.obtenerPerfil);
 
 router.put('/',
   checkPermission('perfil', 'WRITE'),
-  (req, res, next) => { actualizarPerfilSchema.parse(req.body); next(); },
+  (req, res, next) => {
+    if (req.user.rol !== 'admin') return res.status(403).json({ error: 'Solo el administrador puede modificar datos personales' });
+    actualizarPerfilSchema.parse(req.body);
+    next();
+  },
   ctrl.actualizarPerfil
 );
 

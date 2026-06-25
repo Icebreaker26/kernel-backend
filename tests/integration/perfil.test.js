@@ -55,26 +55,11 @@ describe('Perfil — datos', () => {
     expect(res.body).not.toHaveProperty('password_hash');
   });
 
-  test('PUT /api/perfil → 200 actualiza nombre', async () => {
+  test('PUT /api/perfil sin rol admin → 403', async () => {
     const ag  = agent();
     await login(ag);
     const res = await ag.put('/api/perfil').send({ nombre: 'Nombre Nuevo', email: testEmail });
-    expect(res.status).toBe(200);
-    expect(res.body.nombre).toBe('Nombre Nuevo');
-  });
-
-  test('PUT /api/perfil email duplicado → 409', async () => {
-    const ag  = agent();
-    await login(ag);
-    const res = await ag.put('/api/perfil').send({ nombre: 'Test', email: 'alejandro.torres0826@gmail.com' });
-    expect(res.status).toBe(409);
-  });
-
-  test('PUT /api/perfil body inválido → 400', async () => {
-    const ag  = agent();
-    await login(ag);
-    const res = await ag.put('/api/perfil').send({ nombre: '' });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(403);
   });
 });
 

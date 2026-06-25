@@ -107,12 +107,12 @@ export const importarCSV = async (req, res, next) => {
         const base = j * 10;
         params.push(d.codigo, d.apellido, d.nombre, d.direccion, d.movil,
                     d.clase_cuota, d.empresa_dsto, d.nombre_empresa, d.ciudad, hashes[i + j]);
-        return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10})`;
+        return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10},now())`;
       }).join(',');
 
       const { rows } = await client.query(
         `INSERT INTO asociados
-           (codigo, apellido, nombre, direccion, movil, clase_cuota, empresa_dsto, nombre_empresa, ciudad, password_hash)
+           (codigo, apellido, nombre, direccion, movil, clase_cuota, empresa_dsto, nombre_empresa, ciudad, password_hash, fecha_ingreso)
          VALUES ${values}
          ON CONFLICT (codigo) DO UPDATE SET
            apellido       = EXCLUDED.apellido,
@@ -124,6 +124,7 @@ export const importarCSV = async (req, res, next) => {
            nombre_empresa = EXCLUDED.nombre_empresa,
            ciudad         = EXCLUDED.ciudad,
            is_active      = true,
+           fecha_retiro   = NULL,
            updated_at     = now()
          RETURNING (xmax = 0) AS es_nuevo`,
         params
@@ -134,7 +135,7 @@ export const importarCSV = async (req, res, next) => {
 
     // 2. Retirar asociados que ya no están en el CSV
     const { rowCount: retirados } = await client.query(
-      `UPDATE asociados SET is_active = false, updated_at = now()
+      `UPDATE asociados SET is_active = false, fecha_retiro = now(), updated_at = now()
        WHERE codigo != ALL($1) AND is_active = true`,
       [codigosCSV]
     );

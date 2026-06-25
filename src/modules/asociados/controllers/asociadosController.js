@@ -135,7 +135,7 @@ export const importarCSV = async (req, res, next) => {
 
     // 2. Retirar asociados que ya no están en el CSV
     const { rowCount: retirados } = await client.query(
-      `UPDATE asociados SET is_active = false, fecha_retiro = now(), updated_at = now()
+      `UPDATE asociados SET is_active = false, fecha_retiro = now(), fecha_ingreso = NULL, updated_at = now()
        WHERE codigo != ALL($1) AND is_active = true`,
       [codigosCSV]
     );

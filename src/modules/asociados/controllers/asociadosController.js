@@ -139,6 +139,13 @@ export const importarCSV = async (req, res, next) => {
       [codigosCSV]
     );
 
+    // 3. Registrar auditoría
+    await client.query(
+      `INSERT INTO sincronizaciones (usuario_uuid, archivo, total, nuevos, actualizados, retirados, errores)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [req.user.id, req.file.originalname, registros.length, nuevos, actualizados, retirados, errores.length]
+    );
+
     await client.query('COMMIT');
     res.json({ nuevos, actualizados, retirados, errores, total: registros.length });
   } catch (err) {
@@ -146,6 +153,22 @@ export const importarCSV = async (req, res, next) => {
     next(err);
   } finally {
     client.release();
+  }
+};
+
+export const historialSincronizaciones = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT s.id, s.archivo, s.total, s.nuevos, s.actualizados, s.retirados, s.errores, s.created_at,
+              u.nombre AS usuario, u.email AS usuario_email
+       FROM sincronizaciones s
+       JOIN global_usuarios u ON u.id = s.usuario_uuid
+       ORDER BY s.created_at DESC
+       LIMIT 100`
+    );
+    res.json(rows);
+  } catch (err) {
+    next(err);
   }
 };
 

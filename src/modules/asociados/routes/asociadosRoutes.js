@@ -23,5 +23,9 @@ router.post('/importar',
   upload.single('archivo'),
   ctrl.importarCSV
 );
+router.get('/sincronizaciones',
+  verifyToken, checkPermission('asociados', 'READ'),
+  ctrl.historialSincronizaciones
+);
 
 export default router;

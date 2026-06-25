@@ -125,6 +125,7 @@ export const importarCSV = async (req, res, next) => {
            ciudad         = EXCLUDED.ciudad,
            is_active      = true,
            fecha_retiro   = NULL,
+           fecha_ingreso  = CASE WHEN asociados.is_active = false THEN now() ELSE asociados.fecha_ingreso END,
            updated_at     = now()
          RETURNING (xmax = 0) AS es_nuevo`,
         params
@@ -135,7 +136,7 @@ export const importarCSV = async (req, res, next) => {
 
     // 2. Retirar asociados que ya no están en el CSV
     const { rowCount: retirados } = await client.query(
-      `UPDATE asociados SET is_active = false, fecha_retiro = now(), fecha_ingreso = NULL, updated_at = now()
+      `UPDATE asociados SET is_active = false, fecha_retiro = now(), updated_at = now()
        WHERE codigo != ALL($1) AND is_active = true`,
       [codigosCSV]
     );

@@ -1,5 +1,13 @@
+import bcrypt from 'bcrypt';
 import pool from '../../../db/database.js';
-import { cambiarRolSchema, asignarPermisosSchema } from '../schemas/adminSchema.js';
+import { cambiarRolSchema, asignarPermisosSchema, resetearPasswordSchema } from '../schemas/adminSchema.js';
+
+const logAdmin = (usuario_uuid, accion, objetivo_tipo, objetivo_id, objetivo_nombre, detalle = null) =>
+  pool.query(
+    `INSERT INTO admin_logs (usuario_uuid, accion, objetivo_tipo, objetivo_id, objetivo_nombre, detalle)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [usuario_uuid, accion, objetivo_tipo, objetivo_id, objetivo_nombre, detalle]
+  ).catch(() => {});
 
 export const listarUsuarios = async (req, res, next) => {
   try {
@@ -21,6 +29,7 @@ export const aprobarUsuario = async (req, res, next) => {
       [req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+    logAdmin(req.user.id, 'APROBAR_USUARIO', 'usuario', rows[0].id, rows[0].nombre);
     res.json(rows[0]);
   } catch (err) {
     next(err);
@@ -34,6 +43,21 @@ export const desactivarUsuario = async (req, res, next) => {
       [req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+    logAdmin(req.user.id, 'DESACTIVAR_USUARIO', 'usuario', rows[0].id, rows[0].nombre);
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const reactivarUsuario = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `UPDATE global_usuarios SET is_active = true WHERE id = $1 RETURNING id, nombre, email`,
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+    logAdmin(req.user.id, 'REACTIVAR_USUARIO', 'usuario', rows[0].id, rows[0].nombre);
     res.json(rows[0]);
   } catch (err) {
     next(err);
@@ -48,6 +72,7 @@ export const cambiarRol = async (req, res, next) => {
       [rol, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+    logAdmin(req.user.id, 'CAMBIAR_ROL', 'usuario', rows[0].id, rows[0].nombre, `Nuevo rol: ${rows[0].rol}`);
     res.json(rows[0]);
   } catch (err) {
     next(err);
@@ -85,6 +110,8 @@ export const asignarPermisosmasivo = async (req, res, next) => {
     }
 
     await client.query('COMMIT');
+    const { rows: [u] } = await pool.query('SELECT nombre FROM global_usuarios WHERE id = $1', [usuario_uuid]);
+    logAdmin(req.user.id, 'ASIGNAR_PERMISOS', 'usuario', usuario_uuid, u?.nombre ?? usuario_uuid);
     res.json({ message: 'Permisos asignados correctamente' });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -104,6 +131,53 @@ export const listarPermisosUsuario = async (req, res, next) => {
        WHERE p.usuario_uuid = $1
        ORDER BY m.nombre, a.nombre`,
       [req.params.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const resetearPassword = async (req, res, next) => {
+  try {
+    const { nueva_password } = resetearPasswordSchema.parse(req.body);
+    const hash = await bcrypt.hash(nueva_password, 10);
+    const { rows } = await pool.query(
+      `UPDATE global_usuarios SET password_hash = $1 WHERE id = $2 RETURNING id, nombre, email`,
+      [hash, req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+    logAdmin(req.user.id, 'RESET_PASSWORD', 'usuario', rows[0].id, rows[0].nombre);
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const resetearPasswordAsociado = async (req, res, next) => {
+  try {
+    const { nueva_password } = resetearPasswordSchema.parse(req.body);
+    const hash = await bcrypt.hash(nueva_password, 10);
+    const { rows } = await pool.query(
+      `UPDATE asociados SET password_hash = $1 WHERE codigo = $2 RETURNING codigo, nombre, apellido`,
+      [hash, req.params.codigo]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Asociado no encontrado' });
+    logAdmin(req.user.id, 'RESET_PASSWORD', 'asociado', rows[0].codigo, `${rows[0].nombre} ${rows[0].apellido}`);
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const listarAdminLogs = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT al.*, u.nombre AS admin_nombre, u.email AS admin_email
+       FROM admin_logs al
+       JOIN global_usuarios u ON u.id = al.usuario_uuid
+       ORDER BY al.created_at DESC
+       LIMIT 200`
     );
     res.json(rows);
   } catch (err) {

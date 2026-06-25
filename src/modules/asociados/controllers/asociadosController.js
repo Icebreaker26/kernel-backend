@@ -4,6 +4,7 @@ import { parse } from 'csv-parse/sync';
 import pool from '../../../db/database.js';
 import { env } from '../../../config/env.js';
 import { loginAsociadoSchema, importarFilaSchema } from '../schemas/asociadosSchema.js';
+import { notificarUsuario } from '../../../services/notificationService.js';
 
 export const loginAsociado = async (req, res, next) => {
   try {
@@ -188,6 +189,13 @@ export const importarCSV = async (req, res, next) => {
     );
 
     await client.query('COMMIT');
+
+    notificarUsuario(req.user.id, {
+      tipo: 'sincronizacion_completada',
+      mensaje: `Importación completada: ${nuevos} nuevos, ${actualizados} actualizados, ${retirados} retirados`,
+      modulo: 'asociados',
+    }).catch(() => {});
+
     res.json({ nuevos, actualizados, retirados, errores, total: registros.length });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -208,6 +216,72 @@ export const historialSincronizaciones = async (req, res, next) => {
        LIMIT 100`
     );
     res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const listarNotificaciones = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM notificaciones
+       WHERE asociado_codigo = $1
+       ORDER BY created_at DESC LIMIT 50`,
+      [req.asociado.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const marcarNotifLeida = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `UPDATE notificaciones SET leida = true
+       WHERE id = $1 AND asociado_codigo = $2 RETURNING id`,
+      [req.params.id, req.asociado.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Notificación no encontrada' });
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const marcarTodasNotifsLeidas = async (req, res, next) => {
+  try {
+    await pool.query(
+      `UPDATE notificaciones SET leida = true
+       WHERE asociado_codigo = $1 AND leida = false`,
+      [req.asociado.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const cambiarPasswordAsociado = async (req, res, next) => {
+  try {
+    const { password_actual, password_nueva } = req.body;
+    if (!password_actual || !password_nueva || password_nueva.length < 8) {
+      return res.status(400).json({ error: 'Datos inválidos' });
+    }
+
+    const { rows } = await pool.query(
+      'SELECT password_hash FROM asociados WHERE codigo = $1',
+      [req.asociado.id]
+    );
+    const valida = await bcrypt.compare(password_actual, rows[0].password_hash);
+    if (!valida) return res.status(401).json({ error: 'Contraseña actual incorrecta' });
+
+    const hash = await bcrypt.hash(password_nueva, 10);
+    await pool.query(
+      'UPDATE asociados SET password_hash = $1, updated_at = NOW() WHERE codigo = $2',
+      [hash, req.asociado.id]
+    );
+    res.json({ message: 'Contraseña actualizada' });
   } catch (err) {
     next(err);
   }

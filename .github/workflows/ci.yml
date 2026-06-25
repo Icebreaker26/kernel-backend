@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, master]
+  pull_request:
+    branches: [dev, master]
+
+jobs:
+  test:
+    name: Integration tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: kernel
+          POSTGRES_PASSWORD: kernel123
+          POSTGRES_DB: kernel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://kernel:kernel123@localhost:5432/kernel
+      JWT_SECRET: ci_jwt_secret_al_menos_16_chars
+      PORT: 4000
+      NODE_ENV: test
+      FRONTEND_URL: http://localhost:5173
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Correr migraciones
+        run: npm run migrate:up
+
+      - name: Correr tests
+        run: npm test

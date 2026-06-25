@@ -1,4 +1,5 @@
 import pool from '../../../db/database.js';
+import { notificarPorPermiso, notificarAsociado } from '../../../services/notificationService.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -294,6 +295,14 @@ export const aprobarSolicitud = async (req, res, next) => {
       );
 
       await client.query('COMMIT');
+
+      const accionTexto = sol.tipo === 'adquisicion' ? 'adquisición' : 'retiro';
+      notificarAsociado(sol.asociado_codigo, {
+        tipo: 'solicitud_aprobada',
+        mensaje: `Tu solicitud de ${accionTexto} del número ${sol.numero} fue aprobada`,
+        modulo: 'sorteos',
+      }).catch(() => {});
+
       res.json(updated);
     } catch (err) {
       await client.query('ROLLBACK');
@@ -341,6 +350,14 @@ export const rechazarSolicitud = async (req, res, next) => {
       );
 
       await client.query('COMMIT');
+
+      const accionTexto = sol.tipo === 'adquisicion' ? 'adquisición' : 'retiro';
+      notificarAsociado(sol.asociado_codigo, {
+        tipo: 'solicitud_rechazada',
+        mensaje: `Tu solicitud de ${accionTexto} del número ${sol.numero} fue rechazada${notas ? `: ${notas}` : ''}`,
+        modulo: 'sorteos',
+      }).catch(() => {});
+
       res.json(updated);
     } catch (err) {
       await client.query('ROLLBACK');
@@ -379,6 +396,12 @@ export const registrarGanador = async (req, res, next) => {
         boleto.nombre_empresa,
       ]
     );
+    notificarAsociado(boleto.asociado_codigo, {
+      tipo: 'ganador_sorteo',
+      mensaje: `¡Felicitaciones! Eres ganador del sorteo con el número ${numero}`,
+      modulo: 'sorteos',
+    }).catch(() => {});
+
     res.status(201).json(ganador);
   } catch (err) { next(err); }
 };
@@ -407,6 +430,167 @@ export const listarLogs = async (req, res, next) => {
       ORDER BY sl.created_at DESC
       LIMIT 500
     `, [id]);
+    res.json(rows);
+  } catch (err) { next(err); }
+};
+
+// ── Estadísticas del sorteo ─────────────────────────────────────────────────
+
+export const estadisticasSorteo = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    // Ocupación actual
+    const { rows: [ocupacion] } = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE estado = 'libre')::int                  AS libres,
+        COUNT(*) FILTER (WHERE estado = 'asignado')::int               AS asignados,
+        COUNT(*) FILTER (WHERE estado = 'pendiente_adquisicion')::int  AS pendiente_adquisicion,
+        COUNT(*) FILTER (WHERE estado = 'pendiente_retiro')::int       AS pendiente_retiro,
+        COUNT(*)::int                                                   AS total
+      FROM boletos WHERE sorteo_id = $1
+    `, [id]);
+
+    // Snapshot real por día: cuántos boletos estaban activos en cada fecha
+    // Para boletos CSV (sin log por boleto): usa updated_at como fecha de asignación
+    // Para boletos ya liberados: usa logs de retiro para saber cuándo dejaron de estar activos
+    const { rows: snapshot } = await pool.query(`
+      WITH boleto_rango AS (
+        SELECT
+          b.numero,
+          -- fecha_asignacion es cuando se asignó el boleto (CSV o directo)
+          COALESCE(DATE(b.fecha_asignacion), CURRENT_DATE) AS fecha_desde,
+          CASE WHEN b.estado = 'libre' THEN
+            COALESCE(
+              (SELECT DATE(MAX(sl.created_at))
+               FROM sorteo_logs sl
+               WHERE sl.sorteo_id = $1 AND sl.numero = b.numero
+                 AND sl.accion IN ('ANULACION_DIRECTA','APROBACION_RETIRO','LIBERACION_POR_RETIRO_CSV')),
+              CURRENT_DATE
+            )
+          ELSE NULL END AS fecha_hasta
+        FROM boletos b
+        WHERE b.sorteo_id = $1
+          AND (b.estado != 'libre' OR b.asociado_codigo IS NOT NULL)
+      ),
+      fechas AS (
+        SELECT DISTINCT fecha FROM (
+          SELECT DATE(created_at) AS fecha FROM sorteo_logs WHERE sorteo_id = $1
+          UNION SELECT DATE(fecha_asignacion) FROM boletos WHERE sorteo_id = $1 AND fecha_asignacion IS NOT NULL
+        ) t
+        WHERE fecha IS NOT NULL
+        ORDER BY fecha
+      )
+      SELECT
+        f.fecha::text AS fecha,
+        COUNT(br.numero)::int AS asignados
+      FROM fechas f
+      LEFT JOIN boleto_rango br ON
+        br.fecha_desde IS NOT NULL
+        AND br.fecha_desde <= f.fecha
+        AND (br.fecha_hasta IS NULL OR br.fecha_hasta > f.fecha)
+      GROUP BY f.fecha
+      ORDER BY f.fecha
+    `, [id]);
+
+    // Movimientos diarios individuales desde logs
+    const { rows: movimientos } = await pool.query(`
+      SELECT
+        DATE(created_at)::text AS fecha,
+        COUNT(*) FILTER (WHERE accion IN ('COMPRA_DIRECTA','APROBACION'))::int AS compras,
+        COUNT(*) FILTER (WHERE accion IN ('ANULACION_DIRECTA','APROBACION_RETIRO','LIBERACION_POR_RETIRO_CSV'))::int AS retiros
+      FROM sorteo_logs
+      WHERE sorteo_id = $1
+      GROUP BY DATE(created_at)
+      ORDER BY DATE(created_at)
+    `, [id]);
+
+    const movimientosMap = Object.fromEntries(movimientos.map((m) => [m.fecha, m]));
+    const evolucion = snapshot.map((s) => ({
+      fecha:     s.fecha,
+      asignados: s.asignados,
+      compras:   movimientosMap[s.fecha]?.compras ?? 0,
+      retiros:   movimientosMap[s.fecha]?.retiros  ?? 0,
+    }));
+
+    // Top 10 asociados por boletos activos
+    const { rows: topAsociados } = await pool.query(`
+      SELECT
+        a.nombre || ' ' || a.apellido AS nombre,
+        a.codigo,
+        COUNT(*) FILTER (WHERE b.estado IN ('asignado','pendiente_retiro'))::int AS boletos
+      FROM boletos b
+      JOIN asociados a ON a.codigo = b.asociado_codigo
+      WHERE b.sorteo_id = $1 AND b.asociado_codigo IS NOT NULL
+      GROUP BY a.codigo, a.nombre, a.apellido
+      ORDER BY boletos DESC
+      LIMIT 10
+    `, [id]);
+
+    // Top 10 empresas por boletos activos
+    const { rows: porEmpresa } = await pool.query(`
+      SELECT
+        a.nombre_empresa AS empresa,
+        COUNT(*) FILTER (WHERE b.estado IN ('asignado', 'pendiente_retiro'))::int AS boletos
+      FROM boletos b
+      JOIN asociados a ON a.codigo = b.asociado_codigo
+      WHERE b.sorteo_id = $1 AND b.asociado_codigo IS NOT NULL
+      GROUP BY a.nombre_empresa
+      ORDER BY boletos DESC
+      LIMIT 10
+    `, [id]);
+
+    // Distribución por ciudad
+    const { rows: porCiudad } = await pool.query(`
+      SELECT
+        COALESCE(a.ciudad, 'Sin ciudad') AS ciudad,
+        COUNT(*) FILTER (WHERE b.estado IN ('asignado','pendiente_retiro'))::int AS boletos
+      FROM boletos b
+      JOIN asociados a ON a.codigo = b.asociado_codigo
+      WHERE b.sorteo_id = $1 AND b.asociado_codigo IS NOT NULL
+      GROUP BY a.ciudad
+      ORDER BY boletos DESC
+    `, [id]);
+
+    res.json({ ocupacion, evolucion, porEmpresa, topAsociados, porCiudad });
+  } catch (err) { next(err); }
+};
+
+// ── Asociados del sorteo ────────────────────────────────────────────────────
+
+export const listarAsociadosSorteo = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    // Asociados con boletos asignados (cualquier estado no-libre)
+    const { rows: asociados } = await pool.query(`
+      SELECT
+        a.codigo, a.nombre, a.apellido, a.movil, a.ciudad,
+        a.nombre_empresa, a.clase_cuota,
+        COUNT(b.numero) FILTER (WHERE b.estado = 'asignado')::int          AS boletos_activos,
+        ARRAY_AGG(b.numero ORDER BY b.numero) FILTER (WHERE b.estado = 'asignado') AS numeros_activos
+      FROM boletos b
+      JOIN asociados a ON a.codigo = b.asociado_codigo
+      WHERE b.sorteo_id = $1 AND b.asociado_codigo IS NOT NULL
+      GROUP BY a.codigo, a.nombre, a.apellido, a.movil, a.ciudad, a.nombre_empresa, a.clase_cuota
+      ORDER BY a.apellido, a.nombre
+    `, [id]);
+
+    res.json(asociados);
+  } catch (err) { next(err); }
+};
+
+export const historialAsociadoSorteo = async (req, res, next) => {
+  try {
+    const { id, codigo } = req.params;
+    const { rows } = await pool.query(`
+      SELECT sl.numero, sl.accion, sl.detalle, sl.created_at,
+             u.nombre AS empleado_nombre
+      FROM sorteo_logs sl
+      LEFT JOIN global_usuarios u ON u.id = sl.empleado_uuid
+      WHERE sl.sorteo_id = $1 AND sl.asociado_codigo = $2
+      ORDER BY sl.created_at DESC
+    `, [id, codigo]);
     res.json(rows);
   } catch (err) { next(err); }
 };
@@ -500,6 +684,12 @@ export const solicitarBono = async (req, res, next) => {
       });
 
       await client.query('COMMIT');
+
+      notificarPorPermiso('sorteos', {
+        tipo: 'solicitud_bono',
+        mensaje: `Solicitud de adquisición del número ${numero} recibida`,
+      }).catch(() => {});
+
       res.status(201).json(sol);
     } catch (err) {
       await client.query('ROLLBACK');
@@ -549,6 +739,12 @@ export const solicitarRetiro = async (req, res, next) => {
       });
 
       await client.query('COMMIT');
+
+      notificarPorPermiso('sorteos', {
+        tipo: 'solicitud_bono',
+        mensaje: `Solicitud de retiro del número ${numero} recibida`,
+      }).catch(() => {});
+
       res.status(201).json(sol);
     } catch (err) {
       await client.query('ROLLBACK');

@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import pool from '../../../db/database.js';
 import { env } from '../../../config/env.js';
 import { loginSchema, registerSchema } from '../schemas/authSchema.js';
+import { notificarAdmins } from '../../../services/notificationService.js';
 
 export const login = async (req, res, next) => {
   try {
@@ -60,6 +61,12 @@ export const register = async (req, res, next) => {
        RETURNING id, nombre, email, rol`,
       [nombre, email, password_hash, rol]
     );
+    notificarAdmins({
+      tipo: 'usuario_pendiente',
+      mensaje: `Nuevo usuario registrado: ${nombre} (${email}) — pendiente de aprobación`,
+      modulo: 'admin',
+    }).catch(() => {});
+
     res.status(201).json({ ...rows[0], message: 'Registro exitoso. Pendiente de aprobación.' });
   } catch (err) {
     next(err);

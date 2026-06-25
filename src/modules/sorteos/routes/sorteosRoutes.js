@@ -65,6 +65,15 @@ router.post('/:id/ganador',
 router.get('/:id/ganadores',
   checkPermission('sorteos', 'READ'), ctrl.listarGanadores);
 
+router.get('/:id/estadisticas',
+  checkPermission('sorteos', 'READ'), ctrl.estadisticasSorteo);
+
+router.get('/:id/asociados',
+  checkPermission('sorteos', 'READ'), ctrl.listarAsociadosSorteo);
+
+router.get('/:id/asociados/:codigo/historial',
+  checkPermission('sorteos', 'READ'), ctrl.historialAsociadoSorteo);
+
 router.get('/:id/logs',
   checkPermission('sorteos', 'READ'), ctrl.listarLogs);
 

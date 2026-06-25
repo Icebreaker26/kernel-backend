@@ -141,7 +141,46 @@ export const importarCSV = async (req, res, next) => {
       [codigosCSV]
     );
 
-    // 3. Registrar auditoría
+    // 3. Sincronizar empresas — extraer pares únicos (codigo, nombre) del CSV
+    const empresasMap = new Map();
+    for (const d of validos) {
+      if (d.empresa_dsto) empresasMap.set(d.empresa_dsto, d.nombre_empresa || d.empresa_dsto);
+    }
+    const empresas      = [...empresasMap.entries()];
+    const codigosEmpresa = empresas.map(([c]) => c);
+
+    if (empresas.length > 0) {
+      const EMP_BATCH = 200;
+      for (let i = 0; i < empresas.length; i += EMP_BATCH) {
+        const lote   = empresas.slice(i, i + EMP_BATCH);
+        const params = [];
+        const values = lote.map(([codigo, nombre], j) => {
+          params.push(codigo, nombre);
+          return `($${j*2+1}, $${j*2+2}, now())`;
+        }).join(',');
+
+        await client.query(
+          `INSERT INTO empresas (codigo, nombre, fecha_ingreso)
+           VALUES ${values}
+           ON CONFLICT (codigo) DO UPDATE SET
+             nombre        = EXCLUDED.nombre,
+             is_active     = true,
+             fecha_retiro  = NULL,
+             fecha_ingreso = CASE WHEN empresas.is_active = false THEN now() ELSE empresas.fecha_ingreso END,
+             updated_at    = now()`,
+          params
+        );
+      }
+
+      // Retirar empresas que ya no aparecen en el CSV
+      await client.query(
+        `UPDATE empresas SET is_active = false, fecha_retiro = now(), updated_at = now()
+         WHERE codigo != ALL($1) AND is_active = true`,
+        [codigosEmpresa]
+      );
+    }
+
+    // 4. Registrar auditoría
     await client.query(
       `INSERT INTO sincronizaciones (usuario_uuid, archivo, total, nuevos, actualizados, retirados, errores)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,

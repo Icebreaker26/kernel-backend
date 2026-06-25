@@ -22,10 +22,19 @@ beforeAll(async () => {
     [testEmail, hash]
   );
   testUuid = rows[0].id;
+
+  await pool.query(
+    `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id)
+     SELECT $1, m.id, a.id FROM modulos m, acciones a
+     WHERE m.nombre = 'perfil'
+     ON CONFLICT DO NOTHING`,
+    [testUuid]
+  );
 });
 
 afterAll(async () => {
-  await pool.query('DELETE FROM global_usuarios WHERE id = $1', [testUuid]);
+  await pool.query('DELETE FROM permisos        WHERE usuario_uuid = $1', [testUuid]);
+  await pool.query('DELETE FROM global_usuarios WHERE id = $1',           [testUuid]);
 });
 
 describe('Perfil — sin token', () => {

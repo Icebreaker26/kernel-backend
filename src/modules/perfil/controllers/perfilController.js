@@ -1,6 +1,5 @@
 import bcrypt from 'bcrypt';
 import pool from '../../../db/database.js';
-import { actualizarPerfilSchema, cambiarPasswordSchema } from '../schemas/perfilSchema.js';
 
 export const obtenerPerfil = async (req, res, next) => {
   try {
@@ -17,7 +16,7 @@ export const obtenerPerfil = async (req, res, next) => {
 
 export const actualizarPerfil = async (req, res, next) => {
   try {
-    const { nombre, email } = actualizarPerfilSchema.parse(req.body);
+    const { nombre, email } = req.body;
 
     const { rows: existing } = await pool.query(
       'SELECT id FROM global_usuarios WHERE email = $1 AND id != $2',
@@ -42,7 +41,7 @@ export const actualizarPerfil = async (req, res, next) => {
 
 export const cambiarPassword = async (req, res, next) => {
   try {
-    const { password_actual, password_nueva } = cambiarPasswordSchema.parse(req.body);
+    const { password_actual, password_nueva } = req.body;
 
     const { rows } = await pool.query(
       'SELECT password_hash FROM global_usuarios WHERE id = $1',

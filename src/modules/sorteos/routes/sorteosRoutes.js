@@ -71,6 +71,9 @@ router.get('/:id/estadisticas',
 router.get('/:id/asociados',
   checkPermission('sorteos', 'READ'), ctrl.listarAsociadosSorteo);
 
+router.get('/:id/reporte-participantes',
+  checkPermission('sorteos', 'READ'), ctrl.reporteParticipantes);
+
 router.get('/:id/asociados/:codigo/historial',
   checkPermission('sorteos', 'READ'), ctrl.historialAsociadoSorteo);
 

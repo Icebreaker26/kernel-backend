@@ -70,25 +70,50 @@ export const importarCSV = async (req, res, next) => {
       trim: true,
     });
 
-    let importados = 0;
-    let errores = [];
-
-    await client.query('BEGIN');
+    const errores = [];
+    const validos = [];
 
     for (const fila of registros) {
       const result = importarFilaSchema.safeParse(fila);
       if (!result.success) {
         errores.push({ fila: fila.codigo ?? '?', error: result.error.flatten() });
-        continue;
+      } else {
+        validos.push(result.data);
       }
+    }
 
-      const d = result.data;
-      const password_hash = await bcrypt.hash(d.codigo, 10);
+    // Hashear en lotes de 50 con costo 4 — password inicial, no requiere seguridad máxima
+    const BATCH = 50;
+    const hashes = [];
+    for (let i = 0; i < validos.length; i += BATCH) {
+      const lote = validos.slice(i, i + BATCH);
+      const lotehashes = await Promise.all(lote.map((d) => bcrypt.hash(d.codigo, 4)));
+      hashes.push(...lotehashes);
+    }
 
-      await client.query(
+    const INSERT_BATCH = 200;
+    const codigosCSV   = validos.map((d) => d.codigo);
+
+    await client.query('BEGIN');
+
+    // 1. Upsert de todos los del CSV (nuevos + actualizados)
+    let nuevos      = 0;
+    let actualizados = 0;
+
+    for (let i = 0; i < validos.length; i += INSERT_BATCH) {
+      const lote   = validos.slice(i, i + INSERT_BATCH);
+      const params = [];
+      const values = lote.map((d, j) => {
+        const base = j * 10;
+        params.push(d.codigo, d.apellido, d.nombre, d.direccion, d.movil,
+                    d.clase_cuota, d.empresa_dsto, d.nombre_empresa, d.ciudad, hashes[i + j]);
+        return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10})`;
+      }).join(',');
+
+      const { rows } = await client.query(
         `INSERT INTO asociados
            (codigo, apellido, nombre, direccion, movil, clase_cuota, empresa_dsto, nombre_empresa, ciudad, password_hash)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         VALUES ${values}
          ON CONFLICT (codigo) DO UPDATE SET
            apellido       = EXCLUDED.apellido,
            nombre         = EXCLUDED.nombre,
@@ -98,15 +123,24 @@ export const importarCSV = async (req, res, next) => {
            empresa_dsto   = EXCLUDED.empresa_dsto,
            nombre_empresa = EXCLUDED.nombre_empresa,
            ciudad         = EXCLUDED.ciudad,
-           updated_at     = now()`,
-        [d.codigo, d.apellido, d.nombre, d.direccion, d.movil,
-         d.clase_cuota, d.empresa_dsto, d.nombre_empresa, d.ciudad, password_hash]
+           is_active      = true,
+           updated_at     = now()
+         RETURNING (xmax = 0) AS es_nuevo`,
+        params
       );
-      importados++;
+
+      rows.forEach((r) => r.es_nuevo ? nuevos++ : actualizados++);
     }
 
+    // 2. Retirar asociados que ya no están en el CSV
+    const { rowCount: retirados } = await client.query(
+      `UPDATE asociados SET is_active = false, updated_at = now()
+       WHERE codigo != ALL($1) AND is_active = true`,
+      [codigosCSV]
+    );
+
     await client.query('COMMIT');
-    res.json({ importados, errores, total: registros.length });
+    res.json({ nuevos, actualizados, retirados, errores, total: registros.length });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);

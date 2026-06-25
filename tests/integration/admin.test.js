@@ -47,7 +47,6 @@ afterAll(async () => {
   await pool.query('DELETE FROM admin_logs      WHERE usuario_uuid IN ($1,$2)', [adminUuid, targetUuid]);
   await pool.query('DELETE FROM permisos        WHERE usuario_uuid IN ($1,$2)', [adminUuid, targetUuid]);
   await pool.query('DELETE FROM global_usuarios WHERE id IN ($1,$2)',            [adminUuid, targetUuid]);
-  await pool.end();
 });
 
 describe('Admin — sin token', () => {

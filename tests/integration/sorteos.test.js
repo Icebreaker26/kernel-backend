@@ -74,6 +74,7 @@ afterAll(async () => {
   await pool.query('DELETE FROM empresas         WHERE codigo = $1',       ['EMP_TEST']);
   await pool.query('DELETE FROM permisos         WHERE usuario_uuid = $1', [adminUuid]);
   await pool.query('DELETE FROM global_usuarios  WHERE id = $1',           [adminUuid]);
+  await pool.end();
 });
 
 // ── Auth guard ──────────────────────────────────────────────────────────────

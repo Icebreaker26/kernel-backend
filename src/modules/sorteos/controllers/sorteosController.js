@@ -605,7 +605,7 @@ export const reporteParticipantes = async (req, res, next) => {
     `, [id]);
 
     const reporte = rows.map((a) => ({
-      cedula:        a.codigo,
+      cedula:        Number(a.codigo),
       nombre:        a.nombre,
       apellido:      a.apellido,
       nombre_completo: `${a.nombre} ${a.apellido}`,

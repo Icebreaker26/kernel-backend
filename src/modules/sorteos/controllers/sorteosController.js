@@ -321,6 +321,7 @@ export const rechazarSolicitud = async (req, res, next) => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      await assertSorteoActivo(sorteo_id);
 
       const { rows: [sol] } = await client.query(
         `SELECT * FROM solicitudes_bono WHERE id = $1 AND sorteo_id = $2 AND estado = 'pendiente' FOR UPDATE`,
@@ -573,6 +574,7 @@ export const listarAsociadosSorteo = async (req, res, next) => {
       JOIN asociados a ON a.codigo = b.asociado_codigo
       WHERE b.sorteo_id = $1 AND b.asociado_codigo IS NOT NULL
       GROUP BY a.codigo, a.nombre, a.apellido, a.movil, a.ciudad, a.nombre_empresa, a.clase_cuota
+      HAVING COUNT(b.numero) FILTER (WHERE b.estado = 'asignado') > 0
       ORDER BY a.apellido, a.nombre
     `, [id]);
 

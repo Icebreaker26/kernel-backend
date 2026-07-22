@@ -6,23 +6,37 @@ import { env } from '../../../config/env.js';
 import { loginAsociadoSchema, importarFilaSchema } from '../schemas/asociadosSchema.js';
 import { notificarUsuario } from '../../../services/notificationService.js';
 
+// Genera una contraseña legible sin caracteres ambiguos (0/O, 1/l/I)
+const generarPassword = () => {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  return Array.from({ length: 10 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+};
+
+// ── Portal: auth ──────────────────────────────────────────────────────────────
+
 export const loginAsociado = async (req, res, next) => {
   try {
     const { codigo, password } = loginAsociadoSchema.parse(req.body);
 
     const { rows } = await pool.query(
-      `SELECT codigo, nombre, apellido, password_hash
+      `SELECT codigo, nombre, apellido, password_hash, portal_activo, primer_login
        FROM asociados WHERE codigo = $1 AND is_active = true`,
       [codigo]
     );
 
     const asociado = rows[0];
-    if (!asociado || !(await bcrypt.compare(password, asociado.password_hash))) {
+
+    // Mismo mensaje para usuario no encontrado y contraseña incorrecta — no revelar si existe
+    if (!asociado || !asociado.password_hash || !(await bcrypt.compare(password, asociado.password_hash))) {
       return res.status(401).json({ error: 'Código o contraseña incorrectos' });
     }
 
+    if (!asociado.portal_activo) {
+      return res.status(403).json({ error: 'Tu acceso al portal no está activado. Contacta a la cooperativa.' });
+    }
+
     const token = jwt.sign(
-      { id: asociado.codigo, nombre: asociado.nombre, tipo: 'asociado' },
+      { id: asociado.codigo, nombre: asociado.nombre, tipo: 'asociado', primer_login: asociado.primer_login },
       env.JWT_SECRET,
       { expiresIn: '8h' }
     );
@@ -34,7 +48,12 @@ export const loginAsociado = async (req, res, next) => {
       maxAge: 8 * 60 * 60 * 1000,
     });
 
-    res.json({ codigo: asociado.codigo, nombre: asociado.nombre, apellido: asociado.apellido });
+    res.json({
+      codigo:       asociado.codigo,
+      nombre:       asociado.nombre,
+      apellido:     asociado.apellido,
+      primer_login: asociado.primer_login,
+    });
   } catch (err) {
     next(err);
   }
@@ -49,7 +68,7 @@ export const meAsociado = async (req, res, next) => {
   try {
     const { rows } = await pool.query(
       `SELECT codigo, nombre, apellido, direccion, movil,
-              clase_cuota, empresa_dsto, nombre_empresa, ciudad
+              clase_cuota, empresa_dsto, nombre_empresa, ciudad, primer_login
        FROM asociados WHERE codigo = $1`,
       [req.asociado.id]
     );
@@ -59,6 +78,81 @@ export const meAsociado = async (req, res, next) => {
     next(err);
   }
 };
+
+export const cambiarPasswordAsociado = async (req, res, next) => {
+  try {
+    const { password_actual, password_nueva } = req.body;
+    if (!password_actual || !password_nueva || password_nueva.length < 8) {
+      return res.status(400).json({ error: 'Datos inválidos' });
+    }
+
+    const { rows } = await pool.query(
+      'SELECT password_hash FROM asociados WHERE codigo = $1',
+      [req.asociado.id]
+    );
+    const valida = await bcrypt.compare(password_actual, rows[0].password_hash);
+    if (!valida) return res.status(401).json({ error: 'Contraseña actual incorrecta' });
+
+    const hash = await bcrypt.hash(password_nueva, 10);
+    await pool.query(
+      'UPDATE asociados SET password_hash = $1, primer_login = false, updated_at = NOW() WHERE codigo = $2',
+      [hash, req.asociado.id]
+    );
+    res.json({ message: 'Contraseña actualizada' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── Admin: activación del portal ──────────────────────────────────────────────
+
+export const activarPortal = async (req, res, next) => {
+  try {
+    const { codigo } = req.params;
+
+    const { rows } = await pool.query(
+      'SELECT codigo, nombre, apellido FROM asociados WHERE codigo = $1 AND is_active = true',
+      [codigo]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Asociado no encontrado' });
+
+    const password = generarPassword();
+    const hash     = await bcrypt.hash(password, 10);
+
+    await pool.query(
+      `UPDATE asociados
+       SET password_hash = $1, portal_activo = true, primer_login = true, updated_at = NOW()
+       WHERE codigo = $2`,
+      [hash, codigo]
+    );
+
+    res.json({
+      password,
+      nombre:  rows[0].nombre,
+      apellido: rows[0].apellido,
+      mensaje: 'Portal activado. Entrega esta contraseña al asociado. No se volverá a mostrar.',
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const desactivarPortal = async (req, res, next) => {
+  try {
+    const { codigo } = req.params;
+    await pool.query(
+      `UPDATE asociados
+       SET password_hash = NULL, portal_activo = false, primer_login = false, updated_at = NOW()
+       WHERE codigo = $1`,
+      [codigo]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── Admin: importar CSV ───────────────────────────────────────────────────────
 
 export const importarCSV = async (req, res, next) => {
   const client = await pool.connect();
@@ -83,37 +177,29 @@ export const importarCSV = async (req, res, next) => {
       }
     }
 
-    // Hashear en lotes de 50 con costo 4 — password inicial, no requiere seguridad máxima
-    const BATCH = 50;
-    const hashes = [];
-    for (let i = 0; i < validos.length; i += BATCH) {
-      const lote = validos.slice(i, i + BATCH);
-      const lotehashes = await Promise.all(lote.map((d) => bcrypt.hash(d.codigo, 4)));
-      hashes.push(...lotehashes);
-    }
-
     const INSERT_BATCH = 200;
     const codigosCSV   = validos.map((d) => d.codigo);
 
     await client.query('BEGIN');
 
-    // 1. Upsert de todos los del CSV (nuevos + actualizados)
     let nuevos      = 0;
     let actualizados = 0;
 
     for (let i = 0; i < validos.length; i += INSERT_BATCH) {
       const lote   = validos.slice(i, i + INSERT_BATCH);
       const params = [];
+      // 9 campos por fila — password_hash, portal_activo y primer_login no se pasan como param
       const values = lote.map((d, j) => {
-        const base = j * 10;
+        const base = j * 9;
         params.push(d.codigo, d.apellido, d.nombre, d.direccion, d.movil,
-                    d.clase_cuota, d.empresa_dsto, d.nombre_empresa, d.ciudad, hashes[i + j]);
-        return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10},now())`;
+                    d.clase_cuota, d.empresa_dsto, d.nombre_empresa, d.ciudad);
+        return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},NULL,false,false,now())`;
       }).join(',');
 
       const { rows } = await client.query(
         `INSERT INTO asociados
-           (codigo, apellido, nombre, direccion, movil, clase_cuota, empresa_dsto, nombre_empresa, ciudad, password_hash, fecha_ingreso)
+           (codigo, apellido, nombre, direccion, movil, clase_cuota, empresa_dsto, nombre_empresa, ciudad,
+            password_hash, portal_activo, primer_login, fecha_ingreso)
          VALUES ${values}
          ON CONFLICT (codigo) DO UPDATE SET
            apellido       = EXCLUDED.apellido,
@@ -135,19 +221,19 @@ export const importarCSV = async (req, res, next) => {
       rows.forEach((r) => r.es_nuevo ? nuevos++ : actualizados++);
     }
 
-    // 2. Retirar asociados que ya no están en el CSV
+    // Retirar asociados que ya no están en el CSV
     const { rowCount: retirados } = await client.query(
       `UPDATE asociados SET is_active = false, fecha_retiro = now(), updated_at = now()
        WHERE codigo != ALL($1) AND is_active = true`,
       [codigosCSV]
     );
 
-    // 3. Sincronizar empresas — extraer pares únicos (codigo, nombre) del CSV
+    // Sincronizar empresas
     const empresasMap = new Map();
     for (const d of validos) {
       if (d.empresa_dsto) empresasMap.set(d.empresa_dsto, d.nombre_empresa || d.empresa_dsto);
     }
-    const empresas      = [...empresasMap.entries()];
+    const empresas       = [...empresasMap.entries()];
     const codigosEmpresa = empresas.map(([c]) => c);
 
     if (empresas.length > 0) {
@@ -173,7 +259,6 @@ export const importarCSV = async (req, res, next) => {
         );
       }
 
-      // Retirar empresas que ya no aparecen en el CSV
       await client.query(
         `UPDATE empresas SET is_active = false, fecha_retiro = now(), updated_at = now()
          WHERE codigo != ALL($1) AND is_active = true`,
@@ -181,7 +266,7 @@ export const importarCSV = async (req, res, next) => {
       );
     }
 
-    // 4. Registrar auditoría
+    // Auditoría
     await client.query(
       `INSERT INTO sincronizaciones (usuario_uuid, archivo, total, nuevos, actualizados, retirados, errores)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -215,6 +300,33 @@ export const historialSincronizaciones = async (req, res, next) => {
        ORDER BY s.created_at DESC
        LIMIT 100`
     );
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const listarAsociados = async (req, res, next) => {
+  try {
+    const { q } = req.query;
+    let rows;
+    if (q && q.trim()) {
+      const term = `%${q.trim().toLowerCase()}%`;
+      ({ rows } = await pool.query(
+        `SELECT codigo, nombre, apellido, movil, clase_cuota, nombre_empresa, ciudad, is_active, portal_activo, primer_login
+         FROM asociados
+         WHERE LOWER(codigo) LIKE $1 OR LOWER(nombre) LIKE $1 OR LOWER(apellido) LIKE $1
+            OR LOWER(nombre || ' ' || apellido) LIKE $1
+         ORDER BY apellido, nombre
+         LIMIT 20`,
+        [term]
+      ));
+    } else {
+      ({ rows } = await pool.query(
+        `SELECT codigo, nombre, apellido, movil, clase_cuota, nombre_empresa, ciudad, is_active, portal_activo, primer_login
+         FROM asociados ORDER BY apellido, nombre`
+      ));
+    }
     res.json(rows);
   } catch (err) {
     next(err);
@@ -257,43 +369,6 @@ export const marcarTodasNotifsLeidas = async (req, res, next) => {
       [req.asociado.id]
     );
     res.json({ ok: true });
-  } catch (err) {
-    next(err);
-  }
-};
-
-export const cambiarPasswordAsociado = async (req, res, next) => {
-  try {
-    const { password_actual, password_nueva } = req.body;
-    if (!password_actual || !password_nueva || password_nueva.length < 8) {
-      return res.status(400).json({ error: 'Datos inválidos' });
-    }
-
-    const { rows } = await pool.query(
-      'SELECT password_hash FROM asociados WHERE codigo = $1',
-      [req.asociado.id]
-    );
-    const valida = await bcrypt.compare(password_actual, rows[0].password_hash);
-    if (!valida) return res.status(401).json({ error: 'Contraseña actual incorrecta' });
-
-    const hash = await bcrypt.hash(password_nueva, 10);
-    await pool.query(
-      'UPDATE asociados SET password_hash = $1, updated_at = NOW() WHERE codigo = $2',
-      [hash, req.asociado.id]
-    );
-    res.json({ message: 'Contraseña actualizada' });
-  } catch (err) {
-    next(err);
-  }
-};
-
-export const listarAsociados = async (req, res, next) => {
-  try {
-    const { rows } = await pool.query(
-      `SELECT codigo, nombre, apellido, movil, clase_cuota, nombre_empresa, ciudad, is_active
-       FROM asociados ORDER BY apellido, nombre`
-    );
-    res.json(rows);
   } catch (err) {
     next(err);
   }

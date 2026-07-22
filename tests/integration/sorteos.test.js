@@ -48,14 +48,14 @@ beforeAll(async () => {
      ON CONFLICT (codigo) DO NOTHING`
   );
 
-  // Asociado de test con hash del propio código (como hace el import CSV)
+  // Asociado de test con portal activo directo (sin pasar por el flujo opt-in)
   const hashAsoc = await bcrypt.hash(asocCodigo, 4);
   await pool.query(
-    `INSERT INTO asociados (codigo, nombre, apellido, empresa_dsto, nombre_empresa, password_hash, is_active)
-     VALUES ($1, 'Test', 'Asociado', 'EMP_TEST', 'Empresa Test Sorteos', $2, true)
+    `INSERT INTO asociados (codigo, nombre, apellido, empresa_dsto, nombre_empresa, password_hash, portal_activo, is_active)
+     VALUES ($1, 'Test', 'Asociado', 'EMP_TEST', 'Empresa Test Sorteos', $2, true, true)
      ON CONFLICT (codigo) DO UPDATE SET
        empresa_dsto = 'EMP_TEST', nombre_empresa = 'Empresa Test Sorteos',
-       password_hash = EXCLUDED.password_hash, is_active = true`,
+       password_hash = EXCLUDED.password_hash, portal_activo = true, is_active = true`,
     [asocCodigo, hashAsoc]
   );
 });

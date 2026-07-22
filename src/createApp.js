@@ -14,7 +14,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export const createApp = async () => {
   const app = express();
 
-  app.use(cors({ origin: env.FRONTEND_URL, credentials: true }));
+  const allowedOrigins = [env.FRONTEND_URL, env.PORTAL_URL].filter(Boolean);
+  app.use(cors({ origin: allowedOrigins, credentials: true }));
   app.use(express.json());
   app.use(cookieParser());
 

@@ -351,6 +351,15 @@ export const importarCSV = async (req, res, next) => {
   }
 };
 
+export const contarPendientesPortal = async (req, res, next) => {
+  try {
+    const { rows: [{ count }] } = await pool.query(
+      `SELECT COUNT(*) FROM asociados WHERE solicitud_portal_at IS NOT NULL AND portal_activo = false`
+    );
+    res.json({ count: Number(count) });
+  } catch (err) { next(err); }
+};
+
 export const historialSincronizaciones = async (req, res, next) => {
   try {
     const { rows } = await pool.query(

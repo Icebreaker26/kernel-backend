@@ -18,6 +18,45 @@ const insertLog = (client, { sorteoId, numero, accion, asociadoCodigo, empleadoU
 
 // ── Sorteos CRUD ────────────────────────────────────────────────────────────
 
+export const dashboard = async (req, res, next) => {
+  try {
+    const { rows: sorteos } = await pool.query(`
+      SELECT
+        s.id, s.nombre, s.estado,
+        COUNT(b.numero) FILTER (WHERE b.estado = 'asignado')                                   AS boletos_asignados,
+        COUNT(b.numero) FILTER (WHERE b.estado = 'asignado' AND a.clase_cuota = '1')          AS boletos_quincenales,
+        COUNT(b.numero) FILTER (WHERE b.estado = 'asignado' AND a.clase_cuota = '2')          AS boletos_mensuales,
+        COUNT(b.numero) FILTER (WHERE b.estado IN ('pendiente_adquisicion','pendiente_retiro')) AS boletos_pendientes,
+        COUNT(sb.id)    FILTER (WHERE sb.estado = 'pendiente')                                 AS solicitudes_pendientes,
+        COUNT(b.numero) FILTER (WHERE b.estado = 'asignado') * 3000                           AS ingreso_mensual
+      FROM sorteos s
+      LEFT JOIN boletos          b  ON b.sorteo_id  = s.id
+      LEFT JOIN asociados        a  ON a.codigo     = b.asociado_codigo
+      LEFT JOIN solicitudes_bono sb ON sb.sorteo_id = s.id
+      WHERE s.estado = 'activo'
+      GROUP BY s.id, s.nombre, s.estado
+      ORDER BY s.created_at
+    `);
+
+    const { rows: serie } = await pool.query(`
+      SELECT
+        DATE(sl.created_at AT TIME ZONE 'America/Bogota') AS fecha,
+        sl.sorteo_id,
+        SUM(CASE WHEN sl.accion IN ('COMPRA_DIRECTA','APROBACION')                              THEN 1 ELSE 0 END) AS adquisiciones,
+        SUM(CASE WHEN sl.accion IN ('ANULACION_DIRECTA','APROBACION_RETIRO','LIBERACION_POR_RETIRO_CSV') THEN 1 ELSE 0 END) AS liberaciones
+      FROM sorteo_logs sl
+      JOIN sorteos s ON s.id = sl.sorteo_id AND s.estado = 'activo'
+      WHERE sl.created_at >= NOW() - INTERVAL '60 days'
+        AND sl.accion IN ('COMPRA_DIRECTA','APROBACION','ANULACION_DIRECTA','APROBACION_RETIRO','LIBERACION_POR_RETIRO_CSV')
+      GROUP BY DATE(sl.created_at AT TIME ZONE 'America/Bogota'), sl.sorteo_id
+      ORDER BY fecha
+    `);
+
+    res.json({ sorteos, serie });
+  } catch (err) { next(err); }
+};
+
+
 export const listarSorteos = async (req, res, next) => {
   try {
     const { rows } = await pool.query(`

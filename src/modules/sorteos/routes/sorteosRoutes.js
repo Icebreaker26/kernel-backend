@@ -32,8 +32,12 @@ router.use(verifyToken);
 router.get('/',
   checkPermission('sorteos', 'READ'), ctrl.listarSorteos);
 
+router.get('/dashboard',
+  checkPermission('sorteos', 'READ'), ctrl.dashboard);
+
 router.post('/',
   checkPermission('sorteos', 'WRITE'), validate(crearSorteoSchema), ctrl.crearSorteo);
+
 
 router.put('/:id/estado',
   checkPermission('sorteos', 'WRITE'), ctrl.toggleEstado);

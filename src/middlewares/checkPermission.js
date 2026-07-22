@@ -1,6 +1,8 @@
 import pool from '../db/database.js';
 
 export const checkPermission = (modulo, accion) => async (req, res, next) => {
+  if (req.user.rol === 'admin') return next();
+
   const { id: usuario_uuid } = req.user;
   try {
     const { rows } = await pool.query(

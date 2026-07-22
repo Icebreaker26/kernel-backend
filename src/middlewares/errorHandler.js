@@ -6,6 +6,6 @@ export const errorHandler = (err, req, res, next) => {
     return res.status(400).json({ error: 'Datos inválidos', detalles: err.flatten() });
   }
 
-  logger.error({ message: err.message, stack: err.stack, path: req.path });
+  logger.error(`${req.path} — ${err.message}`, { stack: err.stack });
   res.status(err.status || 500).json({ error: err.message || 'Error interno del servidor' });
 };

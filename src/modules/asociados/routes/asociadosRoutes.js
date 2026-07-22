@@ -6,19 +6,19 @@ import { checkPermission } from '../../../middlewares/checkPermission.js';
 import { loginRateLimiter } from '../../../middlewares/rateLimiter.js';
 import * as ctrl from '../controllers/asociadosController.js';
 
-const router  = Router();
-const upload  = multer({ storage: multer.memoryStorage() });
+const router = Router();
+const upload = multer({ storage: multer.memoryStorage() });
 
-// Rutas públicas del portal asociado
+// ── Portal del asociado ───────────────────────────────────────────────────────
 router.post('/login',  loginRateLimiter, ctrl.loginAsociado);
 router.post('/logout', ctrl.logoutAsociado);
-router.get('/me',                        verifyAsociado, ctrl.meAsociado);
-router.put('/password',                  verifyAsociado, ctrl.cambiarPasswordAsociado);
-router.get('/notificaciones',            verifyAsociado, ctrl.listarNotificaciones);
+router.get ('/me',                         verifyAsociado, ctrl.meAsociado);
+router.put ('/password',                   verifyAsociado, ctrl.cambiarPasswordAsociado);
+router.get ('/notificaciones',             verifyAsociado, ctrl.listarNotificaciones);
 router.patch('/notificaciones/leer-todas', verifyAsociado, ctrl.marcarTodasNotifsLeidas);
-router.patch('/notificaciones/:id/leer', verifyAsociado, ctrl.marcarNotifLeida);
+router.patch('/notificaciones/:id/leer',   verifyAsociado, ctrl.marcarNotifLeida);
 
-// Rutas de administración (solo usuarios del sistema con permiso)
+// ── Administración (staff con permiso) ────────────────────────────────────────
 router.get('/',
   verifyToken, checkPermission('asociados', 'READ'),
   ctrl.listarAsociados
@@ -31,6 +31,16 @@ router.post('/importar',
 router.get('/sincronizaciones',
   verifyToken, checkPermission('asociados', 'READ'),
   ctrl.historialSincronizaciones
+);
+
+// Activación del portal (opt-in)
+router.post('/:codigo/activar-portal',
+  verifyToken, checkPermission('asociados', 'WRITE'),
+  ctrl.activarPortal
+);
+router.post('/:codigo/desactivar-portal',
+  verifyToken, checkPermission('asociados', 'WRITE'),
+  ctrl.desactivarPortal
 );
 
 export default router;

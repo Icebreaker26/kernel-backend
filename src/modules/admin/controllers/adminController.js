@@ -1,6 +1,6 @@
 import bcrypt from 'bcrypt';
 import pool from '../../../db/database.js';
-import { cambiarRolSchema, asignarPermisosSchema, resetearPasswordSchema } from '../schemas/adminSchema.js';
+import { crearUsuarioSchema, cambiarRolSchema, asignarPermisosSchema, resetearPasswordSchema } from '../schemas/adminSchema.js';
 
 const logAdmin = (usuario_uuid, accion, objetivo_tipo, objetivo_id, objetivo_nombre, detalle = null) =>
   pool.query(
@@ -8,6 +8,24 @@ const logAdmin = (usuario_uuid, accion, objetivo_tipo, objetivo_id, objetivo_nom
      VALUES ($1,$2,$3,$4,$5,$6)`,
     [usuario_uuid, accion, objetivo_tipo, objetivo_id, objetivo_nombre, detalle]
   ).catch(() => {});
+
+export const crearUsuario = async (req, res, next) => {
+  try {
+    const { nombre, email, password, rol } = crearUsuarioSchema.parse(req.body);
+    const hash = await bcrypt.hash(password, 10);
+    const { rows } = await pool.query(
+      `INSERT INTO global_usuarios (nombre, email, password_hash, rol, is_approved, is_active)
+       VALUES ($1, $2, $3, $4, true, true)
+       RETURNING id, nombre, email, rol, is_active, is_approved, created_at`,
+      [nombre, email, hash, rol]
+    );
+    await logAdmin(req.user.id, 'CREAR_USUARIO', 'usuario', rows[0].id, nombre);
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Ya existe un usuario con ese email' });
+    next(err);
+  }
+};
 
 export const listarUsuarios = async (req, res, next) => {
   try {

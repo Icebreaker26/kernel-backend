@@ -10,6 +10,7 @@ router.use(checkPermission('admin', 'READ'));
 
 router.get('/metricas',                    metricas);
 router.get('/usuarios',                    ctrl.listarUsuarios);
+router.post('/usuarios',                   checkPermission('admin', 'WRITE'), ctrl.crearUsuario);
 router.get('/usuarios/:id/permisos',       ctrl.listarPermisosUsuario);
 router.get('/modulos',                     ctrl.listarModulos);
 router.get('/logs',                        ctrl.listarAdminLogs);

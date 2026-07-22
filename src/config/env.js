@@ -8,6 +8,7 @@ const envSchema = z.object({
   PORT:         z.string().default('4000').transform(Number),
   NODE_ENV:     z.enum(['development', 'production', 'test']).default('development'),
   FRONTEND_URL: z.string().url(),
+  PORTAL_URL:   z.string().url().optional(), // portal.cooperativaprogresemos.coop en producción
 });
 
 const _env = envSchema.safeParse(process.env);

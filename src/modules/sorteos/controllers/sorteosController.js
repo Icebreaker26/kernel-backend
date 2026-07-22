@@ -321,6 +321,7 @@ export const rechazarSolicitud = async (req, res, next) => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      await assertSorteoActivo(sorteo_id);
 
       const { rows: [sol] } = await client.query(
         `SELECT * FROM solicitudes_bono WHERE id = $1 AND sorteo_id = $2 AND estado = 'pendiente' FOR UPDATE`,
@@ -573,10 +574,52 @@ export const listarAsociadosSorteo = async (req, res, next) => {
       JOIN asociados a ON a.codigo = b.asociado_codigo
       WHERE b.sorteo_id = $1 AND b.asociado_codigo IS NOT NULL
       GROUP BY a.codigo, a.nombre, a.apellido, a.movil, a.ciudad, a.nombre_empresa, a.clase_cuota
+      HAVING COUNT(b.numero) FILTER (WHERE b.estado = 'asignado') > 0
       ORDER BY a.apellido, a.nombre
     `, [id]);
 
     res.json(asociados);
+  } catch (err) { next(err); }
+};
+
+const VALOR_CUOTA = { '1': 1500, '2': 3000 };
+
+export const reporteParticipantes = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const { rows } = await pool.query(`
+      SELECT
+        a.codigo,
+        a.nombre,
+        a.apellido,
+        a.ciudad,
+        a.nombre_empresa,
+        a.clase_cuota,
+        COUNT(b.numero) FILTER (WHERE b.estado = 'asignado')::int AS boletos_activos,
+        ARRAY_AGG(b.numero ORDER BY b.numero) FILTER (WHERE b.estado = 'asignado') AS numeros_activos
+      FROM boletos b
+      JOIN asociados a ON a.codigo = b.asociado_codigo
+      WHERE b.sorteo_id = $1 AND b.estado = 'asignado'
+      GROUP BY a.codigo, a.nombre, a.apellido, a.ciudad, a.nombre_empresa, a.clase_cuota
+      HAVING COUNT(b.numero) FILTER (WHERE b.estado = 'asignado') > 0
+      ORDER BY a.apellido, a.nombre
+    `, [id]);
+
+    const reporte = rows.map((a) => ({
+      cedula:        Number(a.codigo),
+      nombre:        a.nombre,
+      apellido:      a.apellido,
+      nombre_completo: `${a.nombre} ${a.apellido}`,
+      ciudad:        a.ciudad ?? '',
+      empresa:       a.nombre_empresa ?? '',
+      clase_cuota:   a.clase_cuota === '1' ? 'Quincenal' : a.clase_cuota === '2' ? 'Mensual' : a.clase_cuota ?? '',
+      valor_cuota:   (VALOR_CUOTA[a.clase_cuota] ?? 0) * a.boletos_activos,
+      bonos:         a.boletos_activos,
+      numeros:       (a.numeros_activos ?? []).map((n) => String(n).padStart(3, '0')).join(', '),
+    }));
+
+    res.json(reporte);
   } catch (err) { next(err); }
 };
 

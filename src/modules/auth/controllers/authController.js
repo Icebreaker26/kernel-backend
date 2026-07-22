@@ -5,6 +5,21 @@ import { env } from '../../../config/env.js';
 import { loginSchema, registerSchema } from '../schemas/authSchema.js';
 import { notificarAdmins } from '../../../services/notificationService.js';
 
+const getModulos = async (userId, rol) => {
+  if (rol === 'admin') {
+    const { rows } = await pool.query(`SELECT nombre FROM modulos ORDER BY nombre`);
+    return rows.map((m) => m.nombre);
+  }
+  const { rows } = await pool.query(
+    `SELECT DISTINCT m.nombre FROM permisos p
+     JOIN modulos m ON m.id = p.modulo_id
+     JOIN acciones a ON a.id = p.accion_id
+     WHERE p.usuario_uuid = $1 AND a.nombre = 'READ'`,
+    [userId]
+  );
+  return rows.map((m) => m.nombre);
+};
+
 export const login = async (req, res, next) => {
   try {
     const { email, password } = loginSchema.parse(req.body);
@@ -34,7 +49,8 @@ export const login = async (req, res, next) => {
       maxAge: 8 * 60 * 60 * 1000,
     });
 
-    res.json({ id: user.id, nombre: user.nombre, email: user.email, rol: user.rol });
+    const modulos = await getModulos(user.id, user.rol);
+    res.json({ id: user.id, nombre: user.nombre, email: user.email, rol: user.rol, modulos });
   } catch (err) {
     next(err);
   }
@@ -80,7 +96,10 @@ export const me = async (req, res, next) => {
       [req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
-    res.json(rows[0]);
+
+    const user = rows[0];
+    const modulos = await getModulos(user.id, user.rol);
+    res.json({ ...user, modulos });
   } catch (err) {
     next(err);
   }

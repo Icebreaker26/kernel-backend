@@ -69,19 +69,30 @@ describe('Auth — login y sesión', () => {
     expect(res.status).toBe(401);
   });
 
-  test('POST /api/auth/login correcto → 200 + cookie', async () => {
+  test('POST /api/auth/login correcto → 200 + cookie + modulos', async () => {
     const res = await request(app).post('/api/auth/login').send({ email: testEmail, password: testPass });
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('email', testEmail);
+    expect(res.body).toHaveProperty('modulos');
+    expect(Array.isArray(res.body.modulos)).toBe(true);
     expect(res.headers['set-cookie']).toBeDefined();
   });
 
-  test('GET /api/auth/me autenticado → 200', async () => {
+  test('POST /api/auth/login — usuario sin permisos recibe modulos vacío', async () => {
+    const res = await request(app).post('/api/auth/login').send({ email: testEmail, password: testPass });
+    expect(res.status).toBe(200);
+    // testUser tiene rol 'usuario' sin permisos asignados
+    expect(res.body.modulos).toEqual([]);
+  });
+
+  test('GET /api/auth/me autenticado → 200 + modulos', async () => {
     const ag  = agent();
     await ag.post('/api/auth/login').send({ email: testEmail, password: testPass });
     const res = await ag.get('/api/auth/me');
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('email', testEmail);
+    expect(res.body).toHaveProperty('modulos');
+    expect(Array.isArray(res.body.modulos)).toBe(true);
   });
 
   test('POST /api/auth/logout → 200', async () => {
@@ -89,5 +100,28 @@ describe('Auth — login y sesión', () => {
     await ag.post('/api/auth/login').send({ email: testEmail, password: testPass });
     const res = await ag.post('/api/auth/logout');
     expect(res.status).toBe(200);
+  });
+});
+
+describe('Auth — modulos según permisos', () => {
+  test('Usuario con permiso READ en sorteos recibe ese módulo', async () => {
+    // Asignar permiso de lectura en sorteos al usuario de prueba
+    await pool.query(
+      `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id)
+       SELECT $1, m.id, a.id FROM modulos m, acciones a
+       WHERE m.nombre = 'sorteos' AND a.nombre = 'READ'
+       ON CONFLICT DO NOTHING`,
+      [testUserUuid]
+    );
+
+    const res = await request(app).post('/api/auth/login').send({ email: testEmail, password: testPass });
+    expect(res.status).toBe(200);
+    expect(res.body.modulos).toContain('sorteos');
+
+    // Limpiar permiso
+    await pool.query(
+      `DELETE FROM permisos WHERE usuario_uuid = $1`,
+      [testUserUuid]
+    );
   });
 });

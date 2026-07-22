@@ -3,11 +3,14 @@ import multer from 'multer';
 import { verifyToken } from '../../../middlewares/auth.js';
 import { verifyAsociado } from '../../../middlewares/authAsociado.js';
 import { checkPermission } from '../../../middlewares/checkPermission.js';
-import { loginRateLimiter } from '../../../middlewares/rateLimiter.js';
+import { loginRateLimiter, solicitarPortalLimiter } from '../../../middlewares/rateLimiter.js';
 import * as ctrl from '../controllers/asociadosController.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
+
+// ── Público: solicitud de acceso ──────────────────────────────────────────────
+router.post('/solicitar-portal', solicitarPortalLimiter, ctrl.solicitarPortal);
 
 // ── Portal del asociado ───────────────────────────────────────────────────────
 router.post('/login',  loginRateLimiter, ctrl.loginAsociado);
@@ -41,6 +44,10 @@ router.post('/:codigo/activar-portal',
 router.post('/:codigo/desactivar-portal',
   verifyToken, checkPermission('asociados', 'WRITE'),
   ctrl.desactivarPortal
+);
+router.post('/:codigo/rechazar-solicitud',
+  verifyToken, checkPermission('asociados', 'WRITE'),
+  ctrl.rechazarSolicitudPortal
 );
 
 export default router;

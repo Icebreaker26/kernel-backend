@@ -3,8 +3,8 @@ import jwt from 'jsonwebtoken';
 import { parse } from 'csv-parse/sync';
 import pool from '../../../db/database.js';
 import { env } from '../../../config/env.js';
-import { loginAsociadoSchema, importarFilaSchema } from '../schemas/asociadosSchema.js';
-import { notificarUsuario } from '../../../services/notificationService.js';
+import { loginAsociadoSchema, importarFilaSchema, solicitarPortalSchema } from '../schemas/asociadosSchema.js';
+import { notificarUsuario, notificarAdmins } from '../../../services/notificationService.js';
 
 const cookieOpts = () => ({
   httpOnly: true,
@@ -108,6 +108,49 @@ export const cambiarPasswordAsociado = async (req, res, next) => {
   }
 };
 
+// ── Portal: solicitud de acceso ───────────────────────────────────────────────
+
+export const solicitarPortal = async (req, res, next) => {
+  try {
+    const { codigo } = solicitarPortalSchema.parse(req.body);
+
+    const { rows } = await pool.query(
+      `SELECT codigo, nombre, apellido, portal_activo, solicitud_portal_at
+       FROM asociados WHERE codigo = $1 AND is_active = true`,
+      [codigo]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'No encontramos un asociado con esa cédula. Contacta a la cooperativa.' });
+    }
+
+    const asociado = rows[0];
+
+    if (asociado.portal_activo) {
+      return res.status(409).json({ error: 'Este asociado ya tiene acceso al portal.' });
+    }
+
+    if (asociado.solicitud_portal_at) {
+      return res.status(409).json({ error: 'Ya existe una solicitud pendiente para este asociado. La cooperativa te contactará pronto.' });
+    }
+
+    await pool.query(
+      `UPDATE asociados SET solicitud_portal_at = NOW(), updated_at = NOW() WHERE codigo = $1`,
+      [codigo]
+    );
+
+    notificarAdmins({
+      tipo: 'solicitud_portal',
+      mensaje: `${asociado.nombre} ${asociado.apellido} (${codigo}) solicitó acceso al portal`,
+      modulo: 'asociados',
+    }).catch(() => {});
+
+    res.json({ ok: true, mensaje: 'Solicitud enviada. La cooperativa te contactará pronto con tus credenciales de acceso.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ── Admin: activación del portal ──────────────────────────────────────────────
 
 export const activarPortal = async (req, res, next) => {
@@ -115,7 +158,7 @@ export const activarPortal = async (req, res, next) => {
     const { codigo } = req.params;
 
     const { rows } = await pool.query(
-      'SELECT codigo, nombre, apellido FROM asociados WHERE codigo = $1 AND is_active = true',
+      'SELECT codigo, nombre, apellido FROM asociados WHERE codigo = $1',
       [codigo]
     );
     if (!rows.length) return res.status(404).json({ error: 'Asociado no encontrado' });
@@ -125,7 +168,8 @@ export const activarPortal = async (req, res, next) => {
 
     await pool.query(
       `UPDATE asociados
-       SET password_hash = $1, portal_activo = true, primer_login = true, updated_at = NOW()
+       SET password_hash = $1, portal_activo = true, primer_login = true,
+           solicitud_portal_at = NULL, updated_at = NOW()
        WHERE codigo = $2`,
       [hash, codigo]
     );
@@ -148,6 +192,19 @@ export const desactivarPortal = async (req, res, next) => {
       `UPDATE asociados
        SET password_hash = NULL, portal_activo = false, primer_login = false, updated_at = NOW()
        WHERE codigo = $1`,
+      [codigo]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const rechazarSolicitudPortal = async (req, res, next) => {
+  try {
+    const { codigo } = req.params;
+    await pool.query(
+      `UPDATE asociados SET solicitud_portal_at = NULL, updated_at = NOW() WHERE codigo = $1`,
       [codigo]
     );
     res.json({ ok: true });
@@ -317,7 +374,7 @@ export const listarAsociados = async (req, res, next) => {
     if (q && q.trim()) {
       const term = `%${q.trim().toLowerCase()}%`;
       ({ rows } = await pool.query(
-        `SELECT codigo, nombre, apellido, movil, clase_cuota, nombre_empresa, ciudad, is_active, portal_activo, primer_login
+        `SELECT codigo, nombre, apellido, movil, clase_cuota, nombre_empresa, ciudad, is_active, portal_activo, primer_login, solicitud_portal_at
          FROM asociados
          WHERE LOWER(codigo) LIKE $1 OR LOWER(nombre) LIKE $1 OR LOWER(apellido) LIKE $1
             OR LOWER(nombre || ' ' || apellido) LIKE $1
@@ -327,7 +384,7 @@ export const listarAsociados = async (req, res, next) => {
       ));
     } else {
       ({ rows } = await pool.query(
-        `SELECT codigo, nombre, apellido, movil, clase_cuota, nombre_empresa, ciudad, is_active, portal_activo, primer_login
+        `SELECT codigo, nombre, apellido, movil, clase_cuota, nombre_empresa, ciudad, is_active, portal_activo, primer_login, solicitud_portal_at
          FROM asociados ORDER BY apellido, nombre`
       ));
     }

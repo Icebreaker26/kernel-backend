@@ -5,6 +5,10 @@ export const loginAsociadoSchema = z.object({
   password: z.string().min(1, 'La contraseña es obligatoria'),
 });
 
+export const solicitarPortalSchema = z.object({
+  codigo: z.string().min(1, 'El código es obligatorio'),
+});
+
 export const importarFilaSchema = z.object({
   codigo:         z.string().min(1),
   apellido:       z.string().min(1),

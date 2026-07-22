@@ -44,7 +44,7 @@ export const loginAsociado = async (req, res, next) => {
     res.cookie('token_asociado', token, {
       httpOnly: true,
       secure: env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      sameSite: env.NODE_ENV === 'production' ? 'none' : 'lax',
       maxAge: 8 * 60 * 60 * 1000,
     });
 

@@ -261,7 +261,10 @@ export const aprobarSolicitud = async (req, res, next) => {
         `SELECT * FROM solicitudes_bono WHERE id = $1 AND sorteo_id = $2 AND estado = 'pendiente' FOR UPDATE`,
         [sid, sorteo_id]
       );
-      if (!sol) return res.status(404).json({ error: 'Solicitud no encontrada o ya procesada' });
+      if (!sol) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Solicitud no encontrada o ya procesada' });
+      }
 
       if (sol.tipo === 'adquisicion') {
         await client.query(
@@ -327,7 +330,10 @@ export const rechazarSolicitud = async (req, res, next) => {
         `SELECT * FROM solicitudes_bono WHERE id = $1 AND sorteo_id = $2 AND estado = 'pendiente' FOR UPDATE`,
         [sid, sorteo_id]
       );
-      if (!sol) return res.status(404).json({ error: 'Solicitud no encontrada o ya procesada' });
+      if (!sol) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Solicitud no encontrada o ya procesada' });
+      }
 
       // Revertir estado del boleto
       const estadoAnterior = sol.tipo === 'adquisicion' ? 'libre' : 'asignado';
@@ -697,6 +703,7 @@ export const solicitarBono = async (req, res, next) => {
         [sorteo_id, asoc.empresa_dsto]
       );
       if (!emp.length) {
+        await client.query('ROLLBACK');
         return res.status(409).json({ error: 'Tu empresa no está habilitada en este sorteo' });
       }
 
@@ -704,8 +711,12 @@ export const solicitarBono = async (req, res, next) => {
         `SELECT estado FROM boletos WHERE numero = $1 AND sorteo_id = $2 FOR UPDATE`,
         [numero, sorteo_id]
       );
-      if (!boleto) return res.status(404).json({ error: 'Número no encontrado' });
+      if (!boleto) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Número no encontrado' });
+      }
       if (boleto.estado !== 'libre') {
+        await client.query('ROLLBACK');
         return res.status(409).json({ error: `El número ${numero} no está disponible` });
       }
 
@@ -759,9 +770,11 @@ export const solicitarRetiro = async (req, res, next) => {
         [numero, sorteo_id]
       );
       if (!boleto || boleto.asociado_codigo !== codigo) {
+        await client.query('ROLLBACK');
         return res.status(404).json({ error: 'No tienes este número asignado' });
       }
       if (boleto.estado !== 'asignado') {
+        await client.query('ROLLBACK');
         return res.status(409).json({ error: 'Ya tienes una solicitud pendiente para este número' });
       }
 
@@ -812,7 +825,10 @@ export const cancelarSolicitud = async (req, res, next) => {
          WHERE id = $1 AND asociado_codigo = $2 AND estado = 'pendiente' FOR UPDATE`,
         [sid, codigo]
       );
-      if (!sol) return res.status(404).json({ error: 'Solicitud no encontrada o ya procesada' });
+      if (!sol) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Solicitud no encontrada o ya procesada' });
+      }
 
       // Revertir estado del boleto
       const estadoAnterior = sol.tipo === 'adquisicion' ? 'libre' : 'asignado';

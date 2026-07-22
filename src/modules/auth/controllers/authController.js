@@ -5,6 +5,13 @@ import { env } from '../../../config/env.js';
 import { loginSchema, registerSchema } from '../schemas/authSchema.js';
 import { notificarAdmins } from '../../../services/notificationService.js';
 
+const cookieOpts = () => ({
+  httpOnly: true,
+  secure: env.NODE_ENV === 'production',
+  sameSite: env.NODE_ENV === 'production' ? 'none' : 'lax',
+  maxAge: 8 * 60 * 60 * 1000,
+});
+
 const getModulos = async (userId, rol) => {
   if (rol === 'admin') {
     const { rows } = await pool.query(`SELECT nombre FROM modulos ORDER BY nombre`);
@@ -42,12 +49,7 @@ export const login = async (req, res, next) => {
       { expiresIn: '8h' }
     );
 
-    res.cookie('token', token, {
-      httpOnly: true,
-      secure: env.NODE_ENV === 'production',
-      sameSite: env.NODE_ENV === 'production' ? 'none' : 'lax',
-      maxAge: 8 * 60 * 60 * 1000,
-    });
+    res.cookie('token', token, cookieOpts());
 
     const modulos = await getModulos(user.id, user.rol);
     res.json({ id: user.id, nombre: user.nombre, email: user.email, rol: user.rol, modulos });
@@ -57,7 +59,7 @@ export const login = async (req, res, next) => {
 };
 
 export const logout = (_req, res) => {
-  res.clearCookie('token');
+  res.clearCookie('token', cookieOpts());
   res.json({ message: 'Sesión cerrada' });
 };
 

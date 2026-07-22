@@ -32,3 +32,4 @@ export const solicitarRetiroSchema = z.object({
   numero:    z.preprocess((v) => Number(v), z.number().int().min(0).max(999)),
   sorteo_id: z.string().uuid(),
 }).strict();
+

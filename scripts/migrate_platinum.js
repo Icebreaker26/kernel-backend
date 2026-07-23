@@ -1,20 +1,26 @@
 /**
- * Sincronización desde DB vieja (Railway/platinum) hacia kernel.
+ * Migración desde DB vieja (Railway/Platinum) hacia Kernel.
+ * Platinum ya no se actualiza — este es un script de migración, no de sincronización continua.
  *
  * La DB de Railway es SOLO LECTURA — este script nunca escribe en ella.
- * Es idempotente y seguro de correr múltiples veces (re-sync).
+ * Es idempotente: seguro de correr múltiples veces.
  *
- * Qué sincroniza:
- *   - Empresas:   upsert por codigo (platinum es fuente de verdad)
- *   - Asociados:  upsert por CC — actualiza datos pero PRESERVA password_hash
- *   - Boletos:    diff completo — refleja estado exacto de Railway ahora mismo
- *   - Logs:       solo importa logs con fecha > último log importado por sorteo
- *   - Empresas habilitadas por sorteo: upsert (agrega, NO elimina)
- *   - Sorteos:    NO toca — se gestionan desde kernel
+ * Qué importa:
+ *   - Empresas:            upsert por codigo; is_active derivado de sus asociados
+ *   - Asociados:           upsert por CC; PRESERVA password_hash, valor_aporte, valor_aporte_desde
+ *   - Boletos:             importa asignados de Platinum solo en boletos libres de Kernel
+ *                          (nunca sobreescribe lo ya gestionado en Kernel)
+ *   - Logs de sorteos:     solo los nuevos (fecha > último importado por sorteo)
+ *   - Empresas habilitadas: upsert por sorteo (agrega, no elimina)
+ *   - Sorteos:             crea si no existen en Kernel; si ya existen, NO los toca
+ *
+ * NOTA: precio_boleto de sorteos NO viene de Platinum (campo Kernel-only).
+ *       Configurar manualmente en Sorteos antes de causar facturas de patronales.
  *
  * Uso:
- *   node scripts/migrate_platinum.js            -- dry-run
- *   node scripts/migrate_platinum.js --run       -- ejecutar
+ *   node scripts/migrate_platinum.js                   -- dry-run (muestra qué haría)
+ *   node scripts/migrate_platinum.js --run             -- ejecutar (importación segura)
+ *   node scripts/migrate_platinum.js --run --clean     -- limpiar todo y re-importar desde cero
  */
 
 import pg from 'pg';
@@ -60,10 +66,16 @@ async function main() {
      FROM usuarios.usuarios ORDER BY id`
   );
 
-  const empresasMap = new Map(); // codigo → nombre
+  // codigo → { nombre, is_active } — activa si tiene al menos un asociado activo
+  const empresasMap = new Map();
   for (const u of oldUsuarios) {
-    if (u.empresa_id && u.empresa_nombre && !empresasMap.has(u.empresa_id))
-      empresasMap.set(u.empresa_id, u.empresa_nombre);
+    if (!u.empresa_id || !u.empresa_nombre) continue;
+    const prev = empresasMap.get(u.empresa_id);
+    if (!prev) {
+      empresasMap.set(u.empresa_id, { nombre: u.empresa_nombre, is_active: !!u.activo });
+    } else if (u.activo) {
+      prev.is_active = true;
+    }
   }
 
   const { rows: oldSorteos } = await oldPool.query(
@@ -88,7 +100,7 @@ async function main() {
 
   // Mapa nombre_normalizado → codigo para empresas habilitadas
   const nombreACodigo = new Map();
-  for (const [codigo, nombre] of empresasMap) {
+  for (const [codigo, { nombre }] of empresasMap) {
     nombreACodigo.set(normalizar(nombre), codigo);
   }
 
@@ -148,17 +160,57 @@ async function main() {
   try {
     await client.query('BEGIN');
 
+    // ── Preservar datos gestionados en Kernel antes de limpiar ────────────────
+    // valor_aporte, historial y boletos de Kernel no vienen de Platinum
+    const savedAportes       = new Map(); // CC → valor_aporte
+    const savedAporteDesde   = new Map(); // CC → valor_aporte_desde
+    const savedHistorial     = [];
+    const savedBoletos       = [];        // [{sorteo_nombre, numero, asociado_codigo, fecha_asignacion}]
+
+    if (CLEAN) {
+      const { rows: ap } = await client.query(
+        `SELECT codigo, valor_aporte, valor_aporte_desde FROM asociados
+          WHERE valor_aporte IS NOT NULL`
+      );
+      for (const r of ap) {
+        savedAportes.set(r.codigo, r.valor_aporte);
+        if (r.valor_aporte_desde) savedAporteDesde.set(r.codigo, r.valor_aporte_desde);
+      }
+
+      const { rows: hist } = await client.query(
+        `SELECT id, asociado_codigo, valor_anterior, valor_nuevo, motivo, usuario_uuid, created_at
+         FROM asociados_aporte_historial ORDER BY created_at`
+      );
+      savedHistorial.push(...hist);
+
+      // Boletos asignados en Kernel — se restauran si Platinum no los cubre
+      const { rows: bols } = await client.query(
+        `SELECT s.nombre AS sorteo_nombre, b.numero, b.asociado_codigo, b.fecha_asignacion
+           FROM boletos b
+           JOIN sorteos s ON s.id = b.sorteo_id
+          WHERE b.estado = 'asignado'`
+      );
+      savedBoletos.push(...bols);
+
+      log(`\n  Preservando: ${savedAportes.size} valor_aporte, ${savedHistorial.length} historial de aportes, ${savedBoletos.length} boletos asignados`);
+    }
+
     // ── Limpieza previa (--clean) ─────────────────────────────────────────────
     if (CLEAN) {
       log('\n=== LIMPIANDO DATOS EXISTENTES ===');
       // Orden respetando FKs: primero hijos, luego padres
       const tablas = [
+        'patronales_pagos',
+        'patronales_detalle',
+        'patronales_logs',
+        'patronales_facturas',
         'sorteo_logs',
         'sorteo_ganadores',
         'solicitudes_bono',
         'sorteo_empresas',
         'boletos',
         'sorteos',
+        'asociados_aporte_historial',
         'asociados',
         'empresas',
       ];
@@ -171,13 +223,15 @@ async function main() {
     // ── Empresas ──────────────────────────────────────────────────────────────
     log('\n=== EMPRESAS ===');
     let eIns = 0, eUpd = 0;
-    for (const [codigo, nombre] of empresasMap) {
+    for (const [codigo, { nombre, is_active }] of empresasMap) {
       const { rowCount } = await client.query(
         `INSERT INTO empresas (codigo, nombre, is_active)
-         VALUES ($1, $2, true)
-         ON CONFLICT (codigo) DO UPDATE SET nombre = EXCLUDED.nombre, updated_at = NOW()
-         WHERE empresas.nombre IS DISTINCT FROM EXCLUDED.nombre`,
-        [codigo, nombre]
+         VALUES ($1, $2, $3)
+         ON CONFLICT (codigo) DO UPDATE
+           SET nombre    = EXCLUDED.nombre,
+               is_active = EXCLUDED.is_active,
+               updated_at = NOW()`,
+        [codigo, nombre, is_active]
       );
       rowCount > 0 ? (eIns++) : (eUpd++);
     }
@@ -228,24 +282,52 @@ async function main() {
     }
     log(`\n  Nuevos: ${aIns} | Actualizados: ${aUpd}`);
 
-    // ── Sorteos (solo si --clean los borró, o si no existen aún) ─────────────
+    // ── Restaurar datos Kernel después de --clean ─────────────────────────────
+    if (CLEAN && (savedAportes.size > 0 || savedHistorial.length > 0)) {
+      log('\n=== RESTAURANDO DATOS KERNEL ===');
+      for (const [codigo, valor] of savedAportes) {
+        await client.query(
+          `UPDATE asociados SET valor_aporte = $1, valor_aporte_desde = $2 WHERE codigo = $3`,
+          [valor, savedAporteDesde.get(codigo) ?? null, codigo]
+        );
+      }
+      log(`  valor_aporte restaurado: ${savedAportes.size} asociados`);
+
+      for (const h of savedHistorial) {
+        await client.query(
+          `INSERT INTO asociados_aporte_historial
+             (id, asociado_codigo, valor_anterior, valor_nuevo, motivo, usuario_uuid, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO NOTHING`,
+          [h.id, h.asociado_codigo, h.valor_anterior, h.valor_nuevo, h.motivo, h.usuario_uuid, h.created_at]
+        );
+      }
+      log(`  historial de aportes restaurado: ${savedHistorial.length} entradas`);
+    }
+
+    // ── Sorteos ────────────────────────────────────────────────────────────────
     log('\n=== SORTEOS ===');
     for (const s of oldSorteos) {
-      const estado = s.estado === 'activo' ? 'activo' : 'pausado';
+      if (sorteoIdMap.has(s.id)) {
+        // Ya existe: asegurar que esté activo (versiones anteriores lo creaban como 'pausado')
+        await client.query(
+          `UPDATE sorteos SET estado = 'activo', updated_at = NOW()
+           WHERE id = $1 AND estado = 'pausado'`,
+          [sorteoIdMap.get(s.id)]
+        );
+        log(`  Ya mapeado: "${s.nombre}" (activado si estaba pausado)`);
+        continue;
+      }
+      // Sin match: insertar — Platinum es un sistema vivo, todos activos
+      const estado = 'activo';
       const { rows: [ins] } = await client.query(
         `INSERT INTO sorteos (nombre, descripcion, estado)
-         VALUES ($1, $2, $3)
-         ON CONFLICT DO NOTHING RETURNING id`,
+         VALUES ($1, $2, $3) RETURNING id`,
         [s.nombre, s.descripcion ?? null, estado]
       );
-      if (ins) {
-        // Pre-poblar 1000 boletos
-        const vals = Array.from({ length: 1000 }, (_, i) => `(${i},'${ins.id}')`).join(',');
-        await client.query(`INSERT INTO boletos (numero, sorteo_id) VALUES ${vals} ON CONFLICT DO NOTHING`);
-        log(`  Creado: "${s.nombre}" → ${ins.id}`);
-      } else {
-        log(`  Ya existía: "${s.nombre}"`);
-      }
+      const vals = Array.from({ length: 1000 }, (_, i) => `(${i},'${ins.id}')`).join(',');
+      await client.query(`INSERT INTO boletos (numero, sorteo_id) VALUES ${vals} ON CONFLICT DO NOTHING`);
+      sorteoIdMap.set(s.id, ins.id);
+      log(`  Creado: "${s.nombre}" → ${ins.id}`);
     }
 
     // Reconstruir sorteoIdMap desde DB (garantiza UUIDs correctos tras clean)
@@ -259,37 +341,54 @@ async function main() {
       }
     }
 
-    // ── Boletos — diff completo por sorteo ────────────────────────────────────
-    log('\n=== BOLETOS (diff) ===');
+    // ── Boletos — importación desde Platinum (migración, no sincronización continua)
+    // Platinum ya no se actualiza. Regla: solo asigna boletos libres en Kernel.
+    // Los boletos ya asignados en Kernel (gestionados desde la app) nunca se tocan.
+    log('\n=== BOLETOS (importación desde Platinum) ===');
     const kernelCcs = new Set(
       (await client.query(`SELECT codigo FROM asociados`)).rows.map(r => r.codigo)
     );
 
+    // Mapa nombre_sorteo → UUID kernel (para restauración post-clean por nombre, no por ID)
+    const sorteoNombreAId = new Map();
     for (const [oldId, newId] of sorteoIdMap) {
-      // Estado actual de platinum para este sorteo
+      const nombre = oldSorteos.find(s => s.id === oldId)?.nombre;
+      if (nombre) sorteoNombreAId.set(nombre, newId);
+    }
+
+    for (const [oldId, newId] of sorteoIdMap) {
       const boletosDelSorteo = oldBoletos.filter(b => b.sorteo_id === oldId);
 
-      // Reset todos los boletos del sorteo a libre
-      await client.query(
-        `UPDATE boletos SET asociado_codigo = NULL, estado = 'libre', fecha_asignacion = NULL
-         WHERE sorteo_id = $1 AND estado NOT IN ('pendiente_adquisicion','pendiente_retiro')`,
-        [newId]
-      );
-
-      // Re-asignar los que tienen dueño
       let asig = 0;
       for (const b of boletosDelSorteo) {
         if (!b.asociado_cc || !kernelCcs.has(b.asociado_cc)) continue;
-        await client.query(
+        // AND estado='libre' → no sobreescribe asignaciones de Kernel
+        const { rowCount } = await client.query(
           `UPDATE boletos SET asociado_codigo=$1, estado='asignado', fecha_asignacion=$2
-           WHERE numero=$3 AND sorteo_id=$4`,
+           WHERE numero=$3 AND sorteo_id=$4 AND estado='libre'`,
           [b.asociado_cc, b.fecha_asignacion, b.numero, newId]
         );
-        asig++;
+        if (rowCount > 0) asig++;
       }
 
       const sorteoNombre = oldSorteos.find(s => s.id === oldId)?.nombre ?? newId;
       log(`  "${sorteoNombre}": ${asig} asignados`);
+    }
+
+    // Para --clean: restaurar boletos que Platinum no cubrió (gestionados en Kernel antes del clean)
+    if (CLEAN && savedBoletos.length > 0) {
+      let restaurados = 0;
+      for (const b of savedBoletos) {
+        const sorteoId = sorteoNombreAId.get(b.sorteo_nombre);
+        if (!sorteoId || !kernelCcs.has(b.asociado_codigo)) continue;
+        const { rowCount } = await client.query(
+          `UPDATE boletos SET asociado_codigo=$1, estado='asignado', fecha_asignacion=$2
+           WHERE numero=$3 AND sorteo_id=$4 AND estado='libre'`,
+          [b.asociado_codigo, b.fecha_asignacion, b.numero, sorteoId]
+        );
+        if (rowCount > 0) restaurados++;
+      }
+      if (restaurados > 0) log(`  Boletos Kernel restaurados (no estaban en Platinum): ${restaurados}`);
     }
 
     // ── Empresas habilitadas ──────────────────────────────────────────────────

@@ -23,6 +23,10 @@ export const registrarGanadorSchema = z.object({
   numero: z.preprocess((v) => Number(v), z.number().int().min(0).max(999)),
 }).strict();
 
+export const actualizarSorteoSchema = z.object({
+  precio_boleto: z.preprocess((v) => Number(v), z.number().nonnegative('El precio no puede ser negativo')),
+}).strict();
+
 export const solicitarBonoSchema = z.object({
   numero:    z.preprocess((v) => Number(v), z.number().int().min(0).max(999)),
   sorteo_id: z.string().uuid(),

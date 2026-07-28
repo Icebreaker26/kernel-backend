@@ -88,4 +88,13 @@ router.get('/:id/asociados/:codigo/historial',
 router.get('/:id/logs',
   checkPermission('sorteos', 'READ'), ctrl.listarLogs);
 
+router.get('/:id/programaciones',
+  checkPermission('sorteos', 'READ'), ctrl.listarProgramaciones);
+
+router.post('/:id/programaciones',
+  checkPermission('sorteos', 'WRITE'), ctrl.crearProgramacion);
+
+router.delete('/:id/programaciones/:pid',
+  checkPermission('sorteos', 'WRITE'), ctrl.eliminarProgramacion);
+
 export default router;

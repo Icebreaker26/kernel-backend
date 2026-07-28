@@ -915,3 +915,62 @@ export const cancelarSolicitud = async (req, res, next) => {
     }
   } catch (err) { next(err); }
 };
+
+// ── Programaciones automáticas ──────────────────────────────────────────────
+
+export const listarProgramaciones = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { rows } = await pool.query(
+      `SELECT * FROM sorteo_programaciones WHERE sorteo_id = $1 ORDER BY fecha_cierre ASC`,
+      [id]
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+};
+
+export const crearProgramacion = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { fecha_cierre, fecha_apertura } = req.body;
+
+    if (!fecha_cierre || !fecha_apertura)
+      return res.status(400).json({ error: 'fecha_cierre y fecha_apertura son requeridas' });
+
+    const cierre   = new Date(fecha_cierre);
+    const apertura = new Date(fecha_apertura);
+
+    if (isNaN(cierre.getTime()) || isNaN(apertura.getTime()))
+      return res.status(400).json({ error: 'Fechas inválidas' });
+    if (cierre <= new Date())
+      return res.status(400).json({ error: 'La fecha de cierre debe ser futura' });
+    if (apertura <= cierre)
+      return res.status(400).json({ error: 'La apertura debe ser posterior al cierre' });
+
+    const { rows: [sorteo] } = await pool.query('SELECT id FROM sorteos WHERE id = $1', [id]);
+    if (!sorteo) return res.status(404).json({ error: 'Sorteo no encontrado' });
+
+    const { rows: [prog] } = await pool.query(
+      `INSERT INTO sorteo_programaciones (sorteo_id, fecha_cierre, fecha_apertura)
+       VALUES ($1, $2, $3) RETURNING *`,
+      [id, cierre.toISOString(), apertura.toISOString()]
+    );
+    res.status(201).json(prog);
+  } catch (err) { next(err); }
+};
+
+export const eliminarProgramacion = async (req, res, next) => {
+  try {
+    const { id, pid } = req.params;
+    const { rows: [prog] } = await pool.query(
+      `SELECT * FROM sorteo_programaciones WHERE id = $1 AND sorteo_id = $2`,
+      [pid, id]
+    );
+    if (!prog) return res.status(404).json({ error: 'Programación no encontrada' });
+    if (prog.ejecutado_cierre)
+      return res.status(409).json({ error: 'No se puede eliminar una programación ya ejecutada' });
+
+    await pool.query('DELETE FROM sorteo_programaciones WHERE id = $1', [pid]);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+};

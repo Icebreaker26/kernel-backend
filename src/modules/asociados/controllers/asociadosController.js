@@ -243,8 +243,7 @@ export const importarCSV = async (req, res, next) => {
 
     await client.query('BEGIN');
 
-    const detalleNuevos      = [];
-    const detalleActualizados = [];
+    const detalleNuevos = [];
     let nuevos      = 0;
     let actualizados = 0;
 
@@ -282,9 +281,8 @@ export const importarCSV = async (req, res, next) => {
       );
 
       rows.forEach((r) => {
-        const entry = { codigo: r.codigo, nombre: r.nombre, apellido: r.apellido, empresa: r.nombre_empresa };
-        if (r.es_nuevo) { nuevos++;       detalleNuevos.push(entry); }
-        else            { actualizados++; detalleActualizados.push(entry); }
+        if (r.es_nuevo) { nuevos++; detalleNuevos.push({ codigo: r.codigo, nombre: r.nombre, apellido: r.apellido, empresa: r.nombre_empresa }); }
+        else            { actualizados++; }
       });
     }
 
@@ -370,9 +368,8 @@ export const importarCSV = async (req, res, next) => {
 
     // Auditoría
     const detalle = {
-      nuevos:      detalleNuevos,
-      actualizados: detalleActualizados,
-      retirados:   detalleRetirados,
+      nuevos:    detalleNuevos,
+      retirados: detalleRetirados,
       boletos_liberados: boletosALiberar.map((b) => ({
         numero: b.numero, sorteo_id: b.sorteo_id, codigo: b.codigo_anterior,
       })),

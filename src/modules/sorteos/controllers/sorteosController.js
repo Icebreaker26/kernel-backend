@@ -24,19 +24,19 @@ export const dashboard = async (req, res, next) => {
   try {
     const { rows: sorteos } = await pool.query(`
       SELECT
-        s.id, s.nombre, s.estado,
-        COUNT(b.numero) FILTER (WHERE b.estado = 'asignado')                                   AS boletos_asignados,
-        COUNT(b.numero) FILTER (WHERE b.estado = 'asignado' AND a.clase_cuota = '1')          AS boletos_quincenales,
-        COUNT(b.numero) FILTER (WHERE b.estado = 'asignado' AND a.clase_cuota = '2')          AS boletos_mensuales,
-        COUNT(b.numero) FILTER (WHERE b.estado IN ('pendiente_adquisicion','pendiente_retiro')) AS boletos_pendientes,
-        COUNT(sb.id)    FILTER (WHERE sb.estado = 'pendiente')                                 AS solicitudes_pendientes,
-        COUNT(b.numero) FILTER (WHERE b.estado = 'asignado') * 3000                           AS ingreso_mensual
+        s.id, s.nombre, s.estado, s.precio_boleto,
+        COUNT(b.numero) FILTER (WHERE b.estado IN ('asignado','pendiente_retiro'))                                   AS boletos_asignados,
+        COUNT(b.numero) FILTER (WHERE b.estado IN ('asignado','pendiente_retiro') AND a.clase_cuota = '1')          AS boletos_quincenales,
+        COUNT(b.numero) FILTER (WHERE b.estado IN ('asignado','pendiente_retiro') AND a.clase_cuota = '2')          AS boletos_mensuales,
+        COUNT(b.numero) FILTER (WHERE b.estado = 'pendiente_adquisicion')                                           AS boletos_pendientes,
+        COUNT(sb.id)    FILTER (WHERE sb.estado = 'pendiente')                                                      AS solicitudes_pendientes,
+        COUNT(b.numero) FILTER (WHERE b.estado IN ('asignado','pendiente_retiro')) * s.precio_boleto                AS ingreso_mensual
       FROM sorteos s
       LEFT JOIN boletos          b  ON b.sorteo_id  = s.id
       LEFT JOIN asociados        a  ON a.codigo     = b.asociado_codigo
       LEFT JOIN solicitudes_bono sb ON sb.sorteo_id = s.id
-      WHERE s.estado = 'activo'
-      GROUP BY s.id, s.nombre, s.estado
+      WHERE s.estado IN ('activo', 'pausado')
+      GROUP BY s.id, s.nombre, s.estado, s.precio_boleto
       ORDER BY s.created_at
     `);
 

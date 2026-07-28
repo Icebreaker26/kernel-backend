@@ -4,7 +4,7 @@ import { notificarAdmins } from './notificationService.js';
 
 let _timer = null;
 
-const ejecutarPendientes = async () => {
+export const ejecutarPendientes = async () => {
   // Cierres vencidos
   const { rows: cierres } = await pool.query(
     `UPDATE sorteo_programaciones p

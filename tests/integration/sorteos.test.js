@@ -351,3 +351,149 @@ describe('Sorteos — pausar', () => {
     expect(res.body.estado).toBe('activo');
   });
 });
+
+// ── Programaciones automáticas ───────────────────────────────────────────────
+
+describe('Sorteos — programaciones', () => {
+  let progId;
+  const futuro    = (minutos) => new Date(Date.now() + minutos * 60_000).toISOString();
+
+  test('GET /:id/programaciones sin token → 401', async () => {
+    const res = await request(app).get(`/api/sorteos/${sorteoId}/programaciones`);
+    expect(res.status).toBe(401);
+  });
+
+  test('POST /:id/programaciones sin body → 400', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.post(`/api/sorteos/${sorteoId}/programaciones`).send({});
+    expect(res.status).toBe(400);
+  });
+
+  test('POST /:id/programaciones con cierre en el pasado → 400', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.post(`/api/sorteos/${sorteoId}/programaciones`).send({
+      fecha_cierre:   new Date(Date.now() - 60_000).toISOString(),
+      fecha_apertura: futuro(60),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test('POST /:id/programaciones con apertura antes del cierre → 400', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.post(`/api/sorteos/${sorteoId}/programaciones`).send({
+      fecha_cierre:   futuro(60),
+      fecha_apertura: futuro(30),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test('POST /:id/programaciones válido → 201', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.post(`/api/sorteos/${sorteoId}/programaciones`).send({
+      fecha_cierre:   futuro(120),
+      fecha_apertura: futuro(240),
+    });
+    expect(res.status).toBe(201);
+    expect(res.body).toHaveProperty('id');
+    expect(res.body.ejecutado_cierre).toBe(false);
+    expect(res.body.ejecutado_apertura).toBe(false);
+    progId = res.body.id;
+  });
+
+  test('GET /:id/programaciones → 200 incluye la creada', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.get(`/api/sorteos/${sorteoId}/programaciones`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.some((p) => p.id === progId)).toBe(true);
+  });
+
+  test('DELETE /:id/programaciones/:pid → 200', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.delete(`/api/sorteos/${sorteoId}/programaciones/${progId}`);
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+  });
+
+  test('DELETE /:id/programaciones/:pid ya eliminada → 404', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.delete(`/api/sorteos/${sorteoId}/programaciones/${progId}`);
+    expect(res.status).toBe(404);
+  });
+
+  test('scheduler ejecuta cierre automático', async () => {
+    // Insertar programación con cierre ya vencido directamente en DB
+    const { rows: [prog] } = await pool.query(
+      `INSERT INTO sorteo_programaciones (sorteo_id, fecha_cierre, fecha_apertura)
+       VALUES ($1, NOW() - INTERVAL '1 second', NOW() + INTERVAL '1 hour')
+       RETURNING id`,
+      [sorteoId]
+    );
+
+    // Ejecutar el scheduler directamente (sin el catch silencioso de startScheduler)
+    const { ejecutarPendientes } = await import('../../src/services/scheduler.js');
+    await ejecutarPendientes();
+
+    // Verificar que el sorteo quedó pausado
+    const { rows: [sorteo] } = await pool.query('SELECT estado FROM sorteos WHERE id = $1', [sorteoId]);
+    expect(sorteo.estado).toBe('pausado');
+
+    // Verificar log AUTO_CIERRE
+    const { rows: logs } = await pool.query(
+      `SELECT * FROM sorteo_logs WHERE sorteo_id = $1 AND accion = 'AUTO_CIERRE'`,
+      [sorteoId]
+    );
+    expect(logs.length).toBeGreaterThan(0);
+
+    // Verificar flag ejecutado_cierre
+    const { rows: [p] } = await pool.query(
+      'SELECT ejecutado_cierre FROM sorteo_programaciones WHERE id = $1', [prog.id]
+    );
+    expect(p.ejecutado_cierre).toBe(true);
+
+    // Limpieza
+    await pool.query('DELETE FROM sorteo_programaciones WHERE id = $1', [prog.id]);
+    // Reactivar sorteo para no afectar otros tests
+    await pool.query(`UPDATE sorteos SET estado = 'activo' WHERE id = $1`, [sorteoId]);
+  });
+
+  test('scheduler ejecuta apertura automática', async () => {
+    // Insertar programación con cierre y apertura ya vencidos
+    const { rows: [prog] } = await pool.query(
+      `INSERT INTO sorteo_programaciones
+         (sorteo_id, fecha_cierre, fecha_apertura, ejecutado_cierre)
+       VALUES ($1, NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '1 second', true)
+       RETURNING id`,
+      [sorteoId]
+    );
+
+    // Pausar el sorteo manualmente para simular el estado correcto
+    await pool.query(`UPDATE sorteos SET estado = 'pausado' WHERE id = $1`, [sorteoId]);
+
+    const { ejecutarPendientes } = await import('../../src/services/scheduler.js');
+    await ejecutarPendientes();
+
+    const { rows: [sorteo] } = await pool.query('SELECT estado FROM sorteos WHERE id = $1', [sorteoId]);
+    expect(sorteo.estado).toBe('activo');
+
+    const { rows: logs } = await pool.query(
+      `SELECT * FROM sorteo_logs WHERE sorteo_id = $1 AND accion = 'AUTO_APERTURA'`,
+      [sorteoId]
+    );
+    expect(logs.length).toBeGreaterThan(0);
+
+    const { rows: [p] } = await pool.query(
+      'SELECT ejecutado_apertura FROM sorteo_programaciones WHERE id = $1', [prog.id]
+    );
+    expect(p.ejecutado_apertura).toBe(true);
+
+    await pool.query('DELETE FROM sorteo_programaciones WHERE id = $1', [prog.id]);
+  });
+});

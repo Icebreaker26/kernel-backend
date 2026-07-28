@@ -302,7 +302,7 @@ export const importarCSV = async (req, res, next) => {
     // Liberar boletos asignados a inactivos
     const { rows: boletosALiberar } = await client.query(
       `UPDATE boletos b
-          SET asociado_codigo = NULL, estado = 'libre', fecha_asignacion = NULL, updated_at = NOW()
+          SET asociado_codigo = NULL, estado = 'libre', fecha_asignacion = NULL
          FROM asociados a
         WHERE b.asociado_codigo = a.codigo
           AND a.is_active = false

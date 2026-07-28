@@ -250,32 +250,46 @@ export const importarCSV = async (req, res, next) => {
     for (let i = 0; i < validos.length; i += INSERT_BATCH) {
       const lote   = validos.slice(i, i + INSERT_BATCH);
       const params = [];
-      // 9 campos por fila — password_hash, portal_activo y primer_login no se pasan como param
+      // 15 campos por fila — password_hash, portal_activo y primer_login no se pasan como param
       const values = lote.map((d, j) => {
-        const base = j * 9;
-        params.push(d.codigo, d.apellido, d.nombre, d.direccion, d.movil,
-                    d.clase_cuota, d.empresa_dsto, d.nombre_empresa, d.ciudad);
-        return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},NULL,false,false,now())`;
+        const base = j * 15;
+        params.push(
+          d.codigo, d.apellido, d.nombre, d.direccion, d.movil,
+          d.clase_cuota, d.empresa_dsto, d.nombre_empresa, d.ciudad,
+          d.cuota ?? null,           // → valor_aporte
+          d.saldo ?? null,           // → saldo_aporte
+          d.fecha_credito ?? null,
+          d.fecha_pri_decuento ?? null,
+          d.fecha_ingreso ?? null,
+          d.fecha_reingreso ?? null,
+        );
+        return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10},$${base+11},$${base+12},$${base+13},$${base+14},$${base+15},NULL,false,false)`;
       }).join(',');
 
       const { rows } = await client.query(
         `INSERT INTO asociados
            (codigo, apellido, nombre, direccion, movil, clase_cuota, empresa_dsto, nombre_empresa, ciudad,
-            password_hash, portal_activo, primer_login, fecha_ingreso)
+            valor_aporte, saldo_aporte, fecha_credito, fecha_pri_descuento, fecha_ingreso, fecha_reingreso,
+            password_hash, portal_activo, primer_login)
          VALUES ${values}
          ON CONFLICT (codigo) DO UPDATE SET
-           apellido       = EXCLUDED.apellido,
-           nombre         = EXCLUDED.nombre,
-           direccion      = EXCLUDED.direccion,
-           movil          = EXCLUDED.movil,
-           clase_cuota    = EXCLUDED.clase_cuota,
-           empresa_dsto   = EXCLUDED.empresa_dsto,
-           nombre_empresa = EXCLUDED.nombre_empresa,
-           ciudad         = EXCLUDED.ciudad,
-           is_active      = true,
-           fecha_retiro   = NULL,
-           fecha_ingreso  = CASE WHEN asociados.is_active = false THEN now() ELSE asociados.fecha_ingreso END,
-           updated_at     = now()
+           apellido            = EXCLUDED.apellido,
+           nombre              = EXCLUDED.nombre,
+           direccion           = EXCLUDED.direccion,
+           movil               = EXCLUDED.movil,
+           clase_cuota         = EXCLUDED.clase_cuota,
+           empresa_dsto        = EXCLUDED.empresa_dsto,
+           nombre_empresa      = EXCLUDED.nombre_empresa,
+           ciudad              = EXCLUDED.ciudad,
+           valor_aporte        = COALESCE(EXCLUDED.valor_aporte, asociados.valor_aporte),
+           saldo_aporte        = COALESCE(EXCLUDED.saldo_aporte, asociados.saldo_aporte),
+           fecha_credito       = COALESCE(EXCLUDED.fecha_credito, asociados.fecha_credito),
+           fecha_pri_descuento = COALESCE(EXCLUDED.fecha_pri_descuento, asociados.fecha_pri_descuento),
+           fecha_ingreso       = COALESCE(EXCLUDED.fecha_ingreso, asociados.fecha_ingreso),
+           fecha_reingreso     = COALESCE(EXCLUDED.fecha_reingreso, asociados.fecha_reingreso),
+           is_active           = true,
+           fecha_retiro        = NULL,
+           updated_at          = now()
          RETURNING codigo, nombre, apellido, nombre_empresa, (xmax = 0) AS es_nuevo`,
         params
       );
@@ -476,7 +490,9 @@ export const perfilAsociado = async (req, res, next) => {
     const { rows: [asociado] } = await pool.query(
       `SELECT codigo, nombre, apellido, direccion, movil, clase_cuota,
               empresa_dsto, nombre_empresa, ciudad, is_active,
-              portal_activo, valor_aporte, valor_aporte_desde, created_at
+              portal_activo, valor_aporte, valor_aporte_desde, created_at,
+              saldo_aporte, fecha_credito, fecha_pri_descuento,
+              fecha_ingreso, fecha_reingreso
        FROM asociados WHERE codigo = $1`,
       [codigo]
     );

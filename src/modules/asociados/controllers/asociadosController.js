@@ -72,7 +72,9 @@ export const meAsociado = async (req, res, next) => {
   try {
     const { rows } = await pool.query(
       `SELECT codigo, nombre, apellido, direccion, movil,
-              clase_cuota, empresa_dsto, nombre_empresa, ciudad, primer_login
+              clase_cuota, empresa_dsto, nombre_empresa, ciudad, primer_login,
+              fecha_nacimiento, fecha_ingreso, fecha_reingreso,
+              valor_aporte, saldo_aporte, fecha_credito, fecha_pri_descuento
        FROM asociados WHERE codigo = $1`,
       [req.asociado.id]
     );
@@ -226,10 +228,13 @@ export const importarCSV = async (req, res, next) => {
       trim: true,
     });
 
+    // Si el CSV trae columna "linea", solo procesar las de linea=1
+    const registrosFiltrados = registros.filter((r) => !r.linea || String(r.linea).trim() === '1');
+
     const errores = [];
     const validos = [];
 
-    for (const fila of registros) {
+    for (const fila of registrosFiltrados) {
       const result = importarFilaSchema.safeParse(fila);
       if (!result.success) {
         errores.push({ fila: fila.codigo ?? '?', error: result.error.flatten() });
@@ -250,32 +255,48 @@ export const importarCSV = async (req, res, next) => {
     for (let i = 0; i < validos.length; i += INSERT_BATCH) {
       const lote   = validos.slice(i, i + INSERT_BATCH);
       const params = [];
-      // 9 campos por fila — password_hash, portal_activo y primer_login no se pasan como param
+      // 16 campos por fila — password_hash, portal_activo y primer_login no se pasan como param
       const values = lote.map((d, j) => {
-        const base = j * 9;
-        params.push(d.codigo, d.apellido, d.nombre, d.direccion, d.movil,
-                    d.clase_cuota, d.empresa_dsto, d.nombre_empresa, d.ciudad);
-        return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},NULL,false,false,now())`;
+        const base = j * 16;
+        params.push(
+          d.codigo, d.apellido, d.nombre, d.direccion, d.movil,
+          d.clase_cuota, d.empresa_dsto, d.nombre_empresa, d.ciudad,
+          d.cuota ?? null,           // → valor_aporte
+          d.saldo ?? null,           // → saldo_aporte
+          d.fecha_credito ?? null,
+          d.fecha_pri_decuento ?? null,
+          d.fecha_ingreso ?? null,
+          d.fecha_reingreso ?? null,
+          d.fecha_nacimiento ?? null,
+        );
+        return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10},$${base+11},$${base+12},$${base+13},$${base+14},$${base+15},$${base+16},NULL,false,false)`;
       }).join(',');
 
       const { rows } = await client.query(
         `INSERT INTO asociados
            (codigo, apellido, nombre, direccion, movil, clase_cuota, empresa_dsto, nombre_empresa, ciudad,
-            password_hash, portal_activo, primer_login, fecha_ingreso)
+            valor_aporte, saldo_aporte, fecha_credito, fecha_pri_descuento, fecha_ingreso, fecha_reingreso,
+            fecha_nacimiento, password_hash, portal_activo, primer_login)
          VALUES ${values}
          ON CONFLICT (codigo) DO UPDATE SET
-           apellido       = EXCLUDED.apellido,
-           nombre         = EXCLUDED.nombre,
-           direccion      = EXCLUDED.direccion,
-           movil          = EXCLUDED.movil,
-           clase_cuota    = EXCLUDED.clase_cuota,
-           empresa_dsto   = EXCLUDED.empresa_dsto,
-           nombre_empresa = EXCLUDED.nombre_empresa,
-           ciudad         = EXCLUDED.ciudad,
-           is_active      = true,
-           fecha_retiro   = NULL,
-           fecha_ingreso  = CASE WHEN asociados.is_active = false THEN now() ELSE asociados.fecha_ingreso END,
-           updated_at     = now()
+           apellido            = EXCLUDED.apellido,
+           nombre              = EXCLUDED.nombre,
+           direccion           = EXCLUDED.direccion,
+           movil               = EXCLUDED.movil,
+           clase_cuota         = EXCLUDED.clase_cuota,
+           empresa_dsto        = EXCLUDED.empresa_dsto,
+           nombre_empresa      = EXCLUDED.nombre_empresa,
+           ciudad              = EXCLUDED.ciudad,
+           valor_aporte        = COALESCE(EXCLUDED.valor_aporte, asociados.valor_aporte),
+           saldo_aporte        = COALESCE(EXCLUDED.saldo_aporte, asociados.saldo_aporte),
+           fecha_credito       = COALESCE(EXCLUDED.fecha_credito, asociados.fecha_credito),
+           fecha_pri_descuento = COALESCE(EXCLUDED.fecha_pri_descuento, asociados.fecha_pri_descuento),
+           fecha_ingreso       = COALESCE(EXCLUDED.fecha_ingreso, asociados.fecha_ingreso),
+           fecha_reingreso     = COALESCE(EXCLUDED.fecha_reingreso, asociados.fecha_reingreso),
+           fecha_nacimiento    = COALESCE(EXCLUDED.fecha_nacimiento, asociados.fecha_nacimiento),
+           is_active           = true,
+           fecha_retiro        = NULL,
+           updated_at          = now()
          RETURNING codigo, nombre, apellido, nombre_empresa, (xmax = 0) AS es_nuevo`,
         params
       );
@@ -380,7 +401,7 @@ export const importarCSV = async (req, res, next) => {
       `INSERT INTO sincronizaciones
          (usuario_uuid, archivo, total, nuevos, actualizados, retirados, errores, boletos_liberados, detalle)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [req.user.id, req.file.originalname, registros.length, nuevos, actualizados, retirados,
+      [req.user.id, req.file.originalname, registrosFiltrados.length, nuevos, actualizados, retirados,
        errores.length, boletosLiberados, JSON.stringify(detalle)]
     );
 
@@ -392,7 +413,7 @@ export const importarCSV = async (req, res, next) => {
       modulo: 'asociados',
     }).catch(() => {});
 
-    res.json({ nuevos, actualizados, retirados, boletos_liberados: boletosLiberados, errores, total: registros.length });
+    res.json({ nuevos, actualizados, retirados, boletos_liberados: boletosLiberados, errores, total: registrosFiltrados.length });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
@@ -466,6 +487,82 @@ export const listarAsociados = async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+};
+
+export const perfilAsociado = async (req, res, next) => {
+  try {
+    const { codigo } = req.params;
+
+    // Datos base
+    const { rows: [asociado] } = await pool.query(
+      `SELECT codigo, nombre, apellido, direccion, movil, clase_cuota,
+              empresa_dsto, nombre_empresa, ciudad, is_active,
+              portal_activo, solicitud_portal_at, valor_aporte, valor_aporte_desde, created_at,
+              saldo_aporte, fecha_credito, fecha_pri_descuento,
+              fecha_ingreso, fecha_reingreso, fecha_nacimiento, fecha_retiro
+       FROM asociados WHERE codigo = $1`,
+      [codigo]
+    );
+    if (!asociado) return res.status(404).json({ error: 'Asociado no encontrado' });
+
+    // Bonos activos por sorteo
+    const { rows: bonosActivos } = await pool.query(
+      `SELECT s.id AS sorteo_id, s.nombre AS sorteo_nombre, s.estado AS sorteo_estado, s.precio_boleto,
+              b.numero, b.estado, b.fecha_asignacion
+       FROM boletos b
+       JOIN sorteos s ON s.id = b.sorteo_id
+       WHERE b.asociado_codigo = $1 AND b.estado IN ('asignado','pendiente_retiro','pendiente_adquisicion')
+       ORDER BY s.nombre, b.numero`,
+      [codigo]
+    );
+
+    // Premios ganados
+    const { rows: premios } = await pool.query(
+      `SELECT sg.numero, sg.mes_premiacion, sg.fecha_premiacion, s.id AS sorteo_id, s.nombre AS sorteo_nombre
+       FROM sorteo_ganadores sg
+       JOIN sorteos s ON s.id = sg.sorteo_id
+       WHERE sg.asociado_codigo = $1
+       ORDER BY sg.mes_premiacion DESC`,
+      [codigo]
+    );
+
+    // Últimos 20 movimientos en sorteos
+    const { rows: historial } = await pool.query(
+      `SELECT sl.accion, sl.numero, sl.created_at, s.id AS sorteo_id, s.nombre AS sorteo_nombre
+       FROM sorteo_logs sl
+       JOIN sorteos s ON s.id = sl.sorteo_id
+       WHERE sl.asociado_codigo = $1
+       ORDER BY sl.created_at DESC
+       LIMIT 20`,
+      [codigo]
+    );
+
+    // Cuotas patronales: últimas 12 facturas donde aparece este asociado
+    const { rows: cuotas } = await pool.query(
+      `SELECT pf.id AS factura_id, pf.periodo, pf.estado AS factura_estado, pf.fecha_vencimiento,
+              pf.empresa_codigo, e.nombre AS empresa_nombre,
+              pd.valor_aporte_snapshot, pd.bonos_monto, pd.clase_cuota_snapshot
+       FROM patronales_detalle pd
+       JOIN patronales_facturas pf ON pf.id = pd.factura_id
+       JOIN empresas e ON e.codigo = pf.empresa_codigo
+       WHERE pd.asociado_codigo = $1 AND pf.estado != 'anulada'
+       ORDER BY pf.periodo DESC
+       LIMIT 12`,
+      [codigo]
+    );
+
+    const { rows: solicitudesPendientes } = await pool.query(
+      `SELECT sb.id, sb.sorteo_id, sb.tipo, sb.created_at,
+              s.nombre AS sorteo_nombre
+       FROM solicitudes_bono sb
+       JOIN sorteos s ON s.id = sb.sorteo_id
+       WHERE sb.asociado_codigo = $1 AND sb.estado = 'pendiente'
+       ORDER BY sb.created_at DESC`,
+      [codigo]
+    );
+
+    res.json({ asociado, bonosActivos, premios, historial, cuotas, solicitudesPendientes });
+  } catch (err) { next(err); }
 };
 
 export const listarNotificaciones = async (req, res, next) => {

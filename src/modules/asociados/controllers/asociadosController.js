@@ -468,6 +468,70 @@ export const listarAsociados = async (req, res, next) => {
   }
 };
 
+export const perfilAsociado = async (req, res, next) => {
+  try {
+    const { codigo } = req.params;
+
+    // Datos base
+    const { rows: [asociado] } = await pool.query(
+      `SELECT codigo, nombre, apellido, direccion, movil, clase_cuota,
+              empresa_dsto, nombre_empresa, ciudad, is_active,
+              portal_activo, valor_aporte, valor_aporte_desde, created_at
+       FROM asociados WHERE codigo = $1`,
+      [codigo]
+    );
+    if (!asociado) return res.status(404).json({ error: 'Asociado no encontrado' });
+
+    // Bonos activos por sorteo
+    const { rows: bonosActivos } = await pool.query(
+      `SELECT s.nombre AS sorteo_nombre, s.estado AS sorteo_estado, s.precio_boleto,
+              b.numero, b.estado, b.fecha_asignacion
+       FROM boletos b
+       JOIN sorteos s ON s.id = b.sorteo_id
+       WHERE b.asociado_codigo = $1 AND b.estado IN ('asignado','pendiente_retiro','pendiente_adquisicion')
+       ORDER BY s.nombre, b.numero`,
+      [codigo]
+    );
+
+    // Premios ganados
+    const { rows: premios } = await pool.query(
+      `SELECT sg.numero, sg.mes_premiacion, sg.fecha_premiacion, s.nombre AS sorteo_nombre
+       FROM sorteo_ganadores sg
+       JOIN sorteos s ON s.id = sg.sorteo_id
+       WHERE sg.asociado_codigo = $1
+       ORDER BY sg.mes_premiacion DESC`,
+      [codigo]
+    );
+
+    // Últimos 20 movimientos en sorteos
+    const { rows: historial } = await pool.query(
+      `SELECT sl.accion, sl.numero, sl.created_at, s.nombre AS sorteo_nombre
+       FROM sorteo_logs sl
+       JOIN sorteos s ON s.id = sl.sorteo_id
+       WHERE sl.asociado_codigo = $1
+       ORDER BY sl.created_at DESC
+       LIMIT 20`,
+      [codigo]
+    );
+
+    // Cuotas patronales: últimas 12 facturas donde aparece este asociado
+    const { rows: cuotas } = await pool.query(
+      `SELECT pf.periodo, pf.estado AS factura_estado, pf.fecha_vencimiento,
+              pf.empresa_codigo, e.nombre AS empresa_nombre,
+              pd.valor_aporte_snapshot, pd.bonos_monto, pd.clase_cuota_snapshot
+       FROM patronales_detalle pd
+       JOIN patronales_facturas pf ON pf.id = pd.factura_id
+       JOIN empresas e ON e.codigo = pf.empresa_codigo
+       WHERE pd.asociado_codigo = $1 AND pf.estado != 'anulada'
+       ORDER BY pf.periodo DESC
+       LIMIT 12`,
+      [codigo]
+    );
+
+    res.json({ asociado, bonosActivos, premios, historial, cuotas });
+  } catch (err) { next(err); }
+};
+
 export const listarNotificaciones = async (req, res, next) => {
   try {
     const { rows } = await pool.query(

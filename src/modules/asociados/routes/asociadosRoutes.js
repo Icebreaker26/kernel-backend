@@ -39,6 +39,10 @@ router.get('/sincronizaciones',
   verifyToken, checkPermission('asociados', 'READ'),
   ctrl.historialSincronizaciones
 );
+router.get('/sincronizaciones/:id',
+  verifyToken, checkPermission('asociados', 'READ'),
+  ctrl.detalleSincronizacion
+);
 
 // Activación del portal (opt-in)
 router.post('/:codigo/activar-portal',

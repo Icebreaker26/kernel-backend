@@ -243,6 +243,8 @@ export const importarCSV = async (req, res, next) => {
 
     await client.query('BEGIN');
 
+    const detalleNuevos      = [];
+    const detalleActualizados = [];
     let nuevos      = 0;
     let actualizados = 0;
 
@@ -275,21 +277,28 @@ export const importarCSV = async (req, res, next) => {
            fecha_retiro   = NULL,
            fecha_ingreso  = CASE WHEN asociados.is_active = false THEN now() ELSE asociados.fecha_ingreso END,
            updated_at     = now()
-         RETURNING (xmax = 0) AS es_nuevo`,
+         RETURNING codigo, nombre, apellido, nombre_empresa, (xmax = 0) AS es_nuevo`,
         params
       );
 
-      rows.forEach((r) => r.es_nuevo ? nuevos++ : actualizados++);
+      rows.forEach((r) => {
+        const entry = { codigo: r.codigo, nombre: r.nombre, apellido: r.apellido, empresa: r.nombre_empresa };
+        if (r.es_nuevo) { nuevos++;       detalleNuevos.push(entry); }
+        else            { actualizados++; detalleActualizados.push(entry); }
+      });
     }
 
     // Retirar asociados que ya no están en el CSV
     const { rows: retiradosRows } = await client.query(
       `UPDATE asociados SET is_active = false, fecha_retiro = now(), updated_at = now()
        WHERE codigo != ALL($1) AND is_active = true
-       RETURNING codigo`,
+       RETURNING codigo, nombre, apellido, nombre_empresa`,
       [codigosCSV]
     );
     const retirados = retiradosRows.length;
+    const detalleRetirados = retiradosRows.map((r) => ({
+      codigo: r.codigo, nombre: r.nombre, apellido: r.apellido, empresa: r.nombre_empresa,
+    }));
 
     // Liberar boletos de cualquier asociado inactivo (cubre recién retirados y syncs anteriores)
     // Cancelar solicitudes pendientes
@@ -360,10 +369,22 @@ export const importarCSV = async (req, res, next) => {
     }
 
     // Auditoría
+    const detalle = {
+      nuevos:      detalleNuevos,
+      actualizados: detalleActualizados,
+      retirados:   detalleRetirados,
+      boletos_liberados: boletosALiberar.map((b) => ({
+        numero: b.numero, sorteo_id: b.sorteo_id, codigo: b.codigo_anterior,
+      })),
+      errores,
+    };
+
     await client.query(
-      `INSERT INTO sincronizaciones (usuario_uuid, archivo, total, nuevos, actualizados, retirados, errores)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [req.user.id, req.file.originalname, registros.length, nuevos, actualizados, retirados, errores.length]
+      `INSERT INTO sincronizaciones
+         (usuario_uuid, archivo, total, nuevos, actualizados, retirados, errores, boletos_liberados, detalle)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [req.user.id, req.file.originalname, registros.length, nuevos, actualizados, retirados,
+       errores.length, boletosLiberados, JSON.stringify(detalle)]
     );
 
     await client.query('COMMIT');
@@ -395,7 +416,8 @@ export const contarPendientesPortal = async (req, res, next) => {
 export const historialSincronizaciones = async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT s.id, s.archivo, s.total, s.nuevos, s.actualizados, s.retirados, s.errores, s.created_at,
+      `SELECT s.id, s.archivo, s.total, s.nuevos, s.actualizados, s.retirados, s.errores,
+              s.boletos_liberados, s.created_at,
               u.nombre AS usuario, u.email AS usuario_email
        FROM sincronizaciones s
        JOIN global_usuarios u ON u.id = s.usuario_uuid
@@ -403,6 +425,20 @@ export const historialSincronizaciones = async (req, res, next) => {
        LIMIT 100`
     );
     res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const detalleSincronizacion = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { rows: [row] } = await pool.query(
+      `SELECT detalle FROM sincronizaciones WHERE id = $1`,
+      [id]
+    );
+    if (!row) return res.status(404).json({ error: 'Sincronización no encontrada' });
+    res.json(row.detalle ?? {});
   } catch (err) {
     next(err);
   }

@@ -1,6 +1,7 @@
 import pool from '../../../db/database.js';
 import { notificarPorPermiso, notificarAsociado } from '../../../services/notificationService.js';
 import { actualizarSorteoSchema } from '../schemas/sorteosSchema.js';
+import { reprogramar } from '../../../services/scheduler.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -956,6 +957,7 @@ export const crearProgramacion = async (req, res, next) => {
       [id, cierre.toISOString(), apertura.toISOString()]
     );
     res.status(201).json(prog);
+    reprogramar();
   } catch (err) { next(err); }
 };
 
@@ -972,5 +974,6 @@ export const eliminarProgramacion = async (req, res, next) => {
 
     await pool.query('DELETE FROM sorteo_programaciones WHERE id = $1', [pid]);
     res.json({ ok: true });
+    reprogramar();
   } catch (err) { next(err); }
 };

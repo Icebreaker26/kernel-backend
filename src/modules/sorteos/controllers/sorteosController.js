@@ -431,37 +431,73 @@ export const rechazarSolicitud = async (req, res, next) => {
 
 // ── Ganadores ───────────────────────────────────────────────────────────────
 
+// Devuelve el titular actual de un boleto (sin importar su estado)
+export const previewGanador = async (req, res, next) => {
+  try {
+    const { id: sorteo_id, numero } = req.params;
+    const { rows: [boleto] } = await pool.query(`
+      SELECT b.estado, b.asociado_codigo,
+             a.nombre, a.apellido, a.nombre_empresa, a.is_active
+      FROM boletos b
+      LEFT JOIN asociados a ON a.codigo = b.asociado_codigo
+      WHERE b.numero = $1 AND b.sorteo_id = $2
+    `, [Number(numero), sorteo_id]);
+
+    if (!boleto) return res.status(404).json({ error: 'Boleto no encontrado' });
+
+    res.json({
+      numero:          Number(numero),
+      estado:          boleto.estado,
+      asociado_codigo: boleto.asociado_codigo ?? null,
+      nombre_completo: boleto.nombre ? `${boleto.nombre} ${boleto.apellido}` : null,
+      nombre_empresa:  boleto.nombre_empresa ?? null,
+      is_active:       boleto.is_active ?? null,
+    });
+  } catch (err) { next(err); }
+};
+
 export const registrarGanador = async (req, res, next) => {
   try {
     const { id: sorteo_id } = req.params;
-    const { numero } = req.body;
+    const { numero, mes_premiacion } = req.body;
 
+    // Buscar titular actual (puede estar asignado, pendiente o libre)
     const { rows: [boleto] } = await pool.query(`
-      SELECT b.asociado_codigo, a.nombre, a.apellido, a.nombre_empresa
+      SELECT b.estado, b.asociado_codigo, a.nombre, a.apellido, a.nombre_empresa
       FROM boletos b
-      JOIN asociados a ON a.codigo = b.asociado_codigo
-      WHERE b.numero = $1 AND b.sorteo_id = $2 AND b.estado = 'asignado'
+      LEFT JOIN asociados a ON a.codigo = b.asociado_codigo
+      WHERE b.numero = $1 AND b.sorteo_id = $2
     `, [numero, sorteo_id]);
 
-    if (!boleto) {
-      return res.status(409).json({ error: `El número ${numero} no tiene titular o no está asignado` });
+    if (!boleto) return res.status(404).json({ error: 'Boleto no encontrado' });
+
+    if (!boleto.asociado_codigo) {
+      return res.status(409).json({ error: `El número ${numero} no tiene titular asignado actualmente` });
     }
+
+    const fechaMes = `${mes_premiacion}-01`; // YYYY-MM → YYYY-MM-01
 
     const { rows: [ganador] } = await pool.query(
       `INSERT INTO sorteo_ganadores
-         (sorteo_id, numero, asociado_codigo, nombre_completo, empresa_en_ese_momento)
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+         (sorteo_id, numero, asociado_codigo, nombre_completo, empresa_en_ese_momento, mes_premiacion)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
       [
-        sorteo_id, numero, boleto.asociado_codigo,
-        `${boleto.nombre} ${boleto.apellido}`,
-        boleto.nombre_empresa,
+        sorteo_id,
+        numero,
+        boleto.asociado_codigo ?? null,
+        boleto.nombre ? `${boleto.nombre} ${boleto.apellido}` : null,
+        boleto.nombre_empresa ?? null,
+        fechaMes,
       ]
     );
-    notificarAsociado(boleto.asociado_codigo, {
-      tipo: 'ganador_sorteo',
-      mensaje: `¡Felicitaciones! Eres ganador del sorteo con el número ${numero}`,
-      modulo: 'sorteos',
-    }).catch(() => {});
+
+    if (boleto.asociado_codigo) {
+      notificarAsociado(boleto.asociado_codigo, {
+        tipo: 'ganador_sorteo',
+        mensaje: `¡Felicitaciones! Eres ganador del sorteo con el número ${numero}`,
+        modulo: 'sorteos',
+      }).catch(() => {});
+    }
 
     res.status(201).json(ganador);
   } catch (err) { next(err); }
@@ -471,7 +507,7 @@ export const listarGanadores = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { rows } = await pool.query(
-      `SELECT * FROM sorteo_ganadores WHERE sorteo_id = $1 ORDER BY fecha_premiacion DESC`,
+      `SELECT * FROM sorteo_ganadores WHERE sorteo_id = $1 ORDER BY mes_premiacion DESC, fecha_premiacion DESC`,
       [id]
     );
     res.json(rows);

@@ -284,20 +284,20 @@ describe('Sorteos — ganador y logs', () => {
   test('POST /:id/ganador número sin titular → 409', async () => {
     const ag = agentAdmin();
     await loginAdmin(ag);
-    const res = await ag.post(`/api/sorteos/${sorteoId}/ganador`).send({ numero: 500 });
+    const res = await ag.post(`/api/sorteos/${sorteoId}/ganador`).send({ numero: 500, mes_premiacion: '2026-07' });
     expect(res.status).toBe(409);
   });
 
   test('POST /:id/ganador número asignado → 201', async () => {
-    // asignar número primero
     const ag = agentAdmin();
     await loginAdmin(ag);
     await ag.post(`/api/sorteos/${sorteoId}/boletos/asignar`)
       .send({ numero: 777, asociado_codigo: asocCodigo });
 
-    const res = await ag.post(`/api/sorteos/${sorteoId}/ganador`).send({ numero: 777 });
+    const res = await ag.post(`/api/sorteos/${sorteoId}/ganador`).send({ numero: 777, mes_premiacion: '2026-07' });
     expect(res.status).toBe(201);
     expect(res.body).toHaveProperty('nombre_completo');
+    expect(res.body).toHaveProperty('mes_premiacion');
   });
 
   test('GET /:id/ganadores → 200 array', async () => {

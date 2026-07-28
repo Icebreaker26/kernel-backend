@@ -72,7 +72,9 @@ export const meAsociado = async (req, res, next) => {
   try {
     const { rows } = await pool.query(
       `SELECT codigo, nombre, apellido, direccion, movil,
-              clase_cuota, empresa_dsto, nombre_empresa, ciudad, primer_login
+              clase_cuota, empresa_dsto, nombre_empresa, ciudad, primer_login,
+              fecha_nacimiento, fecha_ingreso, fecha_reingreso,
+              valor_aporte, saldo_aporte, fecha_credito, fecha_pri_descuento
        FROM asociados WHERE codigo = $1`,
       [req.asociado.id]
     );
@@ -226,10 +228,13 @@ export const importarCSV = async (req, res, next) => {
       trim: true,
     });
 
+    // Si el CSV trae columna "linea", solo procesar las de linea=1
+    const registrosFiltrados = registros.filter((r) => !r.linea || String(r.linea).trim() === '1');
+
     const errores = [];
     const validos = [];
 
-    for (const fila of registros) {
+    for (const fila of registrosFiltrados) {
       const result = importarFilaSchema.safeParse(fila);
       if (!result.success) {
         errores.push({ fila: fila.codigo ?? '?', error: result.error.flatten() });
@@ -250,9 +255,9 @@ export const importarCSV = async (req, res, next) => {
     for (let i = 0; i < validos.length; i += INSERT_BATCH) {
       const lote   = validos.slice(i, i + INSERT_BATCH);
       const params = [];
-      // 15 campos por fila — password_hash, portal_activo y primer_login no se pasan como param
+      // 16 campos por fila — password_hash, portal_activo y primer_login no se pasan como param
       const values = lote.map((d, j) => {
-        const base = j * 15;
+        const base = j * 16;
         params.push(
           d.codigo, d.apellido, d.nombre, d.direccion, d.movil,
           d.clase_cuota, d.empresa_dsto, d.nombre_empresa, d.ciudad,
@@ -262,15 +267,16 @@ export const importarCSV = async (req, res, next) => {
           d.fecha_pri_decuento ?? null,
           d.fecha_ingreso ?? null,
           d.fecha_reingreso ?? null,
+          d.fecha_nacimiento ?? null,
         );
-        return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10},$${base+11},$${base+12},$${base+13},$${base+14},$${base+15},NULL,false,false)`;
+        return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10},$${base+11},$${base+12},$${base+13},$${base+14},$${base+15},$${base+16},NULL,false,false)`;
       }).join(',');
 
       const { rows } = await client.query(
         `INSERT INTO asociados
            (codigo, apellido, nombre, direccion, movil, clase_cuota, empresa_dsto, nombre_empresa, ciudad,
             valor_aporte, saldo_aporte, fecha_credito, fecha_pri_descuento, fecha_ingreso, fecha_reingreso,
-            password_hash, portal_activo, primer_login)
+            fecha_nacimiento, password_hash, portal_activo, primer_login)
          VALUES ${values}
          ON CONFLICT (codigo) DO UPDATE SET
            apellido            = EXCLUDED.apellido,
@@ -287,6 +293,7 @@ export const importarCSV = async (req, res, next) => {
            fecha_pri_descuento = COALESCE(EXCLUDED.fecha_pri_descuento, asociados.fecha_pri_descuento),
            fecha_ingreso       = COALESCE(EXCLUDED.fecha_ingreso, asociados.fecha_ingreso),
            fecha_reingreso     = COALESCE(EXCLUDED.fecha_reingreso, asociados.fecha_reingreso),
+           fecha_nacimiento    = COALESCE(EXCLUDED.fecha_nacimiento, asociados.fecha_nacimiento),
            is_active           = true,
            fecha_retiro        = NULL,
            updated_at          = now()
@@ -394,7 +401,7 @@ export const importarCSV = async (req, res, next) => {
       `INSERT INTO sincronizaciones
          (usuario_uuid, archivo, total, nuevos, actualizados, retirados, errores, boletos_liberados, detalle)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [req.user.id, req.file.originalname, registros.length, nuevos, actualizados, retirados,
+      [req.user.id, req.file.originalname, registrosFiltrados.length, nuevos, actualizados, retirados,
        errores.length, boletosLiberados, JSON.stringify(detalle)]
     );
 
@@ -406,7 +413,7 @@ export const importarCSV = async (req, res, next) => {
       modulo: 'asociados',
     }).catch(() => {});
 
-    res.json({ nuevos, actualizados, retirados, boletos_liberados: boletosLiberados, errores, total: registros.length });
+    res.json({ nuevos, actualizados, retirados, boletos_liberados: boletosLiberados, errores, total: registrosFiltrados.length });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
@@ -490,9 +497,9 @@ export const perfilAsociado = async (req, res, next) => {
     const { rows: [asociado] } = await pool.query(
       `SELECT codigo, nombre, apellido, direccion, movil, clase_cuota,
               empresa_dsto, nombre_empresa, ciudad, is_active,
-              portal_activo, valor_aporte, valor_aporte_desde, created_at,
+              portal_activo, solicitud_portal_at, valor_aporte, valor_aporte_desde, created_at,
               saldo_aporte, fecha_credito, fecha_pri_descuento,
-              fecha_ingreso, fecha_reingreso
+              fecha_ingreso, fecha_reingreso, fecha_nacimiento, fecha_retiro
        FROM asociados WHERE codigo = $1`,
       [codigo]
     );
@@ -544,7 +551,17 @@ export const perfilAsociado = async (req, res, next) => {
       [codigo]
     );
 
-    res.json({ asociado, bonosActivos, premios, historial, cuotas });
+    const { rows: solicitudesPendientes } = await pool.query(
+      `SELECT sb.id, sb.sorteo_id, sb.tipo, sb.created_at,
+              s.nombre AS sorteo_nombre
+       FROM solicitudes_bono sb
+       JOIN sorteos s ON s.id = sb.sorteo_id
+       WHERE sb.asociado_codigo = $1 AND sb.estado = 'pendiente'
+       ORDER BY sb.created_at DESC`,
+      [codigo]
+    );
+
+    res.json({ asociado, bonosActivos, premios, historial, cuotas, solicitudesPendientes });
   } catch (err) { next(err); }
 };
 

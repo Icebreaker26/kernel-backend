@@ -40,4 +40,5 @@ export const importarFilaSchema = z.object({
   saldo:               parseMoneda, // → saldo_aporte (neg = a favor asociado)
   fecha_ingreso:       parseDate,
   fecha_reingreso:     parseDate,
-}).passthrough();               // ignora columnas extra (linea, numero, fecha_nacimiento…)
+  fecha_nacimiento:    parseDate,
+});

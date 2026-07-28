@@ -5,6 +5,7 @@ import { checkPermission } from '../../../middlewares/checkPermission.js';
 import * as ctrl from '../controllers/sorteosController.js';
 import {
   crearSorteoSchema,
+  actualizarSorteoSchema,
   asignarDirectoSchema,
   retirarDirectoSchema,
   gestionarSolicitudSchema,
@@ -38,6 +39,9 @@ router.get('/dashboard',
 router.post('/',
   checkPermission('sorteos', 'WRITE'), validate(crearSorteoSchema), ctrl.crearSorteo);
 
+
+router.put('/:id',
+  checkPermission('sorteos', 'WRITE'), validate(actualizarSorteoSchema), ctrl.actualizarSorteo);
 
 router.put('/:id/estado',
   checkPermission('sorteos', 'WRITE'), ctrl.toggleEstado);

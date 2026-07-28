@@ -1,5 +1,6 @@
 import pool from '../../../db/database.js';
 import { notificarPorPermiso, notificarAsociado } from '../../../services/notificationService.js';
+import { actualizarSorteoSchema } from '../schemas/sorteosSchema.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -100,6 +101,19 @@ export const crearSorteo = async (req, res, next) => {
     } finally {
       client.release();
     }
+  } catch (err) { next(err); }
+};
+
+export const actualizarSorteo = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { precio_boleto } = actualizarSorteoSchema.parse(req.body);
+    const { rows: [sorteo] } = await pool.query(
+      `UPDATE sorteos SET precio_boleto = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
+      [precio_boleto, id]
+    );
+    if (!sorteo) return res.status(404).json({ error: 'Sorteo no encontrado' });
+    res.json(sorteo);
   } catch (err) { next(err); }
 };
 

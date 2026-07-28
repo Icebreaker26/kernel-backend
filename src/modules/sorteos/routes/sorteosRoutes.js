@@ -67,6 +67,9 @@ router.post('/:id/solicitudes/:sid/aprobar',
 router.post('/:id/solicitudes/:sid/rechazar',
   checkPermission('sorteos', 'WRITE'), validate(gestionarSolicitudSchema), ctrl.rechazarSolicitud);
 
+router.get('/:id/boletos/:numero/preview-ganador',
+  checkPermission('sorteos', 'READ'), ctrl.previewGanador);
+
 router.post('/:id/ganador',
   checkPermission('sorteos', 'WRITE'), validate(registrarGanadorSchema), ctrl.registrarGanador);
 

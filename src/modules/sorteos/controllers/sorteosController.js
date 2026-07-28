@@ -458,47 +458,72 @@ export const previewGanador = async (req, res, next) => {
 export const registrarGanador = async (req, res, next) => {
   try {
     const { id: sorteo_id } = req.params;
-    const { numero, mes_premiacion } = req.body;
+    const { numero, mes_premiacion, asociado_codigo: codigoOverride } = req.body;
 
-    // Buscar titular actual (puede estar asignado, pendiente o libre)
-    const { rows: [boleto] } = await pool.query(`
-      SELECT b.estado, b.asociado_codigo, a.nombre, a.apellido, a.nombre_empresa
-      FROM boletos b
-      LEFT JOIN asociados a ON a.codigo = b.asociado_codigo
-      WHERE b.numero = $1 AND b.sorteo_id = $2
-    `, [numero, sorteo_id]);
+    let asociadoCodigo, nombreCompleto, empresa;
 
-    if (!boleto) return res.status(404).json({ error: 'Boleto no encontrado' });
+    if (codigoOverride) {
+      // Asociado especificado manualmente (caso retroactivo)
+      const { rows: [a] } = await pool.query(
+        `SELECT codigo, nombre, apellido, nombre_empresa FROM asociados WHERE codigo = $1 AND is_active = true`,
+        [codigoOverride]
+      );
+      if (!a) return res.status(404).json({ error: 'Asociado no encontrado' });
+      asociadoCodigo = a.codigo;
+      nombreCompleto = `${a.nombre} ${a.apellido}`;
+      empresa        = a.nombre_empresa ?? null;
+    } else {
+      // Titular actual del boleto
+      const { rows: [boleto] } = await pool.query(`
+        SELECT b.asociado_codigo, a.nombre, a.apellido, a.nombre_empresa
+        FROM boletos b
+        LEFT JOIN asociados a ON a.codigo = b.asociado_codigo
+        WHERE b.numero = $1 AND b.sorteo_id = $2
+      `, [numero, sorteo_id]);
 
-    if (!boleto.asociado_codigo) {
-      return res.status(409).json({ error: `El número ${numero} no tiene titular asignado actualmente` });
+      if (!boleto) return res.status(404).json({ error: 'Boleto no encontrado' });
+      if (!boleto.asociado_codigo) {
+        return res.status(409).json({ error: `El número ${numero} no tiene titular asignado actualmente` });
+      }
+      asociadoCodigo = boleto.asociado_codigo;
+      nombreCompleto = `${boleto.nombre} ${boleto.apellido}`;
+      empresa        = boleto.nombre_empresa ?? null;
     }
 
-    const fechaMes = `${mes_premiacion}-01`; // YYYY-MM → YYYY-MM-01
+    const fechaMes = `${mes_premiacion}-01`;
 
     const { rows: [ganador] } = await pool.query(
       `INSERT INTO sorteo_ganadores
          (sorteo_id, numero, asociado_codigo, nombre_completo, empresa_en_ese_momento, mes_premiacion)
        VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [
-        sorteo_id,
-        numero,
-        boleto.asociado_codigo ?? null,
-        boleto.nombre ? `${boleto.nombre} ${boleto.apellido}` : null,
-        boleto.nombre_empresa ?? null,
-        fechaMes,
-      ]
+      [sorteo_id, numero, asociadoCodigo, nombreCompleto, empresa, fechaMes]
     );
 
-    if (boleto.asociado_codigo) {
-      notificarAsociado(boleto.asociado_codigo, {
-        tipo: 'ganador_sorteo',
-        mensaje: `¡Felicitaciones! Eres ganador del sorteo con el número ${numero}`,
-        modulo: 'sorteos',
-      }).catch(() => {});
-    }
+    notificarAsociado(asociadoCodigo, {
+      tipo:    'ganador_sorteo',
+      mensaje: `¡Felicitaciones! Eres ganador del sorteo con el número ${numero}`,
+      modulo:  'sorteos',
+    }).catch(() => {});
 
     res.status(201).json(ganador);
+  } catch (err) { next(err); }
+};
+
+export const portalGanadores = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        s.nombre          AS sorteo_nombre,
+        sg.numero,
+        sg.mes_premiacion,
+        sg.nombre_completo,
+        sg.empresa_en_ese_momento AS empresa
+      FROM sorteo_ganadores sg
+      JOIN sorteos s ON s.id = sg.sorteo_id
+      ORDER BY sg.mes_premiacion DESC, sg.fecha_premiacion DESC
+      LIMIT 100
+    `);
+    res.json(rows);
   } catch (err) { next(err); }
 };
 
@@ -506,7 +531,11 @@ export const listarGanadores = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { rows } = await pool.query(
-      `SELECT * FROM sorteo_ganadores WHERE sorteo_id = $1 ORDER BY mes_premiacion DESC, fecha_premiacion DESC`,
+      `SELECT sg.*, a.codigo AS asociado_cc, a.nombre_empresa
+       FROM sorteo_ganadores sg
+       LEFT JOIN asociados a ON a.codigo = sg.asociado_codigo
+       WHERE sg.sorteo_id = $1
+       ORDER BY sg.mes_premiacion DESC, sg.fecha_premiacion DESC`,
       [id]
     );
     res.json(rows);

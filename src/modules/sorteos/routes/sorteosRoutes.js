@@ -23,6 +23,7 @@ const validate = (schema) => (req, res, next) => {
 
 // ── Portal asociados (verifyAsociado) ───────────────────────────────────────
 router.get('/portal/activo',                  verifyAsociado, ctrl.portalActivo);
+router.get('/portal/ganadores',               verifyAsociado, ctrl.portalGanadores);
 router.post('/portal/solicitar',              verifyAsociado, validate(solicitarBonoSchema),  ctrl.solicitarBono);
 router.post('/portal/solicitar-retiro',       verifyAsociado, validate(solicitarRetiroSchema), ctrl.solicitarRetiro);
 router.delete('/portal/solicitudes/:sid',     verifyAsociado, ctrl.cancelarSolicitud);

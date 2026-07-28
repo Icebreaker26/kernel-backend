@@ -166,7 +166,7 @@ export const listarBoletos = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { rows } = await pool.query(`
-      SELECT b.numero, b.estado, b.fecha_asignacion,
+      SELECT b.numero, b.estado, b.fecha_asignacion, b.asociado_codigo,
              a.nombre, a.apellido, a.empresa_dsto AS empresa_codigo, a.nombre_empresa
       FROM boletos b
       LEFT JOIN asociados a ON a.codigo = b.asociado_codigo

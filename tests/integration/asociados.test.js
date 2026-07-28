@@ -238,3 +238,161 @@ describe('Asociados — auditoría', () => {
     expect(res.body.length).toBeGreaterThan(0);
   });
 });
+
+// ── Detalle de sincronización ─────────────────────────────────────────────────
+
+describe('Asociados — detalle de sincronización', () => {
+  let sincId;
+
+  beforeAll(async () => {
+    const { rows } = await pool.query(
+      `SELECT id FROM sincronizaciones WHERE usuario_uuid = $1 ORDER BY created_at DESC LIMIT 1`,
+      [adminUuid]
+    );
+    sincId = rows[0]?.id;
+  });
+
+  test('GET /api/asociados/sincronizaciones/:id → 200 con estructura de detalle', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.get(`/api/asociados/sincronizaciones/${sincId}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('nuevos');
+    expect(res.body).toHaveProperty('retirados');
+    expect(res.body).toHaveProperty('boletos_liberados');
+    expect(Array.isArray(res.body.nuevos)).toBe(true);
+    expect(Array.isArray(res.body.retirados)).toBe(true);
+    expect(Array.isArray(res.body.boletos_liberados)).toBe(true);
+  });
+
+  test('GET /api/asociados/sincronizaciones/:id inexistente → 404', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.get('/api/asociados/sincronizaciones/00000000-0000-0000-0000-000000000000');
+    expect(res.status).toBe(404);
+  });
+
+  test('GET /api/asociados/sincronizaciones/:id sin token → 401', async () => {
+    const res = await request(app).get(`/api/asociados/sincronizaciones/${sincId}`);
+    expect(res.status).toBe(401);
+  });
+});
+
+// ── Liberación de boletos en sync ─────────────────────────────────────────────
+
+describe('Asociados — liberación de boletos en sync CSV', () => {
+  let sorteoId;
+  const codigoRetirado = '888888999';
+
+  const csvConRetirado = [
+    'codigo,apellido,nombre,direccion,movil,clase_cuota,empresa_dsto,nombre_empresa,ciudad',
+    `${testCodigo},Torres,Test,Calle 1,3001234567,1,EMP01,Empresa Test,Pereira`,
+    `${codigoRetirado},Gomez,Prueba,Calle 2,3009999999,2,EMP01,Empresa Test,Bogota`,
+  ].join('\n');
+
+  const csvSinRetirado = [
+    'codigo,apellido,nombre,direccion,movil,clase_cuota,empresa_dsto,nombre_empresa,ciudad',
+    `${testCodigo},Torres,Test,Calle 1,3001234567,1,EMP01,Empresa Test,Pereira`,
+  ].join('\n');
+
+  beforeAll(async () => {
+    // Importar el asociado que luego se retirará
+    await pool.query(
+      `INSERT INTO asociados (codigo, apellido, nombre, direccion, movil, clase_cuota, empresa_dsto, nombre_empresa, ciudad)
+       VALUES ($1,'Gomez','Prueba','Calle 2','3009999999','2','EMP01','Empresa Test','Bogota')
+       ON CONFLICT (codigo) DO UPDATE SET is_active = true, fecha_retiro = NULL`,
+      [codigoRetirado]
+    );
+
+    // Crear sorteo y boleto asignado a ese asociado
+    const { rows: [s] } = await pool.query(
+      `INSERT INTO sorteos (nombre, estado) VALUES ('Sorteo Sync Test', 'activo') RETURNING id`
+    );
+    sorteoId = s.id;
+
+    await pool.query(
+      `INSERT INTO boletos (numero, sorteo_id, asociado_codigo, estado, fecha_asignacion)
+       VALUES (999, $1, $2, 'asignado', NOW())
+       ON CONFLICT (numero, sorteo_id) DO UPDATE SET estado = 'asignado', asociado_codigo = $2`,
+      [sorteoId, codigoRetirado]
+    );
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM sorteo_logs    WHERE sorteo_id = $1',      [sorteoId]);
+    await pool.query('DELETE FROM boletos        WHERE sorteo_id = $1',      [sorteoId]);
+    await pool.query('DELETE FROM sorteos        WHERE id = $1',             [sorteoId]);
+    await pool.query('DELETE FROM asociados      WHERE codigo = $1',         [codigoRetirado]);
+    await pool.query('DELETE FROM sincronizaciones WHERE usuario_uuid = $1', [adminUuid]);
+  });
+
+  test('sync que incluye el asociado → boleto sigue asignado', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag
+      .post('/api/asociados/importar')
+      .attach('archivo', Buffer.from(csvConRetirado), 'con_retirado.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.boletos_liberados).toBe(0);
+
+    const { rows: [b] } = await pool.query(
+      'SELECT estado FROM boletos WHERE numero = 999 AND sorteo_id = $1', [sorteoId]
+    );
+    expect(b.estado).toBe('asignado');
+  });
+
+  test('sync sin el asociado → boleto queda libre', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag
+      .post('/api/asociados/importar')
+      .attach('archivo', Buffer.from(csvSinRetirado), 'sin_retirado.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.retirados).toBeGreaterThan(0);
+    expect(res.body.boletos_liberados).toBeGreaterThan(0);
+
+    const { rows: [b] } = await pool.query(
+      'SELECT estado, asociado_codigo FROM boletos WHERE numero = 999 AND sorteo_id = $1', [sorteoId]
+    );
+    expect(b.estado).toBe('libre');
+    expect(b.asociado_codigo).toBeNull();
+  });
+
+  test('log LIBERACION_POR_RETIRO_CSV registrado en sorteo_logs', async () => {
+    const { rows } = await pool.query(
+      `SELECT * FROM sorteo_logs WHERE sorteo_id = $1 AND accion = 'LIBERACION_POR_RETIRO_CSV'`,
+      [sorteoId]
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0].asociado_codigo).toBe(codigoRetirado);
+    expect(rows[0].numero).toBe(999);
+  });
+
+  test('detalle del sync refleja retirado y boleto liberado', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+
+    const { rows: [sinc] } = await pool.query(
+      `SELECT id FROM sincronizaciones WHERE usuario_uuid = $1 ORDER BY created_at DESC LIMIT 1`,
+      [adminUuid]
+    );
+    const res = await ag.get(`/api/asociados/sincronizaciones/${sinc.id}`);
+    expect(res.status).toBe(200);
+
+    const retiradoCodigos = res.body.retirados.map((r) => r.codigo);
+    expect(retiradoCodigos).toContain(codigoRetirado);
+
+    const boletosLiberados = res.body.boletos_liberados.map((b) => b.numero);
+    expect(boletosLiberados).toContain(999);
+  });
+
+  test('sync idempotente → boletos ya libres no se cuentan de nuevo', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag
+      .post('/api/asociados/importar')
+      .attach('archivo', Buffer.from(csvSinRetirado), 'idem.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.boletos_liberados).toBe(0);
+  });
+});

@@ -283,11 +283,46 @@ export const importarCSV = async (req, res, next) => {
     }
 
     // Retirar asociados que ya no están en el CSV
-    const { rowCount: retirados } = await client.query(
+    const { rows: retiradosRows } = await client.query(
       `UPDATE asociados SET is_active = false, fecha_retiro = now(), updated_at = now()
-       WHERE codigo != ALL($1) AND is_active = true`,
+       WHERE codigo != ALL($1) AND is_active = true
+       RETURNING codigo`,
       [codigosCSV]
     );
+    const retirados       = retiradosRows.length;
+    const codigosRetirados = retiradosRows.map((r) => r.codigo);
+
+    // Liberar boletos de asociados retirados
+    let boletosLiberados = 0;
+    if (codigosRetirados.length > 0) {
+      // Cancelar solicitudes pendientes de los retirados
+      await client.query(
+        `UPDATE solicitudes_bono SET estado = 'cancelada', updated_at = NOW()
+         WHERE asociado_codigo = ANY($1) AND estado = 'pendiente'`,
+        [codigosRetirados]
+      );
+
+      // Obtener boletos a liberar (asignado o pendiente_retiro)
+      const { rows: boletosALiberar } = await client.query(
+        `UPDATE boletos
+            SET asociado_codigo = NULL, estado = 'libre', fecha_asignacion = NULL, updated_at = NOW()
+          WHERE asociado_codigo = ANY($1)
+            AND estado IN ('asignado', 'pendiente_retiro')
+          RETURNING numero, sorteo_id, asociado_codigo AS codigo_anterior`,
+        [codigosRetirados]
+      );
+
+      boletosLiberados = boletosALiberar.length;
+
+      // Registrar en sorteo_logs
+      for (const b of boletosALiberar) {
+        await client.query(
+          `INSERT INTO sorteo_logs (sorteo_id, numero, accion, asociado_codigo, empleado_uuid, detalle)
+           VALUES ($1, $2, 'LIBERACION_POR_RETIRO_CSV', $3, $4, 'Asociado retirado en sincronización de padrón')`,
+          [b.sorteo_id, b.numero, b.codigo_anterior, req.user.id]
+        );
+      }
+    }
 
     // Sincronizar empresas
     const empresasMap = new Map();
@@ -338,11 +373,11 @@ export const importarCSV = async (req, res, next) => {
 
     notificarUsuario(req.user.id, {
       tipo: 'sincronizacion_completada',
-      mensaje: `Importación completada: ${nuevos} nuevos, ${actualizados} actualizados, ${retirados} retirados`,
+      mensaje: `Importación completada: ${nuevos} nuevos, ${actualizados} actualizados, ${retirados} retirados, ${boletosLiberados} boletos liberados`,
       modulo: 'asociados',
     }).catch(() => {});
 
-    res.json({ nuevos, actualizados, retirados, errores, total: registros.length });
+    res.json({ nuevos, actualizados, retirados, boletos_liberados: boletosLiberados, errores, total: registros.length });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);

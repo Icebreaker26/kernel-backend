@@ -20,8 +20,9 @@ export const gestionarSolicitudSchema = z.object({
 }).strict();
 
 export const registrarGanadorSchema = z.object({
-  numero:         z.preprocess((v) => Number(v), z.number().int().min(0).max(999)),
-  mes_premiacion: z.string().regex(/^\d{4}-\d{2}$/, 'Formato requerido: YYYY-MM'),
+  numero:          z.preprocess((v) => Number(v), z.number().int().min(0).max(999)),
+  mes_premiacion:  z.string().regex(/^\d{4}-\d{2}$/, 'Formato requerido: YYYY-MM'),
+  asociado_codigo: z.string().min(1).optional(),
 }).strict();
 
 export const actualizarSorteoSchema = z.object({

@@ -484,7 +484,7 @@ export const perfilAsociado = async (req, res, next) => {
 
     // Bonos activos por sorteo
     const { rows: bonosActivos } = await pool.query(
-      `SELECT s.nombre AS sorteo_nombre, s.estado AS sorteo_estado, s.precio_boleto,
+      `SELECT s.id AS sorteo_id, s.nombre AS sorteo_nombre, s.estado AS sorteo_estado, s.precio_boleto,
               b.numero, b.estado, b.fecha_asignacion
        FROM boletos b
        JOIN sorteos s ON s.id = b.sorteo_id
@@ -495,7 +495,7 @@ export const perfilAsociado = async (req, res, next) => {
 
     // Premios ganados
     const { rows: premios } = await pool.query(
-      `SELECT sg.numero, sg.mes_premiacion, sg.fecha_premiacion, s.nombre AS sorteo_nombre
+      `SELECT sg.numero, sg.mes_premiacion, sg.fecha_premiacion, s.id AS sorteo_id, s.nombre AS sorteo_nombre
        FROM sorteo_ganadores sg
        JOIN sorteos s ON s.id = sg.sorteo_id
        WHERE sg.asociado_codigo = $1
@@ -505,7 +505,7 @@ export const perfilAsociado = async (req, res, next) => {
 
     // Últimos 20 movimientos en sorteos
     const { rows: historial } = await pool.query(
-      `SELECT sl.accion, sl.numero, sl.created_at, s.nombre AS sorteo_nombre
+      `SELECT sl.accion, sl.numero, sl.created_at, s.id AS sorteo_id, s.nombre AS sorteo_nombre
        FROM sorteo_logs sl
        JOIN sorteos s ON s.id = sl.sorteo_id
        WHERE sl.asociado_codigo = $1
@@ -516,7 +516,7 @@ export const perfilAsociado = async (req, res, next) => {
 
     // Cuotas patronales: últimas 12 facturas donde aparece este asociado
     const { rows: cuotas } = await pool.query(
-      `SELECT pf.periodo, pf.estado AS factura_estado, pf.fecha_vencimiento,
+      `SELECT pf.id AS factura_id, pf.periodo, pf.estado AS factura_estado, pf.fecha_vencimiento,
               pf.empresa_codigo, e.nombre AS empresa_nombre,
               pd.valor_aporte_snapshot, pd.bonos_monto, pd.clase_cuota_snapshot
        FROM patronales_detalle pd

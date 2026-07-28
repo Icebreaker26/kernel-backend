@@ -703,13 +703,13 @@ export const portalActivo = async (req, res, next) => {
   try {
     const codigo = req.asociado.id;
 
-    // Sorteo activo donde la empresa del asociado esté habilitada
+    // Sorteo activo o pausado donde la empresa del asociado esté habilitada
     const { rows: [sorteo] } = await pool.query(`
       SELECT s.*
       FROM sorteos s
       JOIN sorteo_empresas se ON se.sorteo_id = s.id
       JOIN asociados a ON a.empresa_dsto = se.empresa_codigo
-      WHERE s.estado = 'activo' AND a.codigo = $1
+      WHERE s.estado IN ('activo', 'pausado') AND a.codigo = $1
       ORDER BY s.created_at DESC
       LIMIT 1
     `, [codigo]);
@@ -726,11 +726,13 @@ export const portalActivo = async (req, res, next) => {
       ORDER BY b.numero
     `, [codigo, sorteo.id]);
 
-    const { rows: disponibles } = await pool.query(`
-      SELECT numero FROM boletos
-      WHERE sorteo_id = $1 AND estado = 'libre'
-      ORDER BY numero
-    `, [sorteo.id]);
+    // No mostrar disponibles si el sorteo está pausado
+    const disponibles = sorteo.estado === 'activo'
+      ? (await pool.query(
+          `SELECT numero FROM boletos WHERE sorteo_id = $1 AND estado = 'libre' ORDER BY numero`,
+          [sorteo.id]
+        )).rows
+      : [];
 
     res.json({ sorteo, mis_boletos, disponibles });
   } catch (err) { next(err); }

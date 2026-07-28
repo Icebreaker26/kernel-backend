@@ -289,39 +289,36 @@ export const importarCSV = async (req, res, next) => {
        RETURNING codigo`,
       [codigosCSV]
     );
-    const retirados       = retiradosRows.length;
-    const codigosRetirados = retiradosRows.map((r) => r.codigo);
+    const retirados = retiradosRows.length;
 
-    // Liberar boletos de asociados retirados
-    let boletosLiberados = 0;
-    if (codigosRetirados.length > 0) {
-      // Cancelar solicitudes pendientes de los retirados
+    // Liberar boletos de cualquier asociado inactivo (cubre recién retirados y syncs anteriores)
+    // Cancelar solicitudes pendientes
+    await client.query(
+      `UPDATE solicitudes_bono sb SET estado = 'cancelada', updated_at = NOW()
+       FROM asociados a
+       WHERE sb.asociado_codigo = a.codigo AND a.is_active = false AND sb.estado = 'pendiente'`
+    );
+
+    // Liberar boletos asignados a inactivos
+    const { rows: boletosALiberar } = await client.query(
+      `UPDATE boletos b
+          SET asociado_codigo = NULL, estado = 'libre', fecha_asignacion = NULL, updated_at = NOW()
+         FROM asociados a
+        WHERE b.asociado_codigo = a.codigo
+          AND a.is_active = false
+          AND b.estado IN ('asignado', 'pendiente_retiro')
+        RETURNING b.numero, b.sorteo_id, a.codigo AS codigo_anterior`
+    );
+
+    const boletosLiberados = boletosALiberar.length;
+
+    // Registrar en sorteo_logs
+    for (const b of boletosALiberar) {
       await client.query(
-        `UPDATE solicitudes_bono SET estado = 'cancelada', updated_at = NOW()
-         WHERE asociado_codigo = ANY($1) AND estado = 'pendiente'`,
-        [codigosRetirados]
+        `INSERT INTO sorteo_logs (sorteo_id, numero, accion, asociado_codigo, empleado_uuid, detalle)
+         VALUES ($1, $2, 'LIBERACION_POR_RETIRO_CSV', $3, $4, 'Asociado retirado en sincronización de padrón')`,
+        [b.sorteo_id, b.numero, b.codigo_anterior, req.user.id]
       );
-
-      // Obtener boletos a liberar (asignado o pendiente_retiro)
-      const { rows: boletosALiberar } = await client.query(
-        `UPDATE boletos
-            SET asociado_codigo = NULL, estado = 'libre', fecha_asignacion = NULL, updated_at = NOW()
-          WHERE asociado_codigo = ANY($1)
-            AND estado IN ('asignado', 'pendiente_retiro')
-          RETURNING numero, sorteo_id, asociado_codigo AS codigo_anterior`,
-        [codigosRetirados]
-      );
-
-      boletosLiberados = boletosALiberar.length;
-
-      // Registrar en sorteo_logs
-      for (const b of boletosALiberar) {
-        await client.query(
-          `INSERT INTO sorteo_logs (sorteo_id, numero, accion, asociado_codigo, empleado_uuid, detalle)
-           VALUES ($1, $2, 'LIBERACION_POR_RETIRO_CSV', $3, $4, 'Asociado retirado en sincronización de padrón')`,
-          [b.sorteo_id, b.numero, b.codigo_anterior, req.user.id]
-        );
-      }
     }
 
     // Sincronizar empresas

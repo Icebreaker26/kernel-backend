@@ -340,12 +340,18 @@ export const importarCSV = async (req, res, next) => {
 
     const boletosLiberados = boletosALiberar.length;
 
-    // Registrar en sorteo_logs
-    for (const b of boletosALiberar) {
+    // Registrar en sorteo_logs — un solo INSERT con unnest en lugar de N queries
+    if (boletosALiberar.length > 0) {
       await client.query(
         `INSERT INTO sorteo_logs (sorteo_id, numero, accion, asociado_codigo, empleado_uuid, detalle)
-         VALUES ($1, $2, 'LIBERACION_POR_RETIRO_CSV', $3, $4, 'Asociado retirado en sincronización de padrón')`,
-        [b.sorteo_id, b.numero, b.codigo_anterior, req.user.id]
+         SELECT unnest($1::uuid[]), unnest($2::int[]), 'LIBERACION_POR_RETIRO_CSV',
+                unnest($3::text[]), $4, 'Asociado retirado en sincronización de padrón'`,
+        [
+          boletosALiberar.map((b) => b.sorteo_id),
+          boletosALiberar.map((b) => b.numero),
+          boletosALiberar.map((b) => b.codigo_anterior),
+          req.user.id,
+        ]
       );
     }
 
@@ -387,6 +393,74 @@ export const importarCSV = async (req, res, next) => {
       );
     }
 
+    // ── Reconciliación línea 15 (cobros externos vs Kernel) ──────────────────────
+    let discrepancias = null;
+
+    const filas15 = registros.filter((r) => String(r.linea ?? '').trim() === '15');
+
+    if (filas15.length > 0) {
+      const parseCuotaCOP = (str) => {
+        const cleaned = String(str ?? '0').trim().replace(/\./g, '').replace(',', '.');
+        return parseFloat(cleaned) || 0;
+      };
+
+      // Un registro por código — tomar el primero
+      const mapa15 = new Map();
+      for (const r of filas15) {
+        if (!mapa15.has(r.codigo)) {
+          mapa15.set(r.codigo, {
+            cuota_externa: parseCuotaCOP(r.cuota),
+            clase_cuota:   String(r.clase_cuota ?? '2').trim(),
+            nombre:        `${(r.nombre ?? '').trim()} ${(r.apellido ?? '').trim()}`.trim(),
+            empresa:       (r.nombre_empresa ?? r.empresa_dsto ?? '').trim(),
+          });
+        }
+      }
+
+      // Total mensual en Kernel por asociado — dentro de la transacción, ve boletos ya liberados
+      const { rows: boletosKernel } = await client.query(`
+        SELECT b.asociado_codigo, SUM(s.precio_boleto)::numeric AS total_mensual
+        FROM boletos b
+        JOIN sorteos s ON s.id = b.sorteo_id
+        WHERE b.estado = 'asignado' AND s.estado = 'activo' AND s.precio_boleto > 0
+        GROUP BY b.asociado_codigo
+      `);
+      const boletosMap        = new Map(boletosKernel.map((r) => [r.asociado_codigo, parseFloat(r.total_mensual)]));
+      const codigosActivosSet = new Set(codigosCSV);
+      const validosMap        = new Map(validos.map((v) => [v.codigo, v]));
+
+      discrepancias = [];
+
+      // Revisar cada entrada de línea 15
+      for (const [codigo, d] of mapa15) {
+        const activo       = codigosActivosSet.has(codigo);
+        const totalMensual = boletosMap.get(codigo) ?? 0;
+        const factor       = d.clase_cuota === '1' ? 2 : 1;
+        const cuotaKernel  = Math.round((totalMensual / factor) * 100) / 100;
+        const cuotaExterna = Math.round(d.cuota_externa * 100) / 100;
+
+        if (!activo) {
+          discrepancias.push({ tipo: 'COBRO_A_RETIRADO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0 });
+        } else if (totalMensual === 0) {
+          discrepancias.push({ tipo: 'COBRO_SIN_BOLETO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0 });
+        } else if (Math.abs(cuotaExterna - cuotaKernel) > 1) {
+          discrepancias.push({ tipo: 'MONTO_INCORRECTO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: cuotaKernel, diferencia: Math.round((cuotaExterna - cuotaKernel) * 100) / 100 });
+        }
+      }
+
+      // Activos con boletos en Kernel pero sin línea 15 en el CSV
+      for (const [codigo, totalMensual] of boletosMap) {
+        if (!mapa15.has(codigo) && codigosActivosSet.has(codigo)) {
+          const asocData = validosMap.get(codigo);
+          if (asocData) {
+            const factor      = asocData.clase_cuota === '1' ? 2 : 1;
+            const cuotaKernel = Math.round((totalMensual / factor) * 100) / 100;
+            discrepancias.push({ tipo: 'SIN_COBRO_EXTERNO', codigo, nombre: `${asocData.nombre} ${asocData.apellido}`, empresa: asocData.nombre_empresa, cuota_externa: 0, cuota_kernel: cuotaKernel });
+          }
+        }
+      }
+    }
+
     // Auditoría
     const detalle = {
       nuevos:    detalleNuevos,
@@ -395,6 +469,7 @@ export const importarCSV = async (req, res, next) => {
         numero: b.numero, sorteo_id: b.sorteo_id, codigo: b.codigo_anterior,
       })),
       errores,
+      discrepancias,
     };
 
     await client.query(
@@ -413,7 +488,7 @@ export const importarCSV = async (req, res, next) => {
       modulo: 'asociados',
     }).catch(() => {});
 
-    res.json({ nuevos, actualizados, retirados, boletos_liberados: boletosLiberados, errores, total: registrosFiltrados.length });
+    res.json({ nuevos, actualizados, retirados, boletos_liberados: boletosLiberados, errores, total: registrosFiltrados.length, discrepancias });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
@@ -439,7 +514,11 @@ export const historialSincronizaciones = async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT s.id, s.archivo, s.total, s.nuevos, s.actualizados, s.retirados, s.errores,
               s.boletos_liberados, s.created_at,
-              u.nombre AS usuario, u.email AS usuario_email
+              u.nombre AS usuario, u.email AS usuario_email,
+              CASE WHEN jsonb_typeof(s.detalle->'discrepancias') = 'array'
+                   THEN jsonb_array_length(s.detalle->'discrepancias')
+                   ELSE NULL
+              END AS discrepancias_count
        FROM sincronizaciones s
        JOIN global_usuarios u ON u.id = s.usuario_uuid
        ORDER BY s.created_at DESC

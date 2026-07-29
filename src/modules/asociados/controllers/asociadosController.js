@@ -422,12 +422,15 @@ export const importarCSV = async (req, res, next) => {
   }
 };
 
-export const contarPendientesPortal = async (req, res, next) => {
+export const listarPendientesPortal = async (req, res, next) => {
   try {
-    const { rows: [{ count }] } = await pool.query(
-      `SELECT COUNT(*) FROM asociados WHERE solicitud_portal_at IS NOT NULL AND portal_activo = false`
+    const { rows } = await pool.query(
+      `SELECT codigo, nombre, apellido, movil, nombre_empresa, solicitud_portal_at
+       FROM asociados
+       WHERE solicitud_portal_at IS NOT NULL AND portal_activo = false
+       ORDER BY solicitud_portal_at ASC`
     );
-    res.json({ count: Number(count) });
+    res.json(rows);
   } catch (err) { next(err); }
 };
 

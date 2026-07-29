@@ -31,6 +31,7 @@ export const importarFilaSchema = z.object({
   direccion:           z.string().optional().default(''),
   movil:               z.string().optional().default(''),
   clase_cuota:         z.string().optional().default(''),
+  periodo_descto:      z.string().optional().default(''), // '1'=mensual, '2'=quincenal — fuente de verdad
   empresa_dsto:        z.string().optional().default(''),
   nombre_empresa:      z.string().optional().default(''),
   ciudad:              z.string().optional().default(''),

@@ -396,3 +396,81 @@ describe('Asociados — liberación de boletos en sync CSV', () => {
     expect(res.body.boletos_liberados).toBe(0);
   });
 });
+
+// ── Historial de aportes ──────────────────────────────────────────────────────
+
+describe('Asociados — historial de aportes', () => {
+  beforeAll(async () => {
+    // Asegura que el asociado de test existe con valores de aporte
+    await pool.query(
+      `UPDATE asociados SET valor_aporte = 50000, saldo_aporte = 0 WHERE codigo = $1`,
+      [testCodigo]
+    );
+    // Forzar un cambio para que el trigger dispare
+    await pool.query(
+      `UPDATE asociados SET valor_aporte = 60000 WHERE codigo = $1`,
+      [testCodigo]
+    );
+  });
+
+  afterAll(async () => {
+    await pool.query(
+      `DELETE FROM asociado_historial_aporte WHERE asociado_codigo = $1`,
+      [testCodigo]
+    );
+  });
+
+  test('GET /api/asociados/:codigo/historial-aporte sin token → 401', async () => {
+    const res = await request(app).get(`/api/asociados/${testCodigo}/historial-aporte`);
+    expect(res.status).toBe(401);
+  });
+
+  test('GET /api/asociados/:codigo/historial-aporte → 200 array', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.get(`/api/asociados/${testCodigo}/historial-aporte`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  test('El trigger registra el cambio de valor_aporte', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag.get(`/api/asociados/${testCodigo}/historial-aporte`);
+    const cambioAporte = body.find((h) => h.campo === 'valor_aporte');
+    expect(cambioAporte).toBeDefined();
+    expect(cambioAporte).toHaveProperty('valor_anterior');
+    expect(cambioAporte).toHaveProperty('valor_nuevo');
+    expect(cambioAporte).toHaveProperty('changed_at');
+    expect(Number(cambioAporte.valor_anterior)).toBe(50000);
+    expect(Number(cambioAporte.valor_nuevo)).toBe(60000);
+  });
+
+  test('El trigger no registra si el valor no cambia', async () => {
+    // Misma operación UPDATE sin cambio de valor
+    const { rowCount: antes } = await pool.query(
+      `SELECT * FROM asociado_historial_aporte WHERE asociado_codigo = $1`, [testCodigo]
+    );
+    await pool.query(
+      `UPDATE asociados SET valor_aporte = 60000 WHERE codigo = $1`, [testCodigo]
+    );
+    const { rows: despues } = await pool.query(
+      `SELECT * FROM asociado_historial_aporte WHERE asociado_codigo = $1`, [testCodigo]
+    );
+    // No debe haber crecido
+    expect(despues.length).toBe(antes);
+  });
+
+  test('Cada entrada del historial tiene estructura correcta', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag.get(`/api/asociados/${testCodigo}/historial-aporte`);
+    if (body.length > 0) {
+      const entry = body[0];
+      expect(entry).toHaveProperty('campo');
+      expect(entry).toHaveProperty('valor_anterior');
+      expect(entry).toHaveProperty('valor_nuevo');
+      expect(entry).toHaveProperty('changed_at');
+    }
+  });
+});

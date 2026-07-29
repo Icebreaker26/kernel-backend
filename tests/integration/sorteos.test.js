@@ -497,3 +497,53 @@ describe('Sorteos — programaciones', () => {
     await pool.query('DELETE FROM sorteo_programaciones WHERE id = $1', [prog.id]);
   });
 });
+
+// ── Cobertura por empresa ─────────────────────────────────────────────────────
+
+describe('Sorteos — cobertura por empresa', () => {
+  test('GET /:id/cobertura sin token → 401', async () => {
+    const res = await request(app).get(`/api/sorteos/${sorteoId}/cobertura`);
+    expect(res.status).toBe(401);
+  });
+
+  test('GET /:id/cobertura → 200 array', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.get(`/api/sorteos/${sorteoId}/cobertura`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  test('Cada fila tiene codigo, nombre, asociados_activos y bonos_asignados', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const { body } = await ag.get(`/api/sorteos/${sorteoId}/cobertura`);
+    if (body.length > 0) {
+      const fila = body[0];
+      expect(fila).toHaveProperty('codigo');
+      expect(fila).toHaveProperty('nombre');
+      expect(fila).toHaveProperty('asociados_activos');
+      expect(fila).toHaveProperty('bonos_asignados');
+      expect(Number(fila.asociados_activos)).toBeGreaterThan(0);
+    }
+  });
+
+  test('La empresa de test aparece en la cobertura del sorteo', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const { body } = await ag.get(`/api/sorteos/${sorteoId}/cobertura`);
+    const emp = body.find((e) => e.codigo === 'EMP_TEST');
+    expect(emp).toBeDefined();
+  });
+
+  test('Sorteo inexistente → todas las empresas con bonos_asignados=0', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.get('/api/sorteos/00000000-0000-0000-0000-000000000000/cobertura');
+    expect(res.status).toBe(200);
+    // La query devuelve empresas con asociados activos; sin sorteo, bonos_asignados es 0 para todas
+    res.body.forEach((fila) => {
+      expect(Number(fila.bonos_asignados)).toBe(0);
+    });
+  });
+});

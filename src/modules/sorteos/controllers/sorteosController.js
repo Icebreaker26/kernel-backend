@@ -1041,3 +1041,33 @@ export const eliminarProgramacion = async (req, res, next) => {
     reprogramar();
   } catch (err) { next(err); }
 };
+
+export const cobertura = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const { rows } = await pool.query(
+      `SELECT
+         e.codigo,
+         e.nombre,
+         COUNT(DISTINCT a.codigo)                                        AS asociados_activos,
+         COUNT(DISTINCT b.numero) FILTER (WHERE b.sorteo_id = $1
+           AND b.estado = 'asignado')                                    AS bonos_asignados
+       FROM empresas e
+       JOIN asociados a ON a.empresa_dsto = e.codigo AND a.is_active = true
+       LEFT JOIN boletos b ON b.asociado_codigo = a.codigo
+       WHERE e.is_active = true
+       GROUP BY e.codigo, e.nombre
+       HAVING COUNT(DISTINCT a.codigo) > 0
+       ORDER BY
+         (COUNT(DISTINCT b.numero) FILTER (WHERE b.sorteo_id = $1 AND b.estado = 'asignado')::numeric
+          / NULLIF(COUNT(DISTINCT a.codigo), 0)) ASC,
+         e.nombre`,
+      [id]
+    );
+
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+};

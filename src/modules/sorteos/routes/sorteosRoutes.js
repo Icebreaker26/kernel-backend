@@ -101,4 +101,7 @@ router.post('/:id/programaciones',
 router.delete('/:id/programaciones/:pid',
   checkPermission('sorteos', 'WRITE'), ctrl.eliminarProgramacion);
 
+router.get('/:id/cobertura',
+  checkPermission('sorteos', 'READ'), ctrl.cobertura);
+
 export default router;

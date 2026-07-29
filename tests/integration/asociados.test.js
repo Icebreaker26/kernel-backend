@@ -488,18 +488,18 @@ describe('Asociados — reconciliación línea 15 (bonos)', () => {
   const COD_SC    = '7775555555'; // activo + boleto + ausente en línea 15 → SIN_COBRO_EXTERNO
 
   // CSV con línea 1 + línea 15. testCodigo incluido para no retirar el asociado global.
-  // clase_cuota=2 (mensual) → factor=1 → cuota_kernel = precio_boleto = 3000
+  // clase_cuota=1 (mensual) → factor=1 → cuota_kernel = precio_boleto = 3000
   const buildCSV = () => [
     'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota',
     `1,${testCodigo},Torres,Test,1,EMP01,Empresa Test,Pereira,Calle 1,3001234567,`,
-    `1,${COD_OK},Activo,Ok,2,EMP_REC,Empresa Recon,Bogota,Calle A,3010000001,`,
-    `1,${COD_SB},SinBoleto,Test,2,EMP_REC,Empresa Recon,Bogota,Calle C,3010000003,`,
-    `1,${COD_MAL},MontoMal,Test,2,EMP_REC,Empresa Recon,Bogota,Calle D,3010000004,`,
-    `1,${COD_SC},SinCobro,Test,2,EMP_REC,Empresa Recon,Bogota,Calle E,3010000005,`,
-    `15,${COD_OK},Activo,Ok,2,EMP_REC,Empresa Recon,Bogota,Calle A,3010000001,3.000`,  // correcto
-    `15,${COD_RET},Retirado,Test,2,EMP_REC,Empresa Recon,Bogota,Calle B,3010000002,3.000`, // retirado
-    `15,${COD_SB},SinBoleto,Test,2,EMP_REC,Empresa Recon,Bogota,Calle C,3010000003,3.000`, // sin boleto
-    `15,${COD_MAL},MontoMal,Test,2,EMP_REC,Empresa Recon,Bogota,Calle D,3010000004,2.000`, // monto mal
+    `1,${COD_OK},Activo,Ok,1,EMP_REC,Empresa Recon,Bogota,Calle A,3010000001,`,
+    `1,${COD_SB},SinBoleto,Test,1,EMP_REC,Empresa Recon,Bogota,Calle C,3010000003,`,
+    `1,${COD_MAL},MontoMal,Test,1,EMP_REC,Empresa Recon,Bogota,Calle D,3010000004,`,
+    `1,${COD_SC},SinCobro,Test,1,EMP_REC,Empresa Recon,Bogota,Calle E,3010000005,`,
+    `15,${COD_OK},Activo,Ok,1,EMP_REC,Empresa Recon,Bogota,Calle A,3010000001,3.000`,  // correcto
+    `15,${COD_RET},Retirado,Test,1,EMP_REC,Empresa Recon,Bogota,Calle B,3010000002,3.000`, // retirado
+    `15,${COD_SB},SinBoleto,Test,1,EMP_REC,Empresa Recon,Bogota,Calle C,3010000003,3.000`, // sin boleto
+    `15,${COD_MAL},MontoMal,Test,1,EMP_REC,Empresa Recon,Bogota,Calle D,3010000004,2.000`, // monto mal
     // COD_SC ausente de línea 15 → SIN_COBRO_EXTERNO
   ].join('\n');
 
@@ -521,8 +521,8 @@ describe('Asociados — reconciliación línea 15 (bonos)', () => {
     ]) {
       await pool.query(
         `INSERT INTO asociados (codigo, apellido, nombre, clase_cuota, empresa_dsto, nombre_empresa, ciudad)
-         VALUES ($1, $2, $3, '2', 'EMP_REC', 'Empresa Recon', 'Bogota')
-         ON CONFLICT (codigo) DO UPDATE SET is_active = true, clase_cuota = '2'`,
+         VALUES ($1, $2, $3, '1', 'EMP_REC', 'Empresa Recon', 'Bogota')
+         ON CONFLICT (codigo) DO UPDATE SET is_active = true, clase_cuota = '1'`,
         [codigo, apellido, nombre]
       );
     }

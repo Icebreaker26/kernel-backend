@@ -435,8 +435,8 @@ export const importarCSV = async (req, res, next) => {
       for (const [codigo, d] of mapa15) {
         const activo       = codigosActivosSet.has(codigo);
         const totalMensual = boletosMap.get(codigo) ?? 0;
-        // periodo_descto de línea 15: '1'=mensual (factor 1), '2'=quincenal (factor 2)
-        const factor       = d.periodo_descto === '2' ? 2 : 1;
+        // periodo_descto: '1-Mensual' → factor 1, '2-Quincenal' → factor 2
+        const factor       = String(d.periodo_descto).startsWith('2') ? 2 : 1;
         const cuotaKernel  = Math.round((totalMensual / factor) * 100) / 100;
         const cuotaExterna = Math.round(d.cuota_externa * 100) / 100;
 
@@ -454,8 +454,8 @@ export const importarCSV = async (req, res, next) => {
         if (!mapa15.has(codigo) && codigosActivosSet.has(codigo)) {
           const asocData = validosMap.get(codigo);
           if (asocData) {
-            // clase_cuota viene de periodo_descto tras el sync: '1'=mensual, '2'=quincenal
-          const factor      = asocData.clase_cuota === '2' ? 2 : 1;
+            // clase_cuota viene de periodo_descto: '1-Mensual' → factor 1, '2-Quincenal' → factor 2
+          const factor      = String(asocData.clase_cuota).startsWith('2') ? 2 : 1;
           const cuotaKernel = Math.round((totalMensual / factor) * 100) / 100;
             discrepancias.push({ tipo: 'SIN_COBRO_EXTERNO', codigo, nombre: `${asocData.nombre} ${asocData.apellido}`, empresa: asocData.nombre_empresa, cuota_externa: 0, cuota_kernel: cuotaKernel });
           }

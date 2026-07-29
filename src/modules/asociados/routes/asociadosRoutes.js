@@ -48,6 +48,10 @@ router.get('/:codigo/perfil',
   verifyToken, checkPermission('asociados', 'READ'),
   ctrl.perfilAsociado
 );
+router.get('/:codigo/historial-aporte',
+  verifyToken, checkPermission('asociados', 'READ'),
+  ctrl.historialAporte
+);
 
 // Activación del portal (opt-in)
 router.post('/:codigo/activar-portal',

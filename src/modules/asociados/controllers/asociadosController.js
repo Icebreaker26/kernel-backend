@@ -605,3 +605,19 @@ export const marcarTodasNotifsLeidas = async (req, res, next) => {
     next(err);
   }
 };
+
+export const historialAporte = async (req, res, next) => {
+  try {
+    const { codigo } = req.params;
+    const { rows } = await pool.query(
+      `SELECT campo, valor_anterior, valor_nuevo, changed_at
+       FROM asociado_historial_aporte
+       WHERE asociado_codigo = $1
+       ORDER BY changed_at DESC`,
+      [codigo]
+    );
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+};

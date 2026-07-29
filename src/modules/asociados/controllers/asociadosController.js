@@ -409,10 +409,10 @@ export const importarCSV = async (req, res, next) => {
       for (const r of filas15) {
         if (!mapa15.has(r.codigo)) {
           mapa15.set(r.codigo, {
-            cuota_externa: parseCuotaCOP(r.cuota),
-            clase_cuota:   String(r.clase_cuota ?? '2').trim(),
-            nombre:        `${(r.nombre ?? '').trim()} ${(r.apellido ?? '').trim()}`.trim(),
-            empresa:       (r.nombre_empresa ?? r.empresa_dsto ?? '').trim(),
+            cuota_externa:   parseCuotaCOP(r.cuota),
+            periodo_descto:  String(r.periodo_descto ?? '2').trim(), // '1'=mensual, '2'=quincenal
+            nombre:          `${(r.nombre ?? '').trim()} ${(r.apellido ?? '').trim()}`.trim(),
+            empresa:         (r.nombre_empresa ?? r.empresa_dsto ?? '').trim(),
           });
         }
       }
@@ -435,10 +435,8 @@ export const importarCSV = async (req, res, next) => {
       for (const [codigo, d] of mapa15) {
         const activo       = codigosActivosSet.has(codigo);
         const totalMensual = boletosMap.get(codigo) ?? 0;
-        // clase_cuota de línea 1 (Kernel) es la fuente de verdad; línea 15 puede diferir
-        // '1' = mensual (factor 1), '2' = quincenal (factor 2)
-        const claseKernel  = validosMap.get(codigo)?.clase_cuota ?? d.clase_cuota;
-        const factor       = claseKernel === '2' ? 2 : 1;
+        // periodo_descto de línea 15: '1'=mensual (factor 1), '2'=quincenal (factor 2)
+        const factor       = d.periodo_descto === '2' ? 2 : 1;
         const cuotaKernel  = Math.round((totalMensual / factor) * 100) / 100;
         const cuotaExterna = Math.round(d.cuota_externa * 100) / 100;
 
@@ -456,8 +454,7 @@ export const importarCSV = async (req, res, next) => {
         if (!mapa15.has(codigo) && codigosActivosSet.has(codigo)) {
           const asocData = validosMap.get(codigo);
           if (asocData) {
-            const factor      = asocData.clase_cuota === '2' ? 2 : 1;
-            const cuotaKernel = Math.round((totalMensual / factor) * 100) / 100;
+            const cuotaKernel = Math.round(totalMensual * 100) / 100; // total mensual — sin periodo_descto disponible
             discrepancias.push({ tipo: 'SIN_COBRO_EXTERNO', codigo, nombre: `${asocData.nombre} ${asocData.apellido}`, empresa: asocData.nombre_empresa, cuota_externa: 0, cuota_kernel: cuotaKernel });
           }
         }

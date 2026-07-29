@@ -60,8 +60,7 @@ export const perfil = async (req, res, next) => {
     );
 
     const { rows: notas } = await pool.query(
-      `SELECT n.id, n.contenido, n.created_at,
-              u.nombre || ' ' || COALESCE(u.apellido, '') AS autor
+      `SELECT n.id, n.contenido, n.created_at, u.nombre AS autor
        FROM empresa_notas n
        LEFT JOIN global_usuarios u ON u.id = n.usuario_uuid
        WHERE n.empresa_codigo = $1 AND n.is_active = true
@@ -112,7 +111,7 @@ export const crearNota = async (req, res, next) => {
     let autor = null;
     if (usuario_uuid) {
       const { rows: [u] } = await pool.query(
-        `SELECT nombre || ' ' || COALESCE(apellido, '') AS autor FROM global_usuarios WHERE id = $1`,
+        `SELECT nombre AS autor FROM global_usuarios WHERE id = $1`,
         [usuario_uuid]
       );
       autor = u?.autor ?? null;

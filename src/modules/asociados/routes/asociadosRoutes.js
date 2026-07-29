@@ -24,7 +24,7 @@ router.patch('/notificaciones/:id/leer',   verifyAsociado, ctrl.marcarNotifLeida
 // ── Administración (staff con permiso) ────────────────────────────────────────
 router.get('/pendientes-portal',
   verifyToken, checkPermission('asociados', 'READ'),
-  ctrl.contarPendientesPortal
+  ctrl.listarPendientesPortal
 );
 router.get('/',
   verifyToken, checkPermission('asociados', 'READ'),

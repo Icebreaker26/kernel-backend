@@ -474,3 +474,169 @@ describe('Asociados — historial de aportes', () => {
     }
   });
 });
+
+// ── Reconciliación línea 15 ───────────────────────────────────────────────────
+
+describe('Asociados — reconciliación línea 15 (bonos)', () => {
+  let sorteoId;
+
+  // Códigos aislados para no interferir con los demás tests
+  const COD_OK    = '7771111111'; // activo + boleto + cuota correcta → sin discrepancia
+  const COD_RET   = '7772222222'; // NO en línea 1 (retirado) + en línea 15 → COBRO_A_RETIRADO
+  const COD_SB    = '7773333333'; // activo + sin boleto + en línea 15 → COBRO_SIN_BOLETO
+  const COD_MAL   = '7774444444'; // activo + boleto + cuota incorrecta → MONTO_INCORRECTO
+  const COD_SC    = '7775555555'; // activo + boleto + ausente en línea 15 → SIN_COBRO_EXTERNO
+
+  // CSV con línea 1 + línea 15. testCodigo incluido para no retirar el asociado global.
+  // clase_cuota=2 (mensual) → factor=1 → cuota_kernel = precio_boleto = 3000
+  const buildCSV = () => [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota',
+    `1,${testCodigo},Torres,Test,1,EMP01,Empresa Test,Pereira,Calle 1,3001234567,`,
+    `1,${COD_OK},Activo,Ok,2,EMP_REC,Empresa Recon,Bogota,Calle A,3010000001,`,
+    `1,${COD_SB},SinBoleto,Test,2,EMP_REC,Empresa Recon,Bogota,Calle C,3010000003,`,
+    `1,${COD_MAL},MontoMal,Test,2,EMP_REC,Empresa Recon,Bogota,Calle D,3010000004,`,
+    `1,${COD_SC},SinCobro,Test,2,EMP_REC,Empresa Recon,Bogota,Calle E,3010000005,`,
+    `15,${COD_OK},Activo,Ok,2,EMP_REC,Empresa Recon,Bogota,Calle A,3010000001,3.000`,  // correcto
+    `15,${COD_RET},Retirado,Test,2,EMP_REC,Empresa Recon,Bogota,Calle B,3010000002,3.000`, // retirado
+    `15,${COD_SB},SinBoleto,Test,2,EMP_REC,Empresa Recon,Bogota,Calle C,3010000003,3.000`, // sin boleto
+    `15,${COD_MAL},MontoMal,Test,2,EMP_REC,Empresa Recon,Bogota,Calle D,3010000004,2.000`, // monto mal
+    // COD_SC ausente de línea 15 → SIN_COBRO_EXTERNO
+  ].join('\n');
+
+  beforeAll(async () => {
+    // Sorteo activo con precio_boleto = 3000
+    const { rows: [s] } = await pool.query(
+      `INSERT INTO sorteos (nombre, estado, precio_boleto)
+       VALUES ('Sorteo Recon Test', 'activo', 3000)
+       RETURNING id`
+    );
+    sorteoId = s.id;
+
+    // Asociados activos en DB
+    for (const [codigo, apellido, nombre] of [
+      [COD_OK,  'Activo',    'Ok'],
+      [COD_SB,  'SinBoleto', 'Test'],
+      [COD_MAL, 'MontoMal',  'Test'],
+      [COD_SC,  'SinCobro',  'Test'],
+    ]) {
+      await pool.query(
+        `INSERT INTO asociados (codigo, apellido, nombre, clase_cuota, empresa_dsto, nombre_empresa, ciudad)
+         VALUES ($1, $2, $3, '2', 'EMP_REC', 'Empresa Recon', 'Bogota')
+         ON CONFLICT (codigo) DO UPDATE SET is_active = true, clase_cuota = '2'`,
+        [codigo, apellido, nombre]
+      );
+    }
+
+    // Boletos asignados: COD_OK (901), COD_MAL (902), COD_SC (903)
+    for (const [numero, codigo] of [[901, COD_OK], [902, COD_MAL], [903, COD_SC]]) {
+      await pool.query(
+        `INSERT INTO boletos (numero, sorteo_id, asociado_codigo, estado, fecha_asignacion)
+         VALUES ($1, $2, $3, 'asignado', NOW())
+         ON CONFLICT (numero, sorteo_id) DO UPDATE SET estado = 'asignado', asociado_codigo = $3`,
+        [numero, sorteoId, codigo]
+      );
+    }
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM sorteo_logs WHERE sorteo_id = $1',      [sorteoId]);
+    await pool.query('DELETE FROM boletos     WHERE sorteo_id = $1',      [sorteoId]);
+    await pool.query('DELETE FROM sorteos     WHERE id = $1',             [sorteoId]);
+    await pool.query('DELETE FROM asociados   WHERE codigo = ANY($1)',    [[COD_OK, COD_SB, COD_MAL, COD_SC]]);
+    await pool.query('DELETE FROM empresas    WHERE codigo = $1',         ['EMP_REC']);
+    await pool.query('DELETE FROM sincronizaciones WHERE usuario_uuid = $1', [adminUuid]);
+  });
+
+  test('CSV con línea 15 → discrepancias es array', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag
+      .post('/api/asociados/importar')
+      .attach('archivo', Buffer.from(buildCSV()), 'recon.csv');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.discrepancias)).toBe(true);
+  });
+
+  test('COBRO_A_RETIRADO — asociado en línea 15 pero no en línea 1', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag
+      .post('/api/asociados/importar')
+      .attach('archivo', Buffer.from(buildCSV()), 'recon.csv');
+    const caso = body.discrepancias.find((d) => d.tipo === 'COBRO_A_RETIRADO' && d.codigo === COD_RET);
+    expect(caso).toBeDefined();
+    expect(caso.cuota_externa).toBeGreaterThan(0);
+    expect(caso.cuota_kernel).toBe(0);
+  });
+
+  test('COBRO_SIN_BOLETO — asociado activo en línea 15 pero sin boleto en Kernel', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag
+      .post('/api/asociados/importar')
+      .attach('archivo', Buffer.from(buildCSV()), 'recon.csv');
+    const caso = body.discrepancias.find((d) => d.tipo === 'COBRO_SIN_BOLETO' && d.codigo === COD_SB);
+    expect(caso).toBeDefined();
+    expect(caso.cuota_externa).toBeGreaterThan(0);
+    expect(caso.cuota_kernel).toBe(0);
+  });
+
+  test('MONTO_INCORRECTO — cuota externa ≠ cuota Kernel', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag
+      .post('/api/asociados/importar')
+      .attach('archivo', Buffer.from(buildCSV()), 'recon.csv');
+    const caso = body.discrepancias.find((d) => d.tipo === 'MONTO_INCORRECTO' && d.codigo === COD_MAL);
+    expect(caso).toBeDefined();
+    expect(caso.cuota_externa).toBe(2000);
+    expect(caso.cuota_kernel).toBe(3000);
+    expect(caso.diferencia).toBe(-1000);
+  });
+
+  test('SIN_COBRO_EXTERNO — activo con boleto en Kernel pero ausente en línea 15', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag
+      .post('/api/asociados/importar')
+      .attach('archivo', Buffer.from(buildCSV()), 'recon.csv');
+    const caso = body.discrepancias.find((d) => d.tipo === 'SIN_COBRO_EXTERNO' && d.codigo === COD_SC);
+    expect(caso).toBeDefined();
+    expect(caso.cuota_externa).toBe(0);
+    expect(caso.cuota_kernel).toBe(3000);
+  });
+
+  test('Asociado con monto correcto NO aparece en discrepancias', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag
+      .post('/api/asociados/importar')
+      .attach('archivo', Buffer.from(buildCSV()), 'recon.csv');
+    const aparece = body.discrepancias.some((d) => d.codigo === COD_OK);
+    expect(aparece).toBe(false);
+  });
+
+  test('Total discrepancias = 4 (retirado + sin boleto + monto mal + sin cobro)', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag
+      .post('/api/asociados/importar')
+      .attach('archivo', Buffer.from(buildCSV()), 'recon.csv');
+    expect(body.discrepancias.length).toBe(4);
+  });
+
+  // Este test va ÚLTIMO: retira los 4 asociados y libera sus boletos
+  test('CSV sin línea 15 → discrepancias es null', async () => {
+    const csvSinL15 = [
+      'codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad',
+      `${testCodigo},Torres,Test,1,EMP01,Empresa Test,Pereira`,
+    ].join('\n');
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag
+      .post('/api/asociados/importar')
+      .attach('archivo', Buffer.from(csvSinL15), 'sin_l15.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.discrepancias).toBeNull();
+  });
+});

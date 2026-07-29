@@ -435,7 +435,9 @@ export const importarCSV = async (req, res, next) => {
       for (const [codigo, d] of mapa15) {
         const activo       = codigosActivosSet.has(codigo);
         const totalMensual = boletosMap.get(codigo) ?? 0;
-        const factor       = d.clase_cuota === '1' ? 2 : 1;
+        // clase_cuota de línea 1 (Kernel) es la fuente de verdad; línea 15 puede diferir
+        const claseKernel  = validosMap.get(codigo)?.clase_cuota ?? d.clase_cuota;
+        const factor       = claseKernel === '1' ? 2 : 1;
         const cuotaKernel  = Math.round((totalMensual / factor) * 100) / 100;
         const cuotaExterna = Math.round(d.cuota_externa * 100) / 100;
 

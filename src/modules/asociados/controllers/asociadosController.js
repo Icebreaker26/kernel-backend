@@ -436,8 +436,9 @@ export const importarCSV = async (req, res, next) => {
         const activo       = codigosActivosSet.has(codigo);
         const totalMensual = boletosMap.get(codigo) ?? 0;
         // clase_cuota de línea 1 (Kernel) es la fuente de verdad; línea 15 puede diferir
+        // '1' = mensual (factor 1), '2' = quincenal (factor 2)
         const claseKernel  = validosMap.get(codigo)?.clase_cuota ?? d.clase_cuota;
-        const factor       = claseKernel === '1' ? 2 : 1;
+        const factor       = claseKernel === '2' ? 2 : 1;
         const cuotaKernel  = Math.round((totalMensual / factor) * 100) / 100;
         const cuotaExterna = Math.round(d.cuota_externa * 100) / 100;
 
@@ -455,7 +456,7 @@ export const importarCSV = async (req, res, next) => {
         if (!mapa15.has(codigo) && codigosActivosSet.has(codigo)) {
           const asocData = validosMap.get(codigo);
           if (asocData) {
-            const factor      = asocData.clase_cuota === '1' ? 2 : 1;
+            const factor      = asocData.clase_cuota === '2' ? 2 : 1;
             const cuotaKernel = Math.round((totalMensual / factor) * 100) / 100;
             discrepancias.push({ tipo: 'SIN_COBRO_EXTERNO', codigo, nombre: `${asocData.nombre} ${asocData.apellido}`, empresa: asocData.nombre_empresa, cuota_externa: 0, cuota_kernel: cuotaKernel });
           }

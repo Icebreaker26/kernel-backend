@@ -8,7 +8,7 @@ export const metricas = async (req, res, next) => {
         (SELECT COUNT(*) FROM asociados)::int                                                 AS asociados_total,
         (SELECT COUNT(*) FROM sorteos WHERE estado = 'activo')::int                           AS sorteos_activos,
         (SELECT COUNT(*) FROM solicitudes_bono WHERE estado = 'pendiente')::int               AS solicitudes_pendientes,
-        (SELECT COUNT(*) FROM global_usuarios WHERE is_approved = false AND is_active = true)::int AS usuarios_pendientes
+        (SELECT COUNT(*) FROM asociados WHERE solicitud_portal_at IS NOT NULL)::int               AS usuarios_pendientes
     `);
     res.json(data);
   } catch (err) {

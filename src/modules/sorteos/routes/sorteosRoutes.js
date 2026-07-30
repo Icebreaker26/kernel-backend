@@ -40,6 +40,11 @@ router.get('/dashboard',
 router.post('/',
   checkPermission('sorteos', 'WRITE'), validate(crearSorteoSchema), ctrl.crearSorteo);
 
+router.post('/asignar-por-discrepancia',
+  checkPermission('sorteos', 'WRITE'), ctrl.asignarPorDiscrepancia);
+
+router.post('/asignar-discrepancias-lote',
+  checkPermission('sorteos', 'WRITE'), ctrl.asignarDiscrepanciasLote);
 
 router.put('/:id',
   checkPermission('sorteos', 'WRITE'), validate(actualizarSorteoSchema), ctrl.actualizarSorteo);

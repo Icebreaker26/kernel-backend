@@ -1071,3 +1071,225 @@ export const cobertura = async (req, res, next) => {
     next(err);
   }
 };
+
+// ── Asignación por discrepancia individual y en lote ───────────────────────
+
+export const asignarDiscrepanciasLote = async (req, res, next) => {
+  const { items, sync_id } = req.body;
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'items requerido' });
+  }
+  for (const item of items) {
+    if (!item.codigo || !Number.isInteger(item.cantidad) || item.cantidad < 1 || item.cantidad > 50) {
+      return res.status(400).json({ error: `Item inválido: ${item.codigo}` });
+    }
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const codigos = items.map((i) => i.codigo);
+
+    // 1. Un query para todos los asociados
+    const { rows: asociados } = await client.query(
+      `SELECT codigo, empresa_dsto FROM asociados WHERE codigo = ANY($1) AND is_active = true`,
+      [codigos]
+    );
+    const asociadoMap = Object.fromEntries(asociados.map((a) => [a.codigo, a]));
+
+    // 2. Un query para todos los sorteos activos de las empresas involucradas
+    const empresas = [...new Set(asociados.map((a) => a.empresa_dsto).filter(Boolean))];
+    const { rows: sorteoRows } = await client.query(
+      `SELECT se.empresa_codigo, s.id AS sorteo_id, s.nombre AS sorteo_nombre
+       FROM sorteos s
+       JOIN sorteo_empresas se ON se.sorteo_id = s.id
+       WHERE s.estado = 'activo' AND se.empresa_codigo = ANY($1)`,
+      [empresas]
+    );
+    const sorteoByEmpresa = Object.fromEntries(
+      sorteoRows.map((r) => [r.empresa_codigo, { id: r.sorteo_id, nombre: r.sorteo_nombre }])
+    );
+
+    // 3. Clasificar y agrupar por sorteo
+    const fallidos = [];
+    const bySort = {}; // sorteo_id → { nombre, items }
+
+    for (const item of items) {
+      const asoc = asociadoMap[item.codigo];
+      if (!asoc) { fallidos.push({ codigo: item.codigo, error: 'Asociado no encontrado o inactivo' }); continue; }
+      if (!asoc.empresa_dsto) { fallidos.push({ codigo: item.codigo, error: 'Sin empresa asignada' }); continue; }
+      const sorteo = sorteoByEmpresa[asoc.empresa_dsto];
+      if (!sorteo) { fallidos.push({ codigo: item.codigo, error: 'Sin sorteo activo para su empresa' }); continue; }
+      if (!bySort[sorteo.id]) bySort[sorteo.id] = { nombre: sorteo.nombre, items: [] };
+      bySort[sorteo.id].items.push({ codigo: item.codigo, cantidad: item.cantidad });
+    }
+
+    const exitosos = [];
+
+    // 4. Por cada grupo de sorteo: un SELECT de boletos, un UPDATE por asociado, un INSERT masivo de logs
+    for (const [sorteo_id, grupo] of Object.entries(bySort)) {
+      const totalNecesarios = grupo.items.reduce((sum, i) => sum + i.cantidad, 0);
+
+      const { rows: boletos } = await client.query(
+        `SELECT numero FROM boletos
+         WHERE sorteo_id = $1 AND estado = 'libre'
+         ORDER BY RANDOM()
+         LIMIT $2
+         FOR UPDATE SKIP LOCKED`,
+        [sorteo_id, totalNecesarios]
+      );
+
+      let offset = 0;
+      const asignacionesSorteo = [];
+
+      for (const item of grupo.items) {
+        const slice = boletos.slice(offset, offset + item.cantidad);
+        offset += item.cantidad;
+        if (slice.length === 0) { fallidos.push({ codigo: item.codigo, error: 'Sin boletos disponibles' }); continue; }
+        const numeros = slice.map((b) => b.numero);
+        asignacionesSorteo.push({ codigo: item.codigo, numeros });
+        exitosos.push({ codigo: item.codigo, numeros, sorteo_id, sorteo_nombre: grupo.nombre });
+      }
+
+      if (asignacionesSorteo.length === 0) continue;
+
+      for (const { codigo, numeros } of asignacionesSorteo) {
+        await client.query(
+          `UPDATE boletos SET asociado_codigo = $1, estado = 'asignado', fecha_asignacion = NOW()
+           WHERE numero = ANY($2) AND sorteo_id = $3`,
+          [codigo, numeros, sorteo_id]
+        );
+      }
+
+      const logNumeros = asignacionesSorteo.flatMap((a) => a.numeros);
+      const logCodigos = asignacionesSorteo.flatMap((a) => a.numeros.map(() => a.codigo));
+      await client.query(
+        `INSERT INTO sorteo_logs (sorteo_id, numero, accion, asociado_codigo, empleado_uuid, detalle)
+         SELECT $1, unnest($2::int[]), 'COMPRA_DIRECTA', unnest($3::text[]), $4,
+                'Asignación automática por reconciliación de discrepancia (lote)'`,
+        [sorteo_id, logNumeros, logCodigos, req.user.id]
+      );
+    }
+
+    // 5. Actualizar sincronizaciones.detalle en un solo UPDATE
+    if (sync_id && exitosos.length > 0) {
+      const { rows: [row] } = await client.query(
+        `SELECT detalle FROM sincronizaciones WHERE id = $1 FOR UPDATE`, [sync_id]
+      );
+      if (row) {
+        const detalle = row.detalle ?? {};
+        if (Array.isArray(detalle.discrepancias)) {
+          for (const ex of exitosos) {
+            const idx = detalle.discrepancias.findIndex(
+              (d) => d.codigo === ex.codigo && d.tipo === 'COBRO_SIN_BOLETO'
+            );
+            if (idx !== -1) {
+              detalle.discrepancias[idx].subsanada         = true;
+              detalle.discrepancias[idx].subsanada_at      = new Date().toISOString();
+              detalle.discrepancias[idx].numeros_asignados = ex.numeros;
+              detalle.discrepancias[idx].sorteo_id         = ex.sorteo_id;
+              detalle.discrepancias[idx].sorteo_nombre     = ex.sorteo_nombre;
+            }
+          }
+          await client.query(
+            `UPDATE sincronizaciones SET detalle = $1 WHERE id = $2`,
+            [JSON.stringify(detalle), sync_id]
+          );
+        }
+      }
+    }
+
+    await client.query('COMMIT');
+    res.json({ exitosos, fallidos });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+};
+
+export const asignarPorDiscrepancia = async (req, res, next) => {
+  const { asociado_codigo, cantidad } = req.body;
+
+  if (!asociado_codigo || !Number.isInteger(cantidad) || cantidad < 1 || cantidad > 50) {
+    return res.status(400).json({ error: 'Datos inválidos' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: [asoc] } = await client.query(
+      `SELECT codigo, nombre, apellido, empresa_dsto FROM asociados WHERE codigo = $1 AND is_active = true`,
+      [asociado_codigo]
+    );
+    if (!asoc) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Asociado no encontrado o inactivo' });
+    }
+    if (!asoc.empresa_dsto) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'El asociado no tiene empresa asignada' });
+    }
+
+    // Sorteo activo donde la empresa del asociado está habilitada
+    const { rows: [sorteo] } = await client.query(
+      `SELECT s.id, s.nombre
+       FROM sorteos s
+       JOIN sorteo_empresas se ON se.sorteo_id = s.id
+       WHERE s.estado = 'activo' AND se.empresa_codigo = $1
+       LIMIT 1`,
+      [asoc.empresa_dsto]
+    );
+    if (!sorteo) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'No hay sorteo activo habilitado para la empresa del asociado' });
+    }
+
+    // Boletos libres aleatorios — SKIP LOCKED para seguridad concurrente
+    const { rows: boletos } = await client.query(
+      `SELECT numero FROM boletos
+       WHERE sorteo_id = $1 AND estado = 'libre'
+       ORDER BY RANDOM()
+       LIMIT $2
+       FOR UPDATE SKIP LOCKED`,
+      [sorteo.id, cantidad]
+    );
+
+    if (boletos.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'No hay boletos disponibles en el sorteo' });
+    }
+
+    const numeros = boletos.map((b) => b.numero);
+
+    await client.query(
+      `UPDATE boletos SET asociado_codigo = $1, estado = 'asignado', fecha_asignacion = NOW()
+       WHERE numero = ANY($2) AND sorteo_id = $3`,
+      [asociado_codigo, numeros, sorteo.id]
+    );
+
+    await client.query(
+      `INSERT INTO sorteo_logs (sorteo_id, numero, accion, asociado_codigo, empleado_uuid, detalle)
+       SELECT $1, unnest($2::int[]), 'COMPRA_DIRECTA', $3, $4,
+              'Asignación automática por reconciliación de discrepancia'`,
+      [sorteo.id, numeros, asociado_codigo, req.user.id]
+    );
+
+    await client.query('COMMIT');
+    res.json({
+      sorteo_id:     sorteo.id,
+      sorteo_nombre: sorteo.nombre,
+      asignados:     numeros,
+      solicitados:   cantidad,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+};

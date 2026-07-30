@@ -640,3 +640,155 @@ describe('Asociados — reconciliación línea 15 (bonos)', () => {
     expect(res.body.discrepancias).toBeNull();
   });
 });
+
+// ── sync_id en respuesta de importación ─────────────────────────────────────
+
+describe('Asociados — sync_id en importación', () => {
+  test('POST /api/asociados/importar incluye sync_id UUID', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag
+      .post('/api/asociados/importar')
+      .attach('archivo', Buffer.from(CSV_VALIDO), 'syncid.csv');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('sync_id');
+    expect(typeof res.body.sync_id).toBe('string');
+    expect(res.body.sync_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
+  });
+});
+
+// ── aceptar-terminos portal ──────────────────────────────────────────────────
+
+describe('Asociados — aceptar-terminos (portal)', () => {
+  let passwordPortal;
+
+  beforeAll(async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag.post(`/api/asociados/${testCodigo}/activar-portal`);
+    passwordPortal = body.password;
+  });
+
+  afterAll(async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    await ag.post(`/api/asociados/${testCodigo}/desactivar-portal`);
+    await pool.query(
+      'UPDATE asociados SET acepto_terminos_portal_at = NULL WHERE codigo = $1',
+      [testCodigo]
+    );
+  });
+
+  test('POST /api/asociados/aceptar-terminos sin sesión de portal → 401', async () => {
+    const res = await request(app).post('/api/asociados/aceptar-terminos');
+    expect(res.status).toBe(401);
+  });
+
+  test('POST /api/asociados/aceptar-terminos con sesión → 200 + graba timestamp', async () => {
+    const ag = agent();
+    await ag.post('/api/asociados/login').send({ codigo: testCodigo, password: passwordPortal });
+    const res = await ag.post('/api/asociados/aceptar-terminos');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('ok', true);
+
+    const { rows: [row] } = await pool.query(
+      'SELECT acepto_terminos_portal_at FROM asociados WHERE codigo = $1',
+      [testCodigo]
+    );
+    expect(row.acepto_terminos_portal_at).not.toBeNull();
+  });
+
+  test('POST /api/asociados/aceptar-terminos idempotente → 200', async () => {
+    const ag = agent();
+    await ag.post('/api/asociados/login').send({ codigo: testCodigo, password: passwordPortal });
+    const res = await ag.post('/api/asociados/aceptar-terminos');
+    expect(res.status).toBe(200);
+  });
+});
+
+// ── subsanar discrepancia en sincronización ──────────────────────────────────
+
+describe('Asociados — subsanar discrepancia', () => {
+  let sincId;
+  const codigoDisc = '7779999888';
+
+  beforeAll(async () => {
+    const detalle = {
+      nuevos: [], retirados: [], boletos_liberados: [], errores: [],
+      discrepancias: [
+        {
+          tipo: 'COBRO_SIN_BOLETO',
+          codigo: codigoDisc,
+          nombre: 'Test Subsanar',
+          empresa: 'EMP01',
+          cuota_externa: 3000,
+          cuota_kernel: 0,
+          diferencia: 3000,
+          bonos_sugeridos: 1,
+        },
+      ],
+    };
+    const { rows: [s] } = await pool.query(
+      `INSERT INTO sincronizaciones
+         (usuario_uuid, archivo, total, nuevos, actualizados, retirados, errores, boletos_liberados, detalle)
+       VALUES ($1, 'test-subsanar.csv', 1, 0, 0, 0, 0, 0, $2)
+       RETURNING id`,
+      [adminUuid, JSON.stringify(detalle)]
+    );
+    sincId = s.id;
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM sincronizaciones WHERE id = $1', [sincId]);
+  });
+
+  test('PATCH sin token → 401', async () => {
+    const res = await request(app)
+      .patch(`/api/asociados/sincronizaciones/${sincId}/subsanar/${codigoDisc}`);
+    expect(res.status).toBe(401);
+  });
+
+  test('PATCH sincronización inexistente → 404', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag
+      .patch(`/api/asociados/sincronizaciones/00000000-0000-0000-0000-000000000000/subsanar/${codigoDisc}`)
+      .send({ numeros: [42], sorteo_id: '00000000-0000-0000-0000-000000000001', sorteo_nombre: 'X' });
+    expect(res.status).toBe(404);
+  });
+
+  test('PATCH código inexistente en discrepancias → 404', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag
+      .patch(`/api/asociados/sincronizaciones/${sincId}/subsanar/CODIGO_NO_EXISTE`)
+      .send({ numeros: [42] });
+    expect(res.status).toBe(404);
+  });
+
+  test('PATCH válido → 200 + subsanada=true en JSONB + numeros_asignados', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag
+      .patch(`/api/asociados/sincronizaciones/${sincId}/subsanar/${codigoDisc}`)
+      .send({
+        numeros: [42, 43],
+        sorteo_id: '00000000-0000-0000-0000-000000000001',
+        sorteo_nombre: 'Sorteo Test',
+      });
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('ok', true);
+
+    const { rows: [row] } = await pool.query(
+      'SELECT detalle FROM sincronizaciones WHERE id = $1',
+      [sincId]
+    );
+    const disc = row.detalle.discrepancias.find((d) => d.codigo === codigoDisc);
+    expect(disc.subsanada).toBe(true);
+    expect(disc.subsanada_at).toBeDefined();
+    expect(disc.numeros_asignados).toEqual([42, 43]);
+    expect(disc.sorteo_nombre).toBe('Sorteo Test');
+  });
+});

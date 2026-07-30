@@ -547,3 +547,168 @@ describe('Sorteos — cobertura por empresa', () => {
     });
   });
 });
+
+// ── Asignación en lote por discrepancia ────────────────────────────────────
+
+describe('Sorteos — asignar-discrepancias-lote', () => {
+  let loteSorteoId;
+  const COD_LOTE1 = '6661111111';
+  const COD_LOTE2 = '6662222222';
+
+  beforeAll(async () => {
+    const { rows: [s] } = await pool.query(
+      `INSERT INTO sorteos (nombre, estado, precio_boleto)
+       VALUES ('Sorteo Lote Test', 'activo', 3000) RETURNING id`
+    );
+    loteSorteoId = s.id;
+
+    await pool.query(
+      `INSERT INTO sorteo_empresas (sorteo_id, empresa_codigo)
+       VALUES ($1, 'EMP_TEST') ON CONFLICT DO NOTHING`,
+      [loteSorteoId]
+    );
+
+    for (let n = 900; n <= 915; n++) {
+      await pool.query(
+        `INSERT INTO boletos (numero, sorteo_id, estado)
+         VALUES ($1, $2, 'libre') ON CONFLICT (numero, sorteo_id) DO NOTHING`,
+        [n, loteSorteoId]
+      );
+    }
+
+    for (const codigo of [COD_LOTE1, COD_LOTE2]) {
+      await pool.query(
+        `INSERT INTO asociados (codigo, nombre, apellido, empresa_dsto, nombre_empresa, is_active)
+         VALUES ($1, 'Test', 'Lote', 'EMP_TEST', 'Empresa Test Sorteos', true)
+         ON CONFLICT (codigo) DO UPDATE SET empresa_dsto = 'EMP_TEST', is_active = true`,
+        [codigo]
+      );
+    }
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM sorteo_logs     WHERE sorteo_id = $1', [loteSorteoId]);
+    await pool.query('DELETE FROM boletos         WHERE sorteo_id = $1', [loteSorteoId]);
+    await pool.query('DELETE FROM sorteo_empresas WHERE sorteo_id = $1', [loteSorteoId]);
+    await pool.query('DELETE FROM sorteos         WHERE id = $1',        [loteSorteoId]);
+    await pool.query('DELETE FROM asociados       WHERE codigo = ANY($1)', [[COD_LOTE1, COD_LOTE2]]);
+  });
+
+  test('POST sin token → 401', async () => {
+    const res = await request(app).post('/api/sorteos/asignar-discrepancias-lote');
+    expect(res.status).toBe(401);
+  });
+
+  test('POST sin items → 400', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.post('/api/sorteos/asignar-discrepancias-lote').send({});
+    expect(res.status).toBe(400);
+  });
+
+  test('POST items vacío → 400', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.post('/api/sorteos/asignar-discrepancias-lote').send({ items: [] });
+    expect(res.status).toBe(400);
+  });
+
+  test('POST item con cantidad 0 → 400', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag
+      .post('/api/sorteos/asignar-discrepancias-lote')
+      .send({ items: [{ codigo: COD_LOTE1, cantidad: 0 }] });
+    expect(res.status).toBe(400);
+  });
+
+  test('POST asociado inexistente → va a fallidos, exitosos vacío', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag
+      .post('/api/sorteos/asignar-discrepancias-lote')
+      .send({ items: [{ codigo: 'CODIGO_NO_EXISTE', cantidad: 1 }] });
+    expect(res.status).toBe(200);
+    expect(res.body.exitosos.length).toBe(0);
+    expect(res.body.fallidos.length).toBeGreaterThan(0);
+    expect(res.body.fallidos[0].codigo).toBe('CODIGO_NO_EXISTE');
+  });
+
+  test('POST válido → 200, boletos asignados en DB, logs insertados', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag
+      .post('/api/sorteos/asignar-discrepancias-lote')
+      .send({
+        items: [
+          { codigo: COD_LOTE1, cantidad: 2 },
+          { codigo: COD_LOTE2, cantidad: 3 },
+        ],
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.exitosos.length).toBe(2);
+    expect(res.body.fallidos.length).toBe(0);
+
+    const ex1 = res.body.exitosos.find((e) => e.codigo === COD_LOTE1);
+    const ex2 = res.body.exitosos.find((e) => e.codigo === COD_LOTE2);
+    expect(ex1.numeros.length).toBe(2);
+    expect(ex2.numeros.length).toBe(3);
+
+    // Verificar en DB que los boletos cambiaron de estado
+    const { rows: asignados } = await pool.query(
+      `SELECT numero, asociado_codigo FROM boletos
+       WHERE sorteo_id = $1 AND estado = 'asignado'`,
+      [loteSorteoId]
+    );
+    expect(asignados.length).toBe(5);
+
+    // Verificar logs
+    const { rows: logs } = await pool.query(
+      `SELECT accion FROM sorteo_logs WHERE sorteo_id = $1`,
+      [loteSorteoId]
+    );
+    expect(logs.length).toBe(5);
+    logs.forEach((l) => expect(l.accion).toBe('COMPRA_DIRECTA'));
+  });
+
+  test('POST con sync_id → marca discrepancias como subsanadas en JSONB', async () => {
+    const detalle = {
+      discrepancias: [
+        { tipo: 'COBRO_SIN_BOLETO', codigo: COD_LOTE1, bonos_sugeridos: 1 },
+        { tipo: 'COBRO_SIN_BOLETO', codigo: COD_LOTE2, bonos_sugeridos: 1 },
+      ],
+    };
+    const { rows: [sinc] } = await pool.query(
+      `INSERT INTO sincronizaciones
+         (usuario_uuid, archivo, total, nuevos, actualizados, retirados, errores, boletos_liberados, detalle)
+       VALUES ($1, 'lote-test.csv', 2, 0, 0, 0, 0, 0, $2) RETURNING id`,
+      [adminUuid, JSON.stringify(detalle)]
+    );
+
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag
+      .post('/api/sorteos/asignar-discrepancias-lote')
+      .send({
+        items: [
+          { codigo: COD_LOTE1, cantidad: 1 },
+          { codigo: COD_LOTE2, cantidad: 1 },
+        ],
+        sync_id: sinc.id,
+      });
+    expect(res.status).toBe(200);
+
+    const { rows: [row] } = await pool.query(
+      'SELECT detalle FROM sincronizaciones WHERE id = $1',
+      [sinc.id]
+    );
+    const d1 = row.detalle.discrepancias.find((d) => d.codigo === COD_LOTE1);
+    const d2 = row.detalle.discrepancias.find((d) => d.codigo === COD_LOTE2);
+    expect(d1.subsanada).toBe(true);
+    expect(d2.subsanada).toBe(true);
+    expect(Array.isArray(d1.numeros_asignados)).toBe(true);
+    expect(Array.isArray(d2.numeros_asignados)).toBe(true);
+
+    await pool.query('DELETE FROM sincronizaciones WHERE id = $1', [sinc.id]);
+  });
+});

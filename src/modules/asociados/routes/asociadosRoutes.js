@@ -16,6 +16,7 @@ router.post('/solicitar-portal', solicitarPortalLimiter, ctrl.solicitarPortal);
 router.post('/login',  loginRateLimiter, ctrl.loginAsociado);
 router.post('/logout', ctrl.logoutAsociado);
 router.get ('/me',                         verifyAsociado, ctrl.meAsociado);
+router.post('/aceptar-terminos',           verifyAsociado, ctrl.aceptarTerminos);
 router.put ('/password',                   verifyAsociado, ctrl.cambiarPasswordAsociado);
 router.get ('/notificaciones',             verifyAsociado, ctrl.listarNotificaciones);
 router.patch('/notificaciones/leer-todas', verifyAsociado, ctrl.marcarTodasNotifsLeidas);
@@ -42,6 +43,10 @@ router.get('/sincronizaciones',
 router.get('/sincronizaciones/:id',
   verifyToken, checkPermission('asociados', 'READ'),
   ctrl.detalleSincronizacion
+);
+router.patch('/sincronizaciones/:id/subsanar/:codigo',
+  verifyToken, checkPermission('asociados', 'WRITE'),
+  ctrl.subsanarDiscrepancia
 );
 
 router.get('/:codigo/perfil',

@@ -417,15 +417,24 @@ export const importarCSV = async (req, res, next) => {
         }
       }
 
+      // precio_boleto del sorteo activo — para calcular bonos_sugeridos en COBRO_SIN_BOLETO
+      const { rows: sorteoRows } = await client.query(
+        `SELECT precio_boleto FROM sorteos WHERE estado = 'activo' AND precio_boleto > 0 LIMIT 1`
+      );
+      const precioBoleto = parseFloat(sorteoRows[0]?.precio_boleto ?? 0);
+
       // Total mensual en Kernel por asociado — dentro de la transacción, ve boletos ya liberados
       const { rows: boletosKernel } = await client.query(`
-        SELECT b.asociado_codigo, SUM(s.precio_boleto)::numeric AS total_mensual
+        SELECT b.asociado_codigo,
+               SUM(s.precio_boleto)::numeric AS total_mensual,
+               COUNT(*)::int                 AS boletos_count
         FROM boletos b
         JOIN sorteos s ON s.id = b.sorteo_id
         WHERE b.estado = 'asignado' AND s.estado = 'activo' AND s.precio_boleto > 0
         GROUP BY b.asociado_codigo
       `);
-      const boletosMap        = new Map(boletosKernel.map((r) => [r.asociado_codigo, parseFloat(r.total_mensual)]));
+      const boletosMap      = new Map(boletosKernel.map((r) => [r.asociado_codigo, parseFloat(r.total_mensual)]));
+      const boletosCountMap = new Map(boletosKernel.map((r) => [r.asociado_codigo, r.boletos_count]));
       const codigosActivosSet = new Set(codigosCSV);
       const validosMap        = new Map(validos.map((v) => [v.codigo, v]));
 
@@ -440,12 +449,15 @@ export const importarCSV = async (req, res, next) => {
         const cuotaKernel  = Math.round((totalMensual / factor) * 100) / 100;
         const cuotaExterna = Math.round(d.cuota_externa * 100) / 100;
 
+        const periodo = factor === 2 ? 'quincenal' : 'mensual';
+
         if (!activo) {
-          discrepancias.push({ tipo: 'COBRO_A_RETIRADO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0 });
+          discrepancias.push({ tipo: 'COBRO_A_RETIRADO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0, boletos_count: 0, periodo });
         } else if (totalMensual === 0) {
-          discrepancias.push({ tipo: 'COBRO_SIN_BOLETO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0 });
+          const bonos_sugeridos = precioBoleto > 0 ? Math.round((cuotaExterna * factor) / precioBoleto) : null;
+          discrepancias.push({ tipo: 'COBRO_SIN_BOLETO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0, boletos_count: 0, periodo, bonos_sugeridos });
         } else if (Math.abs(cuotaExterna - cuotaKernel) > 1) {
-          discrepancias.push({ tipo: 'MONTO_INCORRECTO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: cuotaKernel, diferencia: Math.round((cuotaExterna - cuotaKernel) * 100) / 100 });
+          discrepancias.push({ tipo: 'MONTO_INCORRECTO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: cuotaKernel, diferencia: Math.round((cuotaExterna - cuotaKernel) * 100) / 100, boletos_count: boletosCountMap.get(codigo) ?? 0, periodo });
         }
       }
 
@@ -454,10 +466,10 @@ export const importarCSV = async (req, res, next) => {
         if (!mapa15.has(codigo) && codigosActivosSet.has(codigo)) {
           const asocData = validosMap.get(codigo);
           if (asocData) {
-            // clase_cuota viene de periodo_descto: '1-Mensual' → factor 1, '2-Quincenal' → factor 2
-          const factor      = String(asocData.clase_cuota).startsWith('2') ? 2 : 1;
-          const cuotaKernel = Math.round((totalMensual / factor) * 100) / 100;
-            discrepancias.push({ tipo: 'SIN_COBRO_EXTERNO', codigo, nombre: `${asocData.nombre} ${asocData.apellido}`, empresa: asocData.nombre_empresa, cuota_externa: 0, cuota_kernel: cuotaKernel });
+            const factor      = String(asocData.clase_cuota).startsWith('2') ? 2 : 1;
+            const cuotaKernel = Math.round((totalMensual / factor) * 100) / 100;
+            const periodo     = factor === 2 ? 'quincenal' : 'mensual';
+            discrepancias.push({ tipo: 'SIN_COBRO_EXTERNO', codigo, nombre: `${asocData.nombre} ${asocData.apellido}`, empresa: asocData.nombre_empresa, cuota_externa: 0, cuota_kernel: cuotaKernel, boletos_count: boletosCountMap.get(codigo) ?? 0, periodo });
           }
         }
       }
@@ -474,10 +486,11 @@ export const importarCSV = async (req, res, next) => {
       discrepancias,
     };
 
-    await client.query(
+    const { rows: [{ id: sincId }] } = await client.query(
       `INSERT INTO sincronizaciones
          (usuario_uuid, archivo, total, nuevos, actualizados, retirados, errores, boletos_liberados, detalle)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
       [req.user.id, req.file.originalname, registrosFiltrados.length, nuevos, actualizados, retirados,
        errores.length, boletosLiberados, JSON.stringify(detalle)]
     );
@@ -490,7 +503,7 @@ export const importarCSV = async (req, res, next) => {
       modulo: 'asociados',
     }).catch(() => {});
 
-    res.json({ nuevos, actualizados, retirados, boletos_liberados: boletosLiberados, errores, total: registrosFiltrados.length, discrepancias });
+    res.json({ nuevos, actualizados, retirados, boletos_liberados: boletosLiberados, errores, total: registrosFiltrados.length, discrepancias, sync_id: sincId });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
@@ -543,6 +556,56 @@ export const detalleSincronizacion = async (req, res, next) => {
     res.json(row.detalle ?? {});
   } catch (err) {
     next(err);
+  }
+};
+
+export const subsanarDiscrepancia = async (req, res, next) => {
+  const { id, codigo } = req.params;
+  const { numeros, sorteo_id, sorteo_nombre } = req.body ?? {};
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: [row] } = await client.query(
+      `SELECT detalle FROM sincronizaciones WHERE id = $1 FOR UPDATE`,
+      [id]
+    );
+    if (!row) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Sincronización no encontrada' });
+    }
+
+    const detalle = row.detalle ?? {};
+    let marcado = false;
+    if (Array.isArray(detalle.discrepancias)) {
+      const idx = detalle.discrepancias.findIndex(
+        (d) => d.codigo === codigo && d.tipo === 'COBRO_SIN_BOLETO'
+      );
+      if (idx !== -1) {
+        detalle.discrepancias[idx].subsanada        = true;
+        detalle.discrepancias[idx].subsanada_at     = new Date().toISOString();
+        if (Array.isArray(numeros))  detalle.discrepancias[idx].numeros_asignados = numeros;
+        if (sorteo_id)               detalle.discrepancias[idx].sorteo_id         = sorteo_id;
+        if (sorteo_nombre)           detalle.discrepancias[idx].sorteo_nombre     = sorteo_nombre;
+        marcado = true;
+      }
+    }
+    if (!marcado) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Discrepancia no encontrada' });
+    }
+
+    await client.query(
+      `UPDATE sincronizaciones SET detalle = $1 WHERE id = $2`,
+      [JSON.stringify(detalle), id]
+    );
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
   }
 };
 
@@ -682,6 +745,18 @@ export const marcarTodasNotifsLeidas = async (req, res, next) => {
     await pool.query(
       `UPDATE notificaciones SET leida = true
        WHERE asociado_codigo = $1 AND leida = false`,
+      [req.asociado.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const aceptarTerminos = async (req, res, next) => {
+  try {
+    await pool.query(
+      `UPDATE asociados SET acepto_terminos_portal_at = NOW(), updated_at = NOW() WHERE codigo = $1`,
       [req.asociado.id]
     );
     res.json({ ok: true });

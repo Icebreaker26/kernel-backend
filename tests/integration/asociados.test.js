@@ -792,3 +792,123 @@ describe('Asociados — subsanar discrepancia', () => {
     expect(disc.sorteo_nombre).toBe('Sorteo Test');
   });
 });
+
+// ── Dry-run (preview sin escritura) ──────────────────────────────────────────
+
+describe('Asociados — importar preview (dry-run)', () => {
+  test('POST /api/asociados/importar/preview sin token → 401', async () => {
+    const res = await request(app)
+      .post('/api/asociados/importar/preview')
+      .attach('archivo', Buffer.from(CSV_VALIDO), 'dry.csv');
+    expect(res.status).toBe(401);
+  });
+
+  test('POST /api/asociados/importar/preview sin archivo → 400', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.post('/api/asociados/importar/preview');
+    expect(res.status).toBe(400);
+  });
+
+  test('POST /api/asociados/importar/preview CSV válido → 200 con estructura de impacto', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag
+      .post('/api/asociados/importar/preview')
+      .attach('archivo', Buffer.from(CSV_VALIDO), 'dry.csv');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('total_csv');
+    expect(res.body).toHaveProperty('validos');
+    expect(res.body).toHaveProperty('errores_formato');
+    expect(res.body).toHaveProperty('impacto');
+    expect(res.body.impacto).toHaveProperty('nuevos');
+    expect(res.body.impacto).toHaveProperty('actualizados');
+    expect(res.body.impacto).toHaveProperty('retirados');
+    expect(res.body.impacto).toHaveProperty('activos_actuales');
+    expect(Array.isArray(res.body.advertencias)).toBe(true);
+  });
+
+  test('POST /api/asociados/importar/preview no escribe en sincronizaciones', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { rows: [{ c: antes }] } = await pool.query(
+      'SELECT COUNT(*) AS c FROM sincronizaciones WHERE usuario_uuid = $1',
+      [adminUuid]
+    );
+    await ag
+      .post('/api/asociados/importar/preview')
+      .attach('archivo', Buffer.from(CSV_VALIDO), 'dry.csv');
+    const { rows: [{ c: despues }] } = await pool.query(
+      'SELECT COUNT(*) AS c FROM sincronizaciones WHERE usuario_uuid = $1',
+      [adminUuid]
+    );
+    expect(Number(despues)).toBe(Number(antes));
+  });
+
+  test('POST /api/asociados/importar/preview devuelve activos_actuales correcto', async () => {
+    const { rows: [{ count: activosDB }] } = await pool.query(
+      'SELECT COUNT(*) AS count FROM asociados WHERE is_active = true'
+    );
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag
+      .post('/api/asociados/importar/preview')
+      .attach('archivo', Buffer.from(CSV_VALIDO), 'dry.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.impacto.activos_actuales).toBe(Number(activosDB));
+  });
+});
+
+// ── Snapshot activos_antes ────────────────────────────────────────────────────
+
+describe('Asociados — snapshot activos_antes en detalle de sync', () => {
+  afterAll(async () => {
+    await pool.query('DELETE FROM sincronizaciones WHERE usuario_uuid = $1', [adminUuid]);
+  });
+
+  test('POST /api/asociados/importar guarda activos_antes correcto en detalle', async () => {
+    const { rows: [{ count: activosAntes }] } = await pool.query(
+      'SELECT COUNT(*) AS count FROM asociados WHERE is_active = true'
+    );
+
+    const ag = agent();
+    await loginAdmin(ag);
+    await ag
+      .post('/api/asociados/importar')
+      .attach('archivo', Buffer.from(CSV_VALIDO), 'snap.csv');
+
+    const { rows: [sinc] } = await pool.query(
+      `SELECT detalle FROM sincronizaciones WHERE usuario_uuid = $1 ORDER BY created_at DESC LIMIT 1`,
+      [adminUuid]
+    );
+    expect(sinc).toBeDefined();
+    expect(sinc.detalle).toHaveProperty('activos_antes');
+    expect(typeof sinc.detalle.activos_antes).toBe('number');
+    expect(sinc.detalle.activos_antes).toBe(Number(activosAntes));
+  });
+});
+
+// ── Lock de concurrencia ──────────────────────────────────────────────────────
+
+describe('Asociados — lock de concurrencia', () => {
+  test('Segundo sync rechazado con 409 si hay uno en curso', async () => {
+    const lockClient = await pool.connect();
+    try {
+      // Simular sync en curso: adquirir el advisory lock en transacción aparte
+      await lockClient.query('BEGIN');
+      await lockClient.query('SELECT pg_advisory_xact_lock(1750000001)');
+
+      const ag = agent();
+      await loginAdmin(ag);
+      const res = await ag
+        .post('/api/asociados/importar')
+        .attach('archivo', Buffer.from(CSV_VALIDO), 'lock.csv');
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toMatch(/sincronización en curso/i);
+    } finally {
+      await lockClient.query('ROLLBACK'); // libera el advisory lock
+      lockClient.release();
+    }
+  });
+});

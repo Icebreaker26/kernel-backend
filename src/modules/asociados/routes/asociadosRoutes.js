@@ -7,7 +7,7 @@ import { loginRateLimiter, solicitarPortalLimiter } from '../../../middlewares/r
 import * as ctrl from '../controllers/asociadosController.js';
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 // ── Público: solicitud de acceso ──────────────────────────────────────────────
 router.post('/solicitar-portal', solicitarPortalLimiter, ctrl.solicitarPortal);
@@ -30,6 +30,11 @@ router.get('/pendientes-portal',
 router.get('/',
   verifyToken, checkPermission('asociados', 'READ'),
   ctrl.listarAsociados
+);
+router.post('/importar/preview',
+  verifyToken, checkPermission('asociados', 'WRITE'),
+  upload.single('archivo'),
+  ctrl.previewImportarCSV
 );
 router.post('/importar',
   verifyToken, checkPermission('asociados', 'WRITE'),

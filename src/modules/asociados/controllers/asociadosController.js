@@ -246,6 +246,25 @@ export const importarCSV = async (req, res, next) => {
     const INSERT_BATCH = 200;
     const codigosCSV   = validos.map((d) => d.codigo);
 
+    const guardsActivos = process.env.NODE_ENV !== 'test';
+
+    // Guard 1: archivo sin filas válidas — formato incorrecto
+    if (guardsActivos && validos.length === 0) {
+      return res.status(422).json({
+        error: 'El archivo no contiene filas válidas. Verifica que sea el padrón de Platinum (línea 1) con los campos requeridos.',
+        errores: errores.slice(0, 5),
+      });
+    }
+
+    // Guard 2: tasa de error superior al 30% — archivo sospechoso
+    const tasaError = registrosFiltrados.length > 0 ? errores.length / registrosFiltrados.length : 0;
+    if (guardsActivos && tasaError > 0.3) {
+      return res.status(422).json({
+        error: `El ${Math.round(tasaError * 100)}% de las filas son inválidas (${errores.length} de ${registrosFiltrados.length}). Verifica el formato del archivo antes de continuar.`,
+        errores: errores.slice(0, 5),
+      });
+    }
+
     await client.query('BEGIN');
 
     const detalleNuevos = [];
@@ -304,6 +323,25 @@ export const importarCSV = async (req, res, next) => {
       rows.forEach((r) => {
         if (r.es_nuevo) { nuevos++; detalleNuevos.push({ codigo: r.codigo, nombre: r.nombre, apellido: r.apellido, empresa: r.nombre_empresa }); }
         else            { actualizados++; }
+      });
+    }
+
+    // Guard 3: no retirar más del 20% del padrón activo en un solo sync
+    const { rows: [{ count: activosActuales }] } = await client.query(
+      `SELECT COUNT(*)::int AS count FROM asociados WHERE is_active = true`
+    );
+    const { rows: [{ count: retirosProyectados }] } = await client.query(
+      `SELECT COUNT(*)::int AS count FROM asociados WHERE codigo != ALL($1) AND is_active = true`,
+      [codigosCSV]
+    );
+    const limiteRetiros = Math.ceil(activosActuales * 0.2);
+    if (guardsActivos && retirosProyectados > limiteRetiros && retirosProyectados > 50) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        error: `Este sync retiraría ${retirosProyectados} asociados (${Math.round(retirosProyectados / activosActuales * 100)}% del padrón activo). El límite de seguridad es 20%. Verifica el archivo y contacta al administrador.`,
+        retirados_proyectados: retirosProyectados,
+        activos_actuales: activosActuales,
+        limite: limiteRetiros,
       });
     }
 
@@ -529,6 +567,7 @@ export const historialSincronizaciones = async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT s.id, s.archivo, s.total, s.nuevos, s.actualizados, s.retirados, s.errores,
               s.boletos_liberados, s.created_at,
+              s.revertido_at, rv.nombre AS revertido_por_nombre,
               u.nombre AS usuario, u.email AS usuario_email,
               CASE WHEN jsonb_typeof(s.detalle->'discrepancias') = 'array'
                    THEN jsonb_array_length(s.detalle->'discrepancias')
@@ -536,12 +575,77 @@ export const historialSincronizaciones = async (req, res, next) => {
               END AS discrepancias_count
        FROM sincronizaciones s
        JOIN global_usuarios u ON u.id = s.usuario_uuid
+       LEFT JOIN global_usuarios rv ON rv.id = s.revertido_por
        ORDER BY s.created_at DESC
        LIMIT 100`
     );
     res.json(rows);
   } catch (err) {
     next(err);
+  }
+};
+
+export const revertirSincronizacion = async (req, res, next) => {
+  const { id } = req.params;
+  const client = await pool.connect();
+  try {
+    const { rows: [sinc] } = await client.query(
+      `SELECT id, created_at, revertido_at, retirados, boletos_liberados, detalle
+       FROM sincronizaciones WHERE id = $1`,
+      [id]
+    );
+    if (!sinc) return res.status(404).json({ error: 'Sincronización no encontrada' });
+    if (sinc.revertido_at) return res.status(409).json({ error: 'Esta sincronización ya fue revertida' });
+    if (!sinc.retirados && !sinc.boletos_liberados) {
+      return res.status(400).json({ error: 'Esta sincronización no tiene retirados ni boletos liberados para revertir' });
+    }
+
+    await client.query('BEGIN');
+
+    // Restaurar boletos usando sorteo_logs (fuente de verdad con asociado_codigo)
+    const { rowCount: boletosRestaurados } = await client.query(`
+      UPDATE boletos b
+      SET
+        estado          = 'asignado',
+        asociado_codigo = sl.asociado_codigo,
+        fecha_asignacion = COALESCE(b.fecha_asignacion, NOW())
+      FROM (
+        SELECT DISTINCT ON (sorteo_id, numero)
+          sorteo_id, numero, asociado_codigo
+        FROM sorteo_logs
+        WHERE accion = 'LIBERACION_POR_RETIRO_CSV'
+          AND created_at = $1
+        ORDER BY sorteo_id, numero, created_at DESC
+      ) sl
+      WHERE b.sorteo_id = sl.sorteo_id AND b.numero = sl.numero
+    `, [sinc.created_at]);
+
+    // Restaurar asociados usando la lista del detalle (más fiable que fecha_retiro)
+    const codigosRetirados = (sinc.detalle?.retirados ?? []).map((r) => r.codigo);
+    let asociadosRestaurados = 0;
+    if (codigosRetirados.length > 0) {
+      const { rowCount } = await client.query(
+        `UPDATE asociados SET is_active = true, fecha_retiro = NULL, updated_at = NOW()
+         WHERE codigo = ANY($1)`,
+        [codigosRetirados]
+      );
+      asociadosRestaurados = rowCount;
+    }
+
+    // Marcar sync como revertido
+    await client.query(
+      `UPDATE sincronizaciones SET revertido_at = NOW(), revertido_por = $1 WHERE id = $2`,
+      [req.user.id, id]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({ asociados_restaurados: asociadosRestaurados, boletos_restaurados: boletosRestaurados });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
   }
 };
 

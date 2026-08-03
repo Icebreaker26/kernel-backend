@@ -888,6 +888,66 @@ describe('Asociados — snapshot activos_antes en detalle de sync', () => {
   });
 });
 
+// ── Revert encadenado ────────────────────────────────────────────────────────
+
+describe('Asociados — revert encadenado (A luego B)', () => {
+  let sincIdA, sincIdB;
+
+  const CSV_A = `codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad
+REV_A01,García,Pedro,1,EMP01,Empresa Test,Pereira`;
+
+  const CSV_B = `codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad
+REV_B01,López,Ana,1,EMP01,Empresa Test,Pereira`;
+
+  beforeAll(async () => {
+    await pool.query('DELETE FROM sincronizaciones WHERE usuario_uuid = $1', [adminUuid]);
+    await pool.query("DELETE FROM asociados WHERE codigo IN ('REV_A01','REV_B01')");
+
+    const ag = agent();
+    await loginAdmin(ag);
+    const rA = await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_A), 'a.csv');
+    sincIdA = rA.body.sync_id;
+
+    const rB = await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_B), 'b.csv');
+    sincIdB = rB.body.sync_id;
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM sincronizaciones WHERE usuario_uuid = $1', [adminUuid]);
+    await pool.query("DELETE FROM asociados WHERE codigo IN ('REV_A01','REV_B01')");
+  });
+
+  test('Revertir A (no el más reciente) → 409', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.post(`/api/asociados/sincronizaciones/${sincIdA}/revertir`);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/más reciente/i);
+  });
+
+  test('Revertir B (el más reciente no-revertido) → 200', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.post(`/api/asociados/sincronizaciones/${sincIdB}/revertir`);
+    expect(res.status).toBe(200);
+  });
+
+  test('Revertir B por segunda vez → 409 (ya revertido)', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.post(`/api/asociados/sincronizaciones/${sincIdB}/revertir`);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/ya fue revertida/i);
+  });
+
+  test('Revertir A después de revertir B → 200 (revert encadenado)', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.post(`/api/asociados/sincronizaciones/${sincIdA}/revertir`);
+    expect(res.status).toBe(200);
+  });
+});
+
 // ── Lock de concurrencia ──────────────────────────────────────────────────────
 
 describe('Asociados — lock de concurrencia', () => {

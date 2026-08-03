@@ -1,6 +1,7 @@
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { parse } from 'csv-parse/sync';
+import iconv from 'iconv-lite';
 import pool from '../../../db/database.js';
 import { env } from '../../../config/env.js';
 import { loginAsociadoSchema, importarFilaSchema, solicitarPortalSchema } from '../schemas/asociadosSchema.js';
@@ -222,10 +223,25 @@ export const importarCSV = async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No se adjuntó ningún archivo' });
 
-    const registros = parse(req.file.buffer, {
+    // Detectar encoding: si el buffer no es UTF-8 válido, asumir Latin-1
+    let csvText;
+    try {
+      const decoded = req.file.buffer.toString('utf8');
+      if (decoded.includes('�')) throw new Error('non-utf8');
+      csvText = decoded;
+    } catch {
+      csvText = iconv.decode(req.file.buffer, 'latin1');
+    }
+
+    // Detectar delimiter: contar comas vs puntos y coma en la primera línea
+    const primeraLinea = csvText.slice(0, csvText.indexOf('\n'));
+    const delimiter = (primeraLinea.split(';').length > primeraLinea.split(',').length) ? ';' : ',';
+
+    const registros = parse(csvText, {
       columns: true,
       skip_empty_lines: true,
       trim: true,
+      delimiter,
     });
 
     // Si el CSV trae columna "linea", solo procesar las de linea=1

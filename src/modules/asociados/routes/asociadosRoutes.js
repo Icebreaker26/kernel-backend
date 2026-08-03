@@ -48,6 +48,10 @@ router.patch('/sincronizaciones/:id/subsanar/:codigo',
   verifyToken, checkPermission('asociados', 'WRITE'),
   ctrl.subsanarDiscrepancia
 );
+router.post('/sincronizaciones/:id/revertir',
+  verifyToken, checkPermission('asociados', 'WRITE'),
+  ctrl.revertirSincronizacion
+);
 
 router.get('/:codigo/perfil',
   verifyToken, checkPermission('asociados', 'READ'),

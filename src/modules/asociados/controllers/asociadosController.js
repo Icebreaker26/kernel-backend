@@ -218,46 +218,114 @@ export const rechazarSolicitudPortal = async (req, res, next) => {
 
 // ── Admin: importar CSV ───────────────────────────────────────────────────────
 
+// ── Helper compartido de parsing ──────────────────────────────────────────────
+
+const parsearCSV = (buffer) => {
+  let csvText;
+  try {
+    const decoded = buffer.toString('utf8');
+    if (decoded.includes('�')) throw new Error('non-utf8');
+    csvText = decoded;
+  } catch {
+    csvText = iconv.decode(buffer, 'latin1');
+  }
+  const primeraLinea = csvText.slice(0, csvText.indexOf('\n'));
+  const delimiter = (primeraLinea.split(';').length > primeraLinea.split(',').length) ? ';' : ',';
+  const registros = parse(csvText, { columns: true, skip_empty_lines: true, trim: true, delimiter });
+  const registrosFiltrados = registros.filter((r) => !r.linea || String(r.linea).trim() === '1');
+  const errores = [];
+  const validos = [];
+  for (const fila of registrosFiltrados) {
+    const result = importarFilaSchema.safeParse(fila);
+    if (!result.success) errores.push({ fila: fila.codigo ?? '?', error: result.error.flatten() });
+    else validos.push(result.data);
+  }
+  return { registros, registrosFiltrados, validos, errores };
+};
+
+// ── Dry-run: analiza el CSV contra la BD sin escribir nada ────────────────────
+
+export const previewImportarCSV = async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No se adjuntó ningún archivo' });
+
+    const { registrosFiltrados, validos, errores } = parsearCSV(req.file.buffer);
+    const guardsActivos = process.env.NODE_ENV !== 'test';
+
+    if (guardsActivos && validos.length === 0) {
+      return res.status(422).json({
+        error: 'El archivo no contiene filas válidas. Verifica que sea el padrón de Platinum con los campos requeridos.',
+        errores: errores.slice(0, 5),
+      });
+    }
+
+    const tasaError = registrosFiltrados.length > 0 ? errores.length / registrosFiltrados.length : 0;
+    if (guardsActivos && tasaError > 0.3) {
+      return res.status(422).json({
+        error: `El ${Math.round(tasaError * 100)}% de las filas son inválidas (${errores.length} de ${registrosFiltrados.length}). Verifica el formato del archivo.`,
+        errores: errores.slice(0, 5),
+      });
+    }
+
+    const MAX_FILAS = 10_000;
+    if (guardsActivos && registrosFiltrados.length > MAX_FILAS) {
+      return res.status(422).json({
+        error: `El archivo tiene ${registrosFiltrados.length.toLocaleString('es-CO')} filas. El máximo permitido es ${MAX_FILAS.toLocaleString('es-CO')}.`,
+      });
+    }
+
+    const codigosCSV = validos.map((d) => d.codigo);
+
+    const [nuevosRes, actualizadosRes, retiradosRes, activosRes] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*) AS count FROM (SELECT unnest($1::text[]) AS codigo) csv
+         WHERE NOT EXISTS (SELECT 1 FROM asociados a WHERE a.codigo = csv.codigo)`,
+        [codigosCSV]
+      ),
+      pool.query(`SELECT COUNT(*) AS count FROM asociados WHERE codigo = ANY($1)`, [codigosCSV]),
+      pool.query(`SELECT COUNT(*) AS count FROM asociados WHERE codigo != ALL($1) AND is_active = true`, [codigosCSV]),
+      pool.query(`SELECT COUNT(*) AS count FROM asociados WHERE is_active = true`),
+    ]);
+
+    const retiradosCount = Number(retiradosRes.rows[0].count);
+    const activosCount   = Number(activosRes.rows[0].count);
+    const limiteRetiros  = Math.ceil(activosCount * 0.2);
+
+    const advertencias = [];
+    if (guardsActivos && retiradosCount > limiteRetiros && retiradosCount > 50) {
+      advertencias.push({
+        tipo: 'retiros_excesivos',
+        mensaje: `Este sync retiraría ${retiradosCount} asociados (${Math.round(retiradosCount / activosCount * 100)}% del padrón). El límite de seguridad es 20%.`,
+        bloqueante: true,
+      });
+    }
+
+    res.json({
+      total_csv:       registrosFiltrados.length,
+      validos:         validos.length,
+      errores_formato: errores.length,
+      impacto: {
+        nuevos:           Number(nuevosRes.rows[0].count),
+        actualizados:     Number(actualizadosRes.rows[0].count),
+        retirados:        retiradosCount,
+        activos_actuales: activosCount,
+      },
+      advertencias,
+      muestra_errores: errores.slice(0, 3),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── Sync real ─────────────────────────────────────────────────────────────────
+
 export const importarCSV = async (req, res, next) => {
   const client = await pool.connect();
   try {
     if (!req.file) return res.status(400).json({ error: 'No se adjuntó ningún archivo' });
 
-    // Detectar encoding: si el buffer no es UTF-8 válido, asumir Latin-1
-    let csvText;
-    try {
-      const decoded = req.file.buffer.toString('utf8');
-      if (decoded.includes('�')) throw new Error('non-utf8');
-      csvText = decoded;
-    } catch {
-      csvText = iconv.decode(req.file.buffer, 'latin1');
-    }
-
-    // Detectar delimiter: contar comas vs puntos y coma en la primera línea
-    const primeraLinea = csvText.slice(0, csvText.indexOf('\n'));
-    const delimiter = (primeraLinea.split(';').length > primeraLinea.split(',').length) ? ';' : ',';
-
-    const registros = parse(csvText, {
-      columns: true,
-      skip_empty_lines: true,
-      trim: true,
-      delimiter,
-    });
-
-    // Si el CSV trae columna "linea", solo procesar las de linea=1
-    const registrosFiltrados = registros.filter((r) => !r.linea || String(r.linea).trim() === '1');
-
-    const errores = [];
-    const validos = [];
-
-    for (const fila of registrosFiltrados) {
-      const result = importarFilaSchema.safeParse(fila);
-      if (!result.success) {
-        errores.push({ fila: fila.codigo ?? '?', error: result.error.flatten() });
-      } else {
-        validos.push(result.data);
-      }
-    }
+    const { registros, registrosFiltrados, validos, errores } = parsearCSV(req.file.buffer);
 
     const INSERT_BATCH = 200;
     const codigosCSV   = validos.map((d) => d.codigo);
@@ -281,7 +349,31 @@ export const importarCSV = async (req, res, next) => {
       });
     }
 
+    // Guard 4: límite de filas para evitar timeouts y problemas de memoria
+    const MAX_FILAS = 10_000;
+    if (guardsActivos && registrosFiltrados.length > MAX_FILAS) {
+      return res.status(422).json({
+        error: `El archivo tiene ${registrosFiltrados.length.toLocaleString('es-CO')} filas. El máximo permitido es ${MAX_FILAS.toLocaleString('es-CO')}.`,
+      });
+    }
+
     await client.query('BEGIN');
+
+    // Lock de concurrencia: si otro sync está corriendo, falla rápido en lugar de encolar
+    const { rows: [{ acquired }] } = await client.query(
+      `SELECT pg_try_advisory_xact_lock(1750000001) AS acquired`
+    );
+    if (!acquired) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Hay una sincronización en curso. Espera a que termine antes de importar otro archivo.',
+      });
+    }
+
+    // Snapshot: activos antes del sync (para auditoría)
+    const { rows: [{ count: activosAntesSinc }] } = await client.query(
+      `SELECT COUNT(*)::int AS count FROM asociados WHERE is_active = true`
+    );
 
     const detalleNuevos = [];
     let nuevos      = 0;
@@ -531,6 +623,7 @@ export const importarCSV = async (req, res, next) => {
 
     // Auditoría
     const detalle = {
+      activos_antes: activosAntesSinc,
       nuevos:    detalleNuevos,
       retirados: detalleRetirados,
       boletos_liberados: boletosALiberar.map((b) => ({
@@ -551,10 +644,25 @@ export const importarCSV = async (req, res, next) => {
 
     await client.query('COMMIT');
 
+    const msgSync = `${nuevos} nuevos · ${actualizados} actualizados · ${retirados} retirados · ${boletosLiberados} boletos liberados`;
     notificarUsuario(req.user.id, {
       tipo: 'sincronizacion_completada',
-      mensaje: `Importación completada: ${nuevos} nuevos, ${actualizados} actualizados, ${retirados} retirados, ${boletosLiberados} boletos liberados`,
+      mensaje: `Importación completada: ${msgSync}`,
       modulo: 'asociados',
+    }).catch(() => {});
+    // Notificar a los demás admins activos (excluir al que hizo el sync)
+    pool.query(
+      `SELECT id FROM global_usuarios WHERE rol = 'admin' AND is_active = true AND id != $1`,
+      [req.user.id]
+    ).then(async ({ rows }) => {
+      const nombre = req.user.nombre ?? 'Un administrador';
+      for (const { id } of rows) {
+        await notificarUsuario(id, {
+          tipo: 'sincronizacion_completada',
+          mensaje: `${nombre} sincronizó el padrón: ${msgSync}`,
+          modulo: 'asociados',
+        });
+      }
     }).catch(() => {});
 
     res.json({ nuevos, actualizados, retirados, boletos_liberados: boletosLiberados, errores, total: registrosFiltrados.length, discrepancias, sync_id: sincId });

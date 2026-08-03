@@ -616,6 +616,16 @@ export const revertirSincronizacion = async (req, res, next) => {
       return res.status(400).json({ error: 'Esta sincronización no tiene retirados ni boletos liberados para revertir' });
     }
 
+    // Solo se puede revertir el sync más reciente — revertir uno antiguo corrompería el estado actual
+    const { rows: [masReciente] } = await client.query(
+      `SELECT id FROM sincronizaciones ORDER BY created_at DESC LIMIT 1`
+    );
+    if (masReciente.id !== id) {
+      return res.status(409).json({
+        error: 'Solo se puede revertir la sincronización más reciente. Existen syncs posteriores que construyeron sobre este estado.',
+      });
+    }
+
     await client.query('BEGIN');
 
     // Restaurar boletos usando sorteo_logs (fuente de verdad con asociado_codigo)

@@ -137,6 +137,13 @@ export const resumen = async (req, res, next) => {
 export const cobertura = async (req, res, next) => {
   try {
     const { sorteoId } = req.params;
+    // Verificar que el sorteo existe y está en estado visible antes de devolver datos
+    const { rows: [sorteo] } = await pool.query(
+      `SELECT id FROM sorteos WHERE id = $1 AND estado IN ('activo', 'pausado')`,
+      [sorteoId]
+    );
+    if (!sorteo) return res.json([]);
+
     const { rows } = await pool.query(
       `SELECT
          e.codigo, e.nombre,

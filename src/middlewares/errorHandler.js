@@ -7,5 +7,8 @@ export const errorHandler = (err, req, res, next) => {
   }
 
   logger.error(`${req.path} — ${err.message}`, { stack: err.stack });
-  res.status(err.status || 500).json({ error: err.message || 'Error interno del servidor' });
+  const isProd = process.env.NODE_ENV === 'production';
+  res.status(err.status || 500).json({
+    error: isProd ? 'Error interno del servidor' : (err.message || 'Error interno del servidor'),
+  });
 };

@@ -26,8 +26,11 @@ export const registrarGanadorSchema = z.object({
 }).strict();
 
 export const actualizarSorteoSchema = z.object({
-  precio_boleto: z.preprocess((v) => Number(v), z.number().nonnegative('El precio no puede ser negativo')),
-}).strict();
+  precio_boleto: z.preprocess((v) => Number(v), z.number().nonnegative('El precio no puede ser negativo')).optional(),
+  tipo_pago:     z.enum(['recurrente', 'unico']).optional(),
+}).strict().refine((d) => d.precio_boleto !== undefined || d.tipo_pago !== undefined, {
+  message: 'Se requiere al menos un campo para actualizar',
+});
 
 export const solicitarBonoSchema = z.object({
   numero:    z.preprocess((v) => Number(v), z.number().int().min(0).max(999)),

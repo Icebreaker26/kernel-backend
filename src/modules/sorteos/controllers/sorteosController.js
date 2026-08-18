@@ -107,10 +107,15 @@ export const crearSorteo = async (req, res, next) => {
 export const actualizarSorteo = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { precio_boleto } = actualizarSorteoSchema.parse(req.body);
+    const data = actualizarSorteoSchema.parse(req.body);
+    const sets = [];
+    const vals = [];
+    if (data.precio_boleto !== undefined) { sets.push(`precio_boleto = $${sets.length + 1}`); vals.push(data.precio_boleto); }
+    if (data.tipo_pago     !== undefined) { sets.push(`tipo_pago = $${sets.length + 1}`);     vals.push(data.tipo_pago); }
+    vals.push(id);
     const { rows: [sorteo] } = await pool.query(
-      `UPDATE sorteos SET precio_boleto = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
-      [precio_boleto, id]
+      `UPDATE sorteos SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${vals.length} RETURNING *`,
+      vals
     );
     if (!sorteo) return res.status(404).json({ error: 'Sorteo no encontrado' });
     res.json(sorteo);

@@ -948,6 +948,157 @@ REV_B01,López,Ana,1,EMP01,Empresa Test,Pereira`;
   });
 });
 
+// ── Descuentos portal (líneas adicionales del CSV) ───────────────────────────
+
+describe('Asociados — descuentos portal (GET /descuentos)', () => {
+  const codigoDesc = '9999888888';
+  let passwordDesc;
+
+  const CSV_CON_LINEAS = [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto',
+    `1,${codigoDesc},Desc,Test,1,EMP01,Empresa Test,Pereira,Calle X,3001234567,,`,
+    `4,${codigoDesc},Desc,Test,1,EMP01,Empresa Test,Pereira,Calle X,3001234567,15.000,`,
+    `5,${codigoDesc},Desc,Test,1,EMP01,Empresa Test,Pereira,Calle X,3001234567,8.000,`,
+  ].join('\n');
+
+  const CSV_ACTUALIZADO = [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto',
+    `1,${codigoDesc},Desc,Test,1,EMP01,Empresa Test,Pereira,Calle X,3001234567,,`,
+    `4,${codigoDesc},Desc,Test,1,EMP01,Empresa Test,Pereira,Calle X,3001234567,20.000,`,
+    `5,${codigoDesc},Desc,Test,1,EMP01,Empresa Test,Pereira,Calle X,3001234567,10.000,`,
+  ].join('\n');
+
+  beforeAll(async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_CON_LINEAS), 'desc.csv');
+    const { body } = await ag.post(`/api/asociados/${codigoDesc}/activar-portal`);
+    passwordDesc = body.password;
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM asociado_descuentos  WHERE asociado_codigo = $1', [codigoDesc]);
+    await pool.query('DELETE FROM sincronizaciones      WHERE usuario_uuid = $1',   [adminUuid]);
+    await pool.query('DELETE FROM asociados             WHERE codigo = $1',          [codigoDesc]);
+  });
+
+  test('GET /api/asociados/descuentos sin token → 401', async () => {
+    const res = await request(app).get('/api/asociados/descuentos');
+    expect(res.status).toBe(401);
+  });
+
+  test('GET /api/asociados/descuentos autenticado → 200 array con líneas 4 y 5', async () => {
+    const ag = agent();
+    await ag.post('/api/asociados/login').send({ codigo: codigoDesc, password: passwordDesc });
+    const res = await ag.get('/api/asociados/descuentos');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBeGreaterThanOrEqual(2);
+
+    const linea4 = res.body.find((d) => d.linea_id === 4);
+    expect(linea4).toBeDefined();
+    expect(linea4.nombre_linea).toBe('SEGURO FAMILIAR');
+    expect(Number(linea4.valor)).toBe(15000);
+
+    const linea5 = res.body.find((d) => d.linea_id === 5);
+    expect(linea5).toBeDefined();
+    expect(linea5.nombre_linea).toBe('SEGURO DE VIDA');
+    expect(Number(linea5.valor)).toBe(8000);
+  });
+
+  test('Re-sync con valores distintos → upsert actualiza los montos', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_ACTUALIZADO), 'desc2.csv');
+
+    const { rows } = await pool.query(
+      `SELECT linea_id, valor FROM asociado_descuentos WHERE asociado_codigo = $1 ORDER BY linea_id`,
+      [codigoDesc]
+    );
+    const l4 = rows.find((r) => r.linea_id === 4);
+    const l5 = rows.find((r) => r.linea_id === 5);
+    expect(Number(l4.valor)).toBe(20000);
+    expect(Number(l5.valor)).toBe(10000);
+  });
+
+  test('CSV sin lineas relevantes → datos anteriores permanecen', async () => {
+    const csvSoloL1 = [
+      'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto',
+      `1,${codigoDesc},Desc,Test,1,EMP01,Empresa Test,Pereira,Calle X,3001234567,,`,
+    ].join('\n');
+    const ag = agent();
+    await loginAdmin(ag);
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(csvSoloL1), 'desc3.csv');
+
+    const { rows } = await pool.query(
+      'SELECT COUNT(*) AS c FROM asociado_descuentos WHERE asociado_codigo = $1',
+      [codigoDesc]
+    );
+    expect(Number(rows[0].c)).toBeGreaterThan(0);
+  });
+});
+
+// ── Perfil admin incluye descuentos ──────────────────────────────────────────
+
+describe('Asociados — perfil admin incluye campo descuentos', () => {
+  const codigoPerfil = '9999777777';
+
+  const CSV_PERFIL = [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto',
+    `1,${codigoPerfil},Perfil,Test,1,EMP01,Empresa Test,Pereira,Calle Y,3009999999,,`,
+    `5,${codigoPerfil},Perfil,Test,1,EMP01,Empresa Test,Pereira,Calle Y,3009999999,12.000,`,
+    `1004,${codigoPerfil},Perfil,Test,1,EMP01,Empresa Test,Pereira,Calle Y,3009999999,350.000,`,
+  ].join('\n');
+
+  beforeAll(async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_PERFIL), 'perfil.csv');
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM asociado_descuentos WHERE asociado_codigo = $1', [codigoPerfil]);
+    await pool.query('DELETE FROM sincronizaciones      WHERE usuario_uuid = $1',  [adminUuid]);
+    await pool.query('DELETE FROM asociados             WHERE codigo = $1',         [codigoPerfil]);
+  });
+
+  test('GET /api/asociados/:codigo/perfil sin token → 401', async () => {
+    const res = await request(app).get(`/api/asociados/${codigoPerfil}/perfil`);
+    expect(res.status).toBe(401);
+  });
+
+  test('GET /api/asociados/:codigo/perfil → 200 incluye descuentos array', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.get(`/api/asociados/${codigoPerfil}/perfil`);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('descuentos');
+    expect(Array.isArray(res.body.descuentos)).toBe(true);
+    expect(res.body.descuentos.length).toBeGreaterThanOrEqual(2);
+
+    const linea5 = res.body.descuentos.find((d) => d.linea_id === 5);
+    expect(linea5).toBeDefined();
+    expect(linea5.nombre_linea).toBe('SEGURO DE VIDA');
+    expect(Number(linea5.valor)).toBe(12000);
+
+    const linea1004 = res.body.descuentos.find((d) => d.linea_id === 1004);
+    expect(linea1004).toBeDefined();
+    expect(linea1004.nombre_linea).toBe('CRÉDITO DE VINCULACIÓN');
+    expect(Number(linea1004.valor)).toBe(350000);
+  });
+
+  test('Cada descuento tiene linea_id, nombre_linea y valor', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag.get(`/api/asociados/${codigoPerfil}/perfil`);
+    body.descuentos.forEach((d) => {
+      expect(d).toHaveProperty('linea_id');
+      expect(d).toHaveProperty('nombre_linea');
+      expect(d).toHaveProperty('valor');
+    });
+  });
+});
+
 // ── Lock de concurrencia ──────────────────────────────────────────────────────
 
 describe('Asociados — lock de concurrencia', () => {

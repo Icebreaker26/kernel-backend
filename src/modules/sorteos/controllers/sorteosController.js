@@ -112,6 +112,7 @@ export const actualizarSorteo = async (req, res, next) => {
     const vals = [];
     if (data.precio_boleto !== undefined) { sets.push(`precio_boleto = $${sets.length + 1}`); vals.push(data.precio_boleto); }
     if (data.tipo_pago     !== undefined) { sets.push(`tipo_pago = $${sets.length + 1}`);     vals.push(data.tipo_pago); }
+    if (data.premio        !== undefined) { sets.push(`premio = $${sets.length + 1}`);        vals.push(data.premio); }
     vals.push(id);
     const { rows: [sorteo] } = await pool.query(
       `UPDATE sorteos SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${vals.length} RETURNING *`,

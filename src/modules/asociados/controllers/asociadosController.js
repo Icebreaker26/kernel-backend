@@ -1066,7 +1066,15 @@ export const perfilAsociado = async (req, res, next) => {
       [codigo]
     );
 
-    res.json({ asociado, bonosActivos, premios, historial, cuotas, solicitudesPendientes });
+    const { rows: descuentos } = await pool.query(
+      `SELECT linea_id, nombre_linea, valor
+       FROM asociado_descuentos
+       WHERE asociado_codigo = $1
+       ORDER BY linea_id`,
+      [codigo]
+    );
+
+    res.json({ asociado, bonosActivos, premios, historial, cuotas, solicitudesPendientes, descuentos });
   } catch (err) { next(err); }
 };
 

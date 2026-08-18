@@ -552,6 +552,87 @@ describe('Sorteos — cobertura por empresa', () => {
   });
 });
 
+// ── tipo_pago ─────────────────────────────────────────────────────────────────
+
+describe('Sorteos — tipo_pago', () => {
+  test('PUT /:id body vacío → 400', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.put(`/api/sorteos/${sorteoId}`).send({});
+    expect(res.status).toBe(400);
+  });
+
+  test('PUT /:id tipo_pago=unico → 200 + persiste en DB', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.put(`/api/sorteos/${sorteoId}`).send({ tipo_pago: 'unico' });
+    expect(res.status).toBe(200);
+    expect(res.body.tipo_pago).toBe('unico');
+    const { rows: [row] } = await pool.query('SELECT tipo_pago FROM sorteos WHERE id = $1', [sorteoId]);
+    expect(row.tipo_pago).toBe('unico');
+  });
+
+  test('PUT /:id tipo_pago=recurrente → 200 + revierte', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.put(`/api/sorteos/${sorteoId}`).send({ tipo_pago: 'recurrente' });
+    expect(res.status).toBe(200);
+    expect(res.body.tipo_pago).toBe('recurrente');
+  });
+
+  test('PUT /:id tipo_pago valor inválido → 400', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.put(`/api/sorteos/${sorteoId}`).send({ tipo_pago: 'invalido' });
+    expect(res.status).toBe(400);
+  });
+
+  test('PUT /:id sin token → 401', async () => {
+    const res = await request(app).put(`/api/sorteos/${sorteoId}`).send({ tipo_pago: 'unico' });
+    expect(res.status).toBe(401);
+  });
+});
+
+// ── premio ────────────────────────────────────────────────────────────────────
+
+describe('Sorteos — premio', () => {
+  test('PUT /:id con premio → 200 + persiste en DB', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.put(`/api/sorteos/${sorteoId}`).send({ premio: '$ 2.000.000' });
+    expect(res.status).toBe(200);
+    expect(res.body.premio).toBe('$ 2.000.000');
+    const { rows: [row] } = await pool.query('SELECT premio FROM sorteos WHERE id = $1', [sorteoId]);
+    expect(row.premio).toBe('$ 2.000.000');
+  });
+
+  test('PUT /:id premio=null → 200 + borra el campo', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.put(`/api/sorteos/${sorteoId}`).send({ premio: null });
+    expect(res.status).toBe(200);
+    expect(res.body.premio).toBeNull();
+  });
+
+  test('PUT /:id precio + premio juntos → 200 + actualiza ambos', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.put(`/api/sorteos/${sorteoId}`).send({ precio_boleto: 25000, premio: '$ 5.000.000' });
+    expect(res.status).toBe(200);
+    expect(Number(res.body.precio_boleto)).toBe(25000);
+    expect(res.body.premio).toBe('$ 5.000.000');
+    // limpiar
+    await ag.put(`/api/sorteos/${sorteoId}`).send({ precio_boleto: 20000, premio: null });
+  });
+
+  test('PUT /:id premio > 200 chars → 400', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.put(`/api/sorteos/${sorteoId}`).send({ premio: 'x'.repeat(201) });
+    expect(res.status).toBe(400);
+  });
+});
+
 // ── Asignación en lote por discrepancia ────────────────────────────────────
 
 describe('Sorteos — asignar-discrepancias-lote', () => {

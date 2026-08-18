@@ -16,6 +16,7 @@ router.post('/solicitar-portal', solicitarPortalLimiter, ctrl.solicitarPortal);
 router.post('/login',  loginRateLimiter, ctrl.loginAsociado);
 router.post('/logout', ctrl.logoutAsociado);
 router.get ('/me',                         verifyAsociado, ctrl.meAsociado);
+router.get ('/descuentos',                 verifyAsociado, ctrl.descuentosPortal);
 router.post('/aceptar-terminos',           verifyAsociado, ctrl.aceptarTerminos);
 router.put ('/password',                   verifyAsociado, ctrl.cambiarPasswordAsociado);
 router.get ('/notificaciones',             verifyAsociado, ctrl.listarNotificaciones);

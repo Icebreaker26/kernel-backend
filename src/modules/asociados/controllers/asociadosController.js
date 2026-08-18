@@ -218,6 +218,66 @@ export const rechazarSolicitudPortal = async (req, res, next) => {
 
 // ── Admin: importar CSV ───────────────────────────────────────────────────────
 
+// ── Catálogo de líneas del CSV ────────────────────────────────────────────────
+
+const CATALOGO_LINEAS = {
+  3:    'SALDO A FAVOR',
+  4:    'SEGURO FAMILIAR',
+  5:    'SEGURO DE VIDA',
+  10:   'SEGURO DE VIDA BÁSICO',
+  11:   'SEGURO DE VIDA COLMENA',
+  12:   'SEGURO VIDA 2013',
+  13:   'SEGURO VIDA - MERCADO',
+  14:   'CUOTA DE ADMISIÓN',
+  16:   'SEGURO DE VIDA ESPOSA',
+  17:   'FONDO DE BIENESTAR',
+  18:   'PÓLIZA DE VEHÍCULO',
+  19:   'PÓLIZA VEHÍCULO RC Y RCE',
+  20:   'RED MÉDICA PREHOSPITALARIO',
+  21:   'CUOTA TERCEROS',
+  22:   'EMI PREHOSPITALARIOS',
+  23:   'SERVICIO EXEQUIAL OFRENDA',
+  24:   'LOS OLIVOS - SERVICIO EXEQUIAL',
+  1002: 'VIVIENDA ANTERIOR',
+  1003: 'PROGRESEMOS 32 AÑOS',
+  1004: 'CRÉDITO DE VINCULACIÓN',
+  1005: 'CRÉDITO EMPLEADOS',
+  1006: 'CRÉDITO LIBRE INVERSIÓN',
+  1007: 'LA OFRENDA',
+  1008: 'CRÉDITO DE CALAMIDAD',
+  1009: 'CRÉDITO DE VEHÍCULO',
+  1010: 'CRÉDITO DE VIVIENDA',
+  1011: 'SEGURO VIDA ESPOSA',
+  1012: 'PÓLIZA VG - SEGUROS BOLÍVAR',
+  1013: 'CRÉDITOS 2017',
+  1014: 'SERVICIOS PRE-HOSPITALARIOS',
+  1015: 'CRÉDITO CAJA RÁPIDA',
+  1016: 'REFINANCIACIONES',
+  1017: 'BONO RECREACIONES',
+  1018: 'SEGURO VEHÍCULO',
+  1019: 'FUNERARIO NIETOS Y OTROS',
+  1020: 'ÓRDENES DE MERCADO',
+  1021: 'PRÉSTAMOS PASEOS',
+  1023: 'PRÉSTAMOS SEDE SOCIAL',
+  1024: 'ÓRDENES DE MERCANCÍA',
+  1025: 'PROGRESEMOS 32 AÑOS',
+  1027: 'SOAT',
+  1028: 'CRÉDITO DE EDUCACIÓN',
+  1029: 'CRÉDITO DE FIDELIZACIÓN',
+  1030: 'PRÉSTAMO CALAMIDAD',
+  1031: 'CUOTA DE ADMISIÓN',
+  1032: 'SEGURO DE HOGAR',
+  1033: 'PARAÍSO DE MASCOTAS',
+  1034: 'CONVENIO ODONTOLÓGICO',
+  1035: 'BONO SEDE RECREACIONAL',
+  1036: 'CRÉDITO PAGA FÁCIL',
+  1039: 'CRÉDITOS POLICÍA NACIONAL',
+  1040: 'FUNERARIA LOS OLIVOS',
+  1041: 'SURAMERICANA - SALUD',
+};
+
+const LINEAS_RELEVANTES = new Set(Object.keys(CATALOGO_LINEAS).map(Number));
+
 // ── Helper compartido de parsing ──────────────────────────────────────────────
 
 const parsearCSV = (buffer) => {
@@ -621,6 +681,52 @@ export const importarCSV = async (req, res, next) => {
       }
     }
 
+    // ── Descuentos líneas adicionales ────────────────────────────────────────
+    const parseCuotaNum = (str) => {
+      if (!str) return null;
+      const n = parseFloat(String(str).replace(/[$\s.]/g, '').replace(',', '.'));
+      return isNaN(n) || n <= 0 ? null : n;
+    };
+
+    const descuentosMap = new Map(); // 'codigo:lineaId' → { asociado_codigo, linea_id, nombre_linea, valor }
+    const codigosValidosSet = new Set(validos.map((v) => v.codigo));
+
+    for (const r of registros) {
+      const lineaId = parseInt(String(r.linea ?? '').trim(), 10);
+      if (!LINEAS_RELEVANTES.has(lineaId)) continue;
+      const codigo = String(r.codigo ?? '').trim();
+      if (!codigo || !codigosValidosSet.has(codigo)) continue;
+      const valor = parseCuotaNum(r.cuota);
+      if (!valor) continue;
+      descuentosMap.set(`${codigo}:${lineaId}`, {
+        asociado_codigo: codigo,
+        linea_id:        lineaId,
+        nombre_linea:    CATALOGO_LINEAS[lineaId] ?? `LÍNEA ${lineaId}`,
+        valor,
+      });
+    }
+
+    if (descuentosMap.size > 0) {
+      const codigos = [...new Set([...descuentosMap.values()].map((d) => d.asociado_codigo))];
+      await client.query(
+        `DELETE FROM asociado_descuentos WHERE asociado_codigo = ANY($1)`,
+        [codigos]
+      );
+      const items = [...descuentosMap.values()];
+      for (let i = 0; i < items.length; i += 200) {
+        const lote = items.slice(i, i + 200);
+        const vals = lote.map((_, j) => `($${j * 4 + 1},$${j * 4 + 2},$${j * 4 + 3},$${j * 4 + 4})`).join(',');
+        const params = lote.flatMap((d) => [d.asociado_codigo, d.linea_id, d.nombre_linea, d.valor]);
+        await client.query(
+          `INSERT INTO asociado_descuentos (asociado_codigo, linea_id, nombre_linea, valor)
+           VALUES ${vals}
+           ON CONFLICT (asociado_codigo, linea_id) DO UPDATE
+             SET nombre_linea = EXCLUDED.nombre_linea, valor = EXCLUDED.valor, updated_at = NOW()`,
+          params
+        );
+      }
+    }
+
     // Auditoría
     const detalle = {
       activos_antes: activosAntesSinc,
@@ -672,6 +778,19 @@ export const importarCSV = async (req, res, next) => {
   } finally {
     client.release();
   }
+};
+
+export const descuentosPortal = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT linea_id, nombre_linea, valor
+       FROM asociado_descuentos
+       WHERE asociado_codigo = $1
+       ORDER BY linea_id`,
+      [req.asociado.id]
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
 };
 
 export const listarPendientesPortal = async (req, res, next) => {

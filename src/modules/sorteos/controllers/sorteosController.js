@@ -768,38 +768,37 @@ export const portalActivo = async (req, res, next) => {
   try {
     const codigo = req.asociado.id;
 
-    // Sorteo activo o pausado donde la empresa del asociado esté habilitada
-    const { rows: [sorteo] } = await pool.query(`
+    const { rows: sorteos } = await pool.query(`
       SELECT s.*
       FROM sorteos s
       JOIN sorteo_empresas se ON se.sorteo_id = s.id
       JOIN asociados a ON a.empresa_dsto = se.empresa_codigo
       WHERE s.estado IN ('activo', 'pausado') AND a.codigo = $1
       ORDER BY s.created_at DESC
-      LIMIT 1
     `, [codigo]);
 
-    if (!sorteo) return res.json({ sorteo: null, mis_boletos: [], disponibles: [] });
+    const resultado = await Promise.all(sorteos.map(async (sorteo) => {
+      const { rows: mis_boletos } = await pool.query(`
+        SELECT b.numero, b.estado, b.fecha_asignacion,
+               sb.id AS solicitud_id, sb.tipo AS solicitud_tipo
+        FROM boletos b
+        LEFT JOIN solicitudes_bono sb ON sb.sorteo_id = b.sorteo_id
+          AND sb.numero = b.numero AND sb.asociado_codigo = $1 AND sb.estado = 'pendiente'
+        WHERE b.sorteo_id = $2 AND b.asociado_codigo = $1
+        ORDER BY b.numero
+      `, [codigo, sorteo.id]);
 
-    const { rows: mis_boletos } = await pool.query(`
-      SELECT b.numero, b.estado, b.fecha_asignacion,
-             sb.id AS solicitud_id, sb.tipo AS solicitud_tipo
-      FROM boletos b
-      LEFT JOIN solicitudes_bono sb ON sb.sorteo_id = b.sorteo_id
-        AND sb.numero = b.numero AND sb.asociado_codigo = $1 AND sb.estado = 'pendiente'
-      WHERE b.sorteo_id = $2 AND b.asociado_codigo = $1
-      ORDER BY b.numero
-    `, [codigo, sorteo.id]);
+      const disponibles = sorteo.estado === 'activo'
+        ? (await pool.query(
+            `SELECT numero FROM boletos WHERE sorteo_id = $1 AND estado = 'libre' ORDER BY numero`,
+            [sorteo.id]
+          )).rows
+        : [];
 
-    // No mostrar disponibles si el sorteo está pausado
-    const disponibles = sorteo.estado === 'activo'
-      ? (await pool.query(
-          `SELECT numero FROM boletos WHERE sorteo_id = $1 AND estado = 'libre' ORDER BY numero`,
-          [sorteo.id]
-        )).rows
-      : [];
+      return { sorteo, mis_boletos, disponibles };
+    }));
 
-    res.json({ sorteo, mis_boletos, disponibles });
+    res.json({ sorteos: resultado });
   } catch (err) { next(err); }
 };
 

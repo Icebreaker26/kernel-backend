@@ -175,13 +175,17 @@ describe('Sorteos — boletos (empleado)', () => {
 
 // ── Solicitudes portal ──────────────────────────────────────────────────────
 describe('Sorteos — portal asociado', () => {
-  test('GET /portal/activo → 200 con sorteo y disponibles', async () => {
+  test('GET /portal/activo → 200 con array de sorteos', async () => {
     const ag = agentAsoc();
     await loginAsoc(ag);
     const res = await ag.get('/api/sorteos/portal/activo');
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty('sorteo');
-    expect(res.body).toHaveProperty('disponibles');
+    expect(res.body).toHaveProperty('sorteos');
+    expect(Array.isArray(res.body.sorteos)).toBe(true);
+    expect(res.body.sorteos.length).toBeGreaterThan(0);
+    expect(res.body.sorteos[0]).toHaveProperty('sorteo');
+    expect(res.body.sorteos[0]).toHaveProperty('disponibles');
+    expect(res.body.sorteos[0]).toHaveProperty('mis_boletos');
   });
 
   test('POST /portal/solicitar → 201 bloquea número', async () => {

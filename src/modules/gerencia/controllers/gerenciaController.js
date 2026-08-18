@@ -14,12 +14,12 @@ export const resumen = async (req, res, next) => {
     // Serie temporal de adopción — acumulado mensual desde el primer acceso
     const { rows: adopcionSerie } = await pool.query(`
       SELECT
-        TO_CHAR(DATE_TRUNC('month', acepto_terminos_portal_at AT TIME ZONE 'America/Bogota'), 'YYYY-MM') AS mes,
+        TO_CHAR(DATE_TRUNC('month', portal_activado_at AT TIME ZONE 'America/Bogota'), 'YYYY-MM') AS mes,
         COUNT(*)::int AS nuevos
       FROM asociados
-      WHERE acepto_terminos_portal_at IS NOT NULL
-      GROUP BY DATE_TRUNC('month', acepto_terminos_portal_at AT TIME ZONE 'America/Bogota')
-      ORDER BY DATE_TRUNC('month', acepto_terminos_portal_at AT TIME ZONE 'America/Bogota')
+      WHERE portal_activado_at IS NOT NULL AND is_active = true
+      GROUP BY DATE_TRUNC('month', portal_activado_at AT TIME ZONE 'America/Bogota')
+      ORDER BY DATE_TRUNC('month', portal_activado_at AT TIME ZONE 'America/Bogota')
     `);
 
     // Acumulado corriente para la curva

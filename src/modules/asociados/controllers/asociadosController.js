@@ -172,7 +172,8 @@ export const activarPortal = async (req, res, next) => {
     await pool.query(
       `UPDATE asociados
        SET password_hash = $1, portal_activo = true, primer_login = true,
-           solicitud_portal_at = NULL, updated_at = NOW()
+           solicitud_portal_at = NULL, portal_activado_at = COALESCE(portal_activado_at, NOW()),
+           updated_at = NOW()
        WHERE codigo = $2`,
       [hash, codigo]
     );

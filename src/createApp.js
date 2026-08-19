@@ -14,6 +14,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const createApp = async () => {
   const app = express();
+  app.set('trust proxy', 1);
 
   app.use(helmet());
   const allowedOrigins = [env.FRONTEND_URL, env.PORTAL_URL].filter(Boolean);

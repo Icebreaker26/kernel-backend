@@ -9,8 +9,9 @@ import * as ctrl from '../controllers/asociadosController.js';
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
-// ── Público: solicitud de acceso ──────────────────────────────────────────────
+// ── Público: solicitud y registro de acceso ───────────────────────────────────
 router.post('/solicitar-portal', solicitarPortalLimiter, ctrl.solicitarPortal);
+router.post('/registro-portal',  solicitarPortalLimiter, ctrl.registroPortal);
 
 // ── Portal del asociado ───────────────────────────────────────────────────────
 router.post('/login',  loginRateLimiter, ctrl.loginAsociado);
@@ -19,6 +20,7 @@ router.get ('/me',                         verifyAsociado, ctrl.meAsociado);
 router.get ('/descuentos',                 verifyAsociado, ctrl.descuentosPortal);
 router.post('/aceptar-terminos',           verifyAsociado, ctrl.aceptarTerminos);
 router.put ('/password',                   verifyAsociado, ctrl.cambiarPasswordAsociado);
+router.put ('/email',                      verifyAsociado, ctrl.guardarEmail);
 router.get ('/notificaciones',             verifyAsociado, ctrl.listarNotificaciones);
 router.patch('/notificaciones/leer-todas', verifyAsociado, ctrl.marcarTodasNotifsLeidas);
 router.patch('/notificaciones/:id/leer',   verifyAsociado, ctrl.marcarNotifLeida);

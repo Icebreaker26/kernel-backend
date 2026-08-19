@@ -1099,6 +1099,229 @@ describe('Asociados — perfil admin incluye campo descuentos', () => {
   });
 });
 
+// ── registro-portal (autogestión) ────────────────────────────────────────────
+
+describe('Asociados — registro-portal (autogestión)', () => {
+  const codigoReg  = '8888111111';
+  const emailReg   = 'registro-portal-test@kernel.test';
+  const emailReg2  = 'registro-portal-test2@kernel.test';
+  const fechaNac   = '1990-06-15';
+
+  beforeAll(async () => {
+    await pool.query(
+      `INSERT INTO asociados (codigo, apellido, nombre, movil, clase_cuota, fecha_nacimiento)
+       VALUES ($1, 'RegTest', 'Portal', '3001111111', '1', $2)
+       ON CONFLICT (codigo) DO UPDATE
+         SET fecha_nacimiento = EXCLUDED.fecha_nacimiento,
+             portal_activo = false, email = NULL, password_hash = NULL,
+             solicitud_portal_at = NULL, portal_activado_at = NULL, is_active = true`,
+      [codigoReg, fechaNac]
+    );
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM asociados WHERE codigo = $1', [codigoReg]);
+  });
+
+  const reset = () =>
+    pool.query(
+      `UPDATE asociados SET portal_activo = false, email = NULL, password_hash = NULL,
+          solicitud_portal_at = NULL, portal_activado_at = NULL WHERE codigo = $1`,
+      [codigoReg]
+    );
+
+  describe('Validación Zod', () => {
+    test('Body vacío → 400', async () => {
+      const res = await request(app).post('/api/asociados/registro-portal').send({});
+      expect(res.status).toBe(400);
+    });
+
+    test('Email inválido → 400', async () => {
+      const res = await request(app).post('/api/asociados/registro-portal').send({
+        codigo: codigoReg, fecha_nacimiento: fechaNac, email: 'no-es-un-email',
+      });
+      expect(res.status).toBe(400);
+    });
+
+    test('Fecha con formato incorrecto → 400', async () => {
+      const res = await request(app).post('/api/asociados/registro-portal').send({
+        codigo: codigoReg, fecha_nacimiento: '15/06/1990', email: emailReg,
+      });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe('Verificación de identidad', () => {
+    test('CC inexistente → 401 (mismo mensaje que fecha incorrecta)', async () => {
+      const res = await request(app).post('/api/asociados/registro-portal').send({
+        codigo: 'CC_NO_EXISTE', fecha_nacimiento: fechaNac, email: emailReg,
+      });
+      expect(res.status).toBe(401);
+      expect(res.body.error).toMatch(/no coinciden/i);
+    });
+
+    test('CC válida pero fecha incorrecta → 401', async () => {
+      const res = await request(app).post('/api/asociados/registro-portal').send({
+        codigo: codigoReg, fecha_nacimiento: '1990-06-16', email: emailReg,
+      });
+      expect(res.status).toBe(401);
+      expect(res.body.error).toMatch(/no coinciden/i);
+    });
+
+    test('Mensaje de error idéntico para CC inválida y fecha incorrecta (no revela cuál falló)', async () => {
+      const r1 = await request(app).post('/api/asociados/registro-portal').send({
+        codigo: 'CC_FALSA', fecha_nacimiento: fechaNac, email: emailReg,
+      });
+      const r2 = await request(app).post('/api/asociados/registro-portal').send({
+        codigo: codigoReg, fecha_nacimiento: '2000-01-01', email: emailReg,
+      });
+      expect(r1.body.error).toBe(r2.body.error);
+    });
+  });
+
+  describe('Flujo completo', () => {
+    test('CC + fecha correctos + email válido → 200 + portal activado en DB', async () => {
+      const res = await request(app).post('/api/asociados/registro-portal').send({
+        codigo: codigoReg, fecha_nacimiento: fechaNac, email: emailReg,
+      });
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveProperty('ok', true);
+      expect(res.body.mensaje).toMatch(/correo/i);
+
+      const { rows: [row] } = await pool.query(
+        'SELECT portal_activo, primer_login, email FROM asociados WHERE codigo = $1',
+        [codigoReg]
+      );
+      expect(row.portal_activo).toBe(true);
+      expect(row.primer_login).toBe(true);
+      expect(row.email).toBe(emailReg);
+    });
+
+    test('Asociado activado puede iniciar sesión con las credenciales generadas', async () => {
+      // Obtenemos la contraseña reseteándola vía el endpoint admin
+      const ag = agent();
+      await loginAdmin(ag);
+      const { body } = await ag.post(`/api/asociados/${codigoReg}/activar-portal`);
+      const password = body.password;
+
+      const res = await request(app)
+        .post('/api/asociados/login')
+        .send({ codigo: codigoReg, password });
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveProperty('codigo', codigoReg);
+      expect(res.body).toHaveProperty('primer_login', true);
+    });
+  });
+
+  describe('Casos borde', () => {
+    test('Doble registro (portal ya activo) → 409', async () => {
+      const res = await request(app).post('/api/asociados/registro-portal').send({
+        codigo: codigoReg, fecha_nacimiento: fechaNac, email: emailReg2,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.error).toMatch(/ya tiene acceso/i);
+    });
+
+    test('Email ya en uso por otro asociado → 409', async () => {
+      await reset();
+      // Registrar el email en otro asociado de test existente
+      await pool.query(
+        `UPDATE asociados SET email = $1 WHERE codigo = $2`,
+        [emailReg, testCodigo]
+      );
+
+      const res = await request(app).post('/api/asociados/registro-portal').send({
+        codigo: codigoReg, fecha_nacimiento: fechaNac, email: emailReg,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.error).toMatch(/correo ya está registrado/i);
+
+      // Limpiar
+      await pool.query(`UPDATE asociados SET email = NULL WHERE codigo = $1`, [testCodigo]);
+    });
+
+    test('Asociado inactivo (retirado) → 401', async () => {
+      await reset();
+      await pool.query(`UPDATE asociados SET is_active = false WHERE codigo = $1`, [codigoReg]);
+
+      const res = await request(app).post('/api/asociados/registro-portal').send({
+        codigo: codigoReg, fecha_nacimiento: fechaNac, email: emailReg,
+      });
+      expect(res.status).toBe(401);
+
+      await pool.query(`UPDATE asociados SET is_active = true WHERE codigo = $1`, [codigoReg]);
+    });
+  });
+});
+
+// ── guardarEmail (PUT /asociados/email) ──────────────────────────────────────
+
+describe('Asociados — guardarEmail (portal autenticado)', () => {
+  const codigoEmail = '7777000001';
+  const emailA      = 'guardar-email-a@kernel.test';
+  const emailB      = 'guardar-email-b@kernel.test';
+  let portalAgent;
+
+  beforeAll(async () => {
+    const hash = await bcrypt.hash('pass1234', 4);
+    await pool.query(
+      `INSERT INTO asociados (codigo, apellido, nombre, portal_activo, primer_login, password_hash)
+       VALUES ($1, 'Email', 'Test', true, false, $2)
+       ON CONFLICT (codigo) DO UPDATE SET portal_activo = true, primer_login = false, password_hash = $2, email = NULL`,
+      [codigoEmail, hash]
+    );
+    // Otro asociado con emailB ya registrado (para probar duplicado)
+    await pool.query(
+      `INSERT INTO asociados (codigo, apellido, nombre, portal_activo, primer_login, password_hash, email)
+       VALUES ($1, 'OtroEmail', 'Test', true, false, $2, $3)
+       ON CONFLICT (codigo) DO UPDATE SET email = $3`,
+      ['7777000002', hash, emailB]
+    );
+
+    portalAgent = request.agent(app);
+    await portalAgent.post('/api/asociados/login').send({ codigo: codigoEmail, password: 'pass1234' });
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM asociados WHERE codigo IN ($1, $2)', [codigoEmail, '7777000002']);
+  });
+
+  test('Sin token de asociado → 401', async () => {
+    const res = await request(app).put('/api/asociados/email').send({ email: emailA, emailConfirm: emailA });
+    expect(res.status).toBe(401);
+  });
+
+  test('Email inválido → 400', async () => {
+    const res = await portalAgent.put('/api/asociados/email').send({ email: 'no-es-email', emailConfirm: 'no-es-email' });
+    expect(res.status).toBe(400);
+  });
+
+  test('Confirmación no coincide → 400', async () => {
+    const res = await portalAgent.put('/api/asociados/email').send({ email: emailA, emailConfirm: 'otro@ejemplo.com' });
+    expect(res.status).toBe(400);
+  });
+
+  test('Email ya registrado en otro asociado → 409', async () => {
+    const res = await portalAgent.put('/api/asociados/email').send({ email: emailB, emailConfirm: emailB });
+    expect(res.status).toBe(409);
+  });
+
+  test('Email válido → 200 y guardado en DB', async () => {
+    const res = await portalAgent.put('/api/asociados/email').send({ email: emailA, emailConfirm: emailA });
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('ok', true);
+
+    const { rows: [row] } = await pool.query('SELECT email FROM asociados WHERE codigo = $1', [codigoEmail]);
+    expect(row.email).toBe(emailA);
+  });
+
+  test('GET /me incluye el campo email', async () => {
+    const res = await portalAgent.get('/api/asociados/me');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('email', emailA);
+  });
+});
+
 // ── Lock de concurrencia ──────────────────────────────────────────────────────
 
 describe('Asociados — lock de concurrencia', () => {

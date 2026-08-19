@@ -29,3 +29,17 @@ export const solicitarPortalLimiter = isTest
         });
       },
     });
+
+export const registerLimiter = isTest
+  ? (_req, _res, next) => next()
+  : rateLimit({
+      windowMs: 60 * 60 * 1000,
+      max: 5,
+      standardHeaders: true,
+      legacyHeaders: false,
+      handler: (_req, res) => {
+        res.status(429).json({
+          error: 'Demasiados intentos. Intenta de nuevo en una hora.',
+        });
+      },
+    });

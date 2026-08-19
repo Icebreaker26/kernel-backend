@@ -1,4 +1,5 @@
 import express from 'express';
+import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import { readdir } from 'fs/promises';
@@ -14,6 +15,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export const createApp = async () => {
   const app = express();
 
+  app.use(helmet());
   const allowedOrigins = [env.FRONTEND_URL, env.PORTAL_URL].filter(Boolean);
   app.use(cors({ origin: allowedOrigins, credentials: true }));
   app.use(express.json());

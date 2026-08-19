@@ -1,4 +1,5 @@
 import pool from '../../../db/database.js';
+import { env } from '../../../config/env.js';
 
 export const metricas = async (req, res, next) => {
   try {
@@ -59,5 +60,23 @@ export const emails = async (req, res, next) => {
       LIMIT 200
     `);
     res.json(rows);
+  } catch (err) { next(err); }
+};
+
+export const relayStatus = async (req, res, next) => {
+  try {
+    if (!env.RELAY_URL) return res.json({ online: false, motivo: 'no_configurado' });
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      const r = await fetch(`${env.RELAY_URL}/health`, { signal: controller.signal });
+      clearTimeout(timer);
+      const data = await r.json();
+      res.json({ online: data.ok === true });
+    } catch {
+      clearTimeout(timer);
+      res.json({ online: false, motivo: 'timeout' });
+    }
   } catch (err) { next(err); }
 };

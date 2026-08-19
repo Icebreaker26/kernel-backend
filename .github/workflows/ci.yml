@@ -28,10 +28,11 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://kernel:kernel123@localhost:5432/kernel
-      JWT_SECRET: ci_jwt_secret_al_menos_16_chars
+      JWT_SECRET: ci_jwt_secret_minimo_32_caracteres_ok
       PORT: 4000
       NODE_ENV: test
       FRONTEND_URL: http://localhost:5173
+      PORTAL_URL: http://localhost:5173/portal/login
 
     steps:
       - uses: actions/checkout@v4

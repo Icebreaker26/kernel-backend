@@ -70,7 +70,7 @@ export const register = async (req, res, next) => {
     const { rows: existing } = await pool.query(
       'SELECT id FROM global_usuarios WHERE email = $1', [email]
     );
-    if (existing.length) return res.status(409).json({ error: 'El email ya está registrado' });
+    if (existing.length) return res.status(409).json({ error: 'No fue posible completar el registro. Verifica los datos o contacta al administrador.' });
 
     const password_hash = await bcrypt.hash(password, 10);
     const { rows } = await pool.query(

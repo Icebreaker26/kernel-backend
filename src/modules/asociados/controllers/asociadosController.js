@@ -4,8 +4,9 @@ import { parse } from 'csv-parse/sync';
 import iconv from 'iconv-lite';
 import pool from '../../../db/database.js';
 import { env } from '../../../config/env.js';
-import { loginAsociadoSchema, importarFilaSchema, solicitarPortalSchema } from '../schemas/asociadosSchema.js';
+import { loginAsociadoSchema, importarFilaSchema, solicitarPortalSchema, registroPortalSchema, cambiarPasswordSchema, subsanarSchema, guardarEmailSchema } from '../schemas/asociadosSchema.js';
 import { notificarUsuario, notificarAdmins } from '../../../services/notificationService.js';
+import { enviarCredencialesPortal } from '../../../services/emailService.js';
 
 const cookieOpts = () => ({
   httpOnly: true,
@@ -75,7 +76,8 @@ export const meAsociado = async (req, res, next) => {
       `SELECT codigo, nombre, apellido, direccion, movil,
               clase_cuota, empresa_dsto, nombre_empresa, ciudad, primer_login,
               fecha_nacimiento, fecha_ingreso, fecha_reingreso,
-              valor_aporte, saldo_aporte, fecha_credito, fecha_pri_descuento
+              valor_aporte, saldo_aporte, fecha_credito, fecha_pri_descuento,
+              email
        FROM asociados WHERE codigo = $1`,
       [req.asociado.id]
     );
@@ -88,10 +90,7 @@ export const meAsociado = async (req, res, next) => {
 
 export const cambiarPasswordAsociado = async (req, res, next) => {
   try {
-    const { password_actual, password_nueva } = req.body;
-    if (!password_actual || !password_nueva || password_nueva.length < 8) {
-      return res.status(400).json({ error: 'Datos inválidos' });
-    }
+    const { password_actual, password_nueva } = cambiarPasswordSchema.parse(req.body);
 
     const { rows } = await pool.query(
       'SELECT password_hash FROM asociados WHERE codigo = $1',
@@ -111,6 +110,25 @@ export const cambiarPasswordAsociado = async (req, res, next) => {
   }
 };
 
+export const guardarEmail = async (req, res, next) => {
+  try {
+    const { email } = guardarEmailSchema.parse(req.body);
+    const normalizado = email.trim().toLowerCase();
+
+    const { rows: dup } = await pool.query(
+      `SELECT codigo FROM asociados WHERE LOWER(email) = $1 AND codigo != $2`,
+      [normalizado, req.asociado.id]
+    );
+    if (dup.length) return res.status(409).json({ error: 'Ese correo ya está registrado en otro asociado' });
+
+    await pool.query(
+      `UPDATE asociados SET email = $1, updated_at = NOW() WHERE codigo = $2`,
+      [normalizado, req.asociado.id]
+    );
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+};
+
 // ── Portal: solicitud de acceso ───────────────────────────────────────────────
 
 export const solicitarPortal = async (req, res, next) => {
@@ -124,17 +142,13 @@ export const solicitarPortal = async (req, res, next) => {
     );
 
     if (!rows.length) {
-      return res.status(404).json({ error: 'No encontramos un asociado con esa cédula. Contacta a la cooperativa.' });
+      return res.json({ ok: true, mensaje: 'Si eres asociado activo, la cooperativa se comunicará contigo pronto.' });
     }
 
     const asociado = rows[0];
 
-    if (asociado.portal_activo) {
-      return res.status(409).json({ error: 'Este asociado ya tiene acceso al portal.' });
-    }
-
-    if (asociado.solicitud_portal_at) {
-      return res.status(409).json({ error: 'Ya existe una solicitud pendiente para este asociado. La cooperativa te contactará pronto.' });
+    if (asociado.portal_activo || asociado.solicitud_portal_at) {
+      return res.json({ ok: true, mensaje: 'Si eres asociado activo, la cooperativa se comunicará contigo pronto.' });
     }
 
     await pool.query(
@@ -149,6 +163,65 @@ export const solicitarPortal = async (req, res, next) => {
     }).catch(() => {});
 
     res.json({ ok: true, mensaje: 'Solicitud enviada. La cooperativa te contactará pronto con tus credenciales de acceso.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── Portal: registro autogestión ──────────────────────────────────────────────
+
+export const registroPortal = async (req, res, next) => {
+  try {
+    const { codigo, fecha_nacimiento, email } = registroPortalSchema.parse(req.body);
+
+    const { rows } = await pool.query(
+      `SELECT codigo, nombre, fecha_nacimiento, portal_activo, is_active
+       FROM asociados WHERE codigo = $1`,
+      [codigo]
+    );
+
+    // Mismo mensaje para cédula no encontrada y fecha incorrecta — no revelar cuál falló
+    const asociado = rows[0];
+    if (!asociado || !asociado.is_active) {
+      return res.status(401).json({ error: 'Los datos ingresados no coinciden con nuestros registros.' });
+    }
+
+    if (asociado.portal_activo) {
+      return res.status(409).json({ error: 'Esta cédula ya tiene acceso al portal.' });
+    }
+
+    const fechaBD = asociado.fecha_nacimiento
+      ? new Date(asociado.fecha_nacimiento).toISOString().slice(0, 10)
+      : null;
+
+    if (!fechaBD || fechaBD !== fecha_nacimiento) {
+      return res.status(401).json({ error: 'Los datos ingresados no coinciden con nuestros registros.' });
+    }
+
+    // Verificar que el email no esté en uso por otro asociado
+    const { rows: emailRows } = await pool.query(
+      `SELECT codigo FROM asociados WHERE LOWER(email) = LOWER($1) AND codigo != $2`,
+      [email, codigo]
+    );
+    if (emailRows.length) {
+      return res.status(409).json({ error: 'Este correo ya está registrado. Contacta a la cooperativa si crees que es un error.' });
+    }
+
+    const password = generarPassword();
+    const hash     = await bcrypt.hash(password, 10);
+
+    await pool.query(
+      `UPDATE asociados
+       SET email = $1, password_hash = $2, portal_activo = true, primer_login = true,
+           solicitud_portal_at = NULL, portal_activado_at = COALESCE(portal_activado_at, NOW()),
+           updated_at = NOW()
+       WHERE codigo = $3`,
+      [email.toLowerCase(), hash, codigo]
+    );
+
+    await enviarCredencialesPortal(email, codigo, password);
+
+    res.json({ ok: true, mensaje: 'Revisa tu correo con las instrucciones de acceso.' });
   } catch (err) {
     next(err);
   }
@@ -920,7 +993,7 @@ export const detalleSincronizacion = async (req, res, next) => {
 
 export const subsanarDiscrepancia = async (req, res, next) => {
   const { id, codigo } = req.params;
-  const { numeros, sorteo_id, sorteo_nombre } = req.body ?? {};
+  const { numeros, sorteo_id, sorteo_nombre } = subsanarSchema.parse(req.body ?? {});
   const client = await pool.connect();
   try {
     await client.query('BEGIN');

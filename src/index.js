@@ -11,8 +11,9 @@ import logger from './config/logger.js';
 const app        = await createApp();
 const httpServer = createServer(app);
 
+const allowedOrigins = [env.FRONTEND_URL, env.PORTAL_URL].filter(Boolean);
 const io = new Server(httpServer, {
-  cors: { origin: env.FRONTEND_URL, credentials: true },
+  cors: { origin: allowedOrigins, credentials: true },
 });
 
 // Autenticar socket por cookie JWT

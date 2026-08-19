@@ -9,6 +9,28 @@ export const solicitarPortalSchema = z.object({
   codigo: z.string().min(1, 'El código es obligatorio'),
 });
 
+export const cambiarPasswordSchema = z.object({
+  password_actual: z.string().min(1),
+  password_nueva:  z.string().min(8).max(128),
+});
+
+export const subsanarSchema = z.object({
+  numeros:       z.array(z.number().int()).optional(),
+  sorteo_id:     z.string().uuid().optional(),
+  sorteo_nombre: z.string().max(200).optional(),
+});
+
+export const guardarEmailSchema = z.object({
+  email:        z.string().email('Correo electrónico inválido'),
+  emailConfirm: z.string().email(),
+}).refine((d) => d.email === d.emailConfirm, { message: 'Los correos no coinciden', path: ['emailConfirm'] });
+
+export const registroPortalSchema = z.object({
+  codigo:           z.string().min(1, 'El código es obligatorio'),
+  fecha_nacimiento: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato de fecha inválido (YYYY-MM-DD)'),
+  email:            z.string().email('Correo electrónico inválido'),
+});
+
 // DD/MM/YYYY → YYYY-MM-DD, vacío → null
 const parseDate = z.preprocess((v) => {
   if (!v || String(v).trim() === '') return null;

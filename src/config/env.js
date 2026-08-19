@@ -4,11 +4,16 @@ dotenv.config();
 
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
-  JWT_SECRET:   z.string().min(16),
+  JWT_SECRET:   z.string().min(32),
   PORT:         z.string().default('4000').transform(Number),
   NODE_ENV:     z.enum(['development', 'production', 'test']).default('development'),
   FRONTEND_URL: z.string().url(),
-  PORTAL_URL:   z.string().url().optional(), // portal.cooperativaprogresemos.coop en producción
+  PORTAL_URL:   z.string().url().optional(),
+  SMTP_HOST:    z.string().optional(),
+  SMTP_PORT:    z.string().optional().transform((v) => (v ? Number(v) : 587)),
+  SMTP_USER:    z.string().optional(),
+  SMTP_PASS:    z.string().optional(),
+  SMTP_FROM:    z.string().optional(),
 });
 
 const _env = envSchema.safeParse(process.env);

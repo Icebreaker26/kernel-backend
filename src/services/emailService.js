@@ -12,10 +12,13 @@ const getTransporter = () => {
       throw new Error('SMTP no configurado. Agrega SMTP_HOST, SMTP_USER y SMTP_PASS al .env');
     }
     transporter = nodemailer.createTransport({
-      host:   env.SMTP_HOST,
-      port:   env.SMTP_PORT,
-      secure: env.SMTP_PORT === 465,
-      auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+      host:             env.SMTP_HOST,
+      port:             env.SMTP_PORT,
+      secure:           env.SMTP_PORT === 465,
+      auth:             { user: env.SMTP_USER, pass: env.SMTP_PASS },
+      connectionTimeout: 10000,
+      socketTimeout:     15000,
+      greetingTimeout:   10000,
     });
   }
   return transporter;

@@ -1,5 +1,8 @@
+import bcrypt from 'bcrypt';
 import pool from '../../../db/database.js';
 import { env } from '../../../config/env.js';
+import { generarPassword } from '../../asociados/controllers/asociadosController.js';
+import { enviarCredencialesPortal } from '../../../services/emailService.js';
 
 export const metricas = async (req, res, next) => {
   try {
@@ -60,6 +63,42 @@ export const emails = async (req, res, next) => {
       LIMIT 200
     `);
     res.json(rows);
+  } catch (err) { next(err); }
+};
+
+export const reintentarPendientes = async (req, res, next) => {
+  try {
+    // Asociados cuyo último intento de email falló
+    const { rows } = await pool.query(`
+      SELECT a.codigo, a.email
+      FROM asociados a
+      INNER JOIN LATERAL (
+        SELECT estado FROM email_logs
+        WHERE asociado_codigo = a.codigo AND tipo = 'credenciales_portal'
+        ORDER BY created_at DESC LIMIT 1
+      ) el ON el.estado = 'error'
+      WHERE a.portal_activo = true AND a.is_active = true AND a.email IS NOT NULL
+    `);
+
+    if (rows.length === 0) return res.json({ procesados: 0, resultados: [] });
+
+    const resultados = [];
+    for (const { codigo, email } of rows) {
+      try {
+        const password = generarPassword();
+        const hash = await bcrypt.hash(password, 10);
+        await pool.query(
+          `UPDATE asociados SET password_hash = $1, primer_login = true, updated_at = NOW() WHERE codigo = $2`,
+          [hash, codigo]
+        );
+        await enviarCredencialesPortal(email, codigo, password);
+        resultados.push({ codigo, ok: true });
+      } catch (err) {
+        resultados.push({ codigo, ok: false, error: err.message });
+      }
+    }
+
+    res.json({ procesados: rows.length, resultados });
   } catch (err) { next(err); }
 };
 

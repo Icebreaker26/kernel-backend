@@ -75,6 +75,10 @@ router.post('/:codigo/activar-portal',
   verifyToken, checkPermission('asociados', 'WRITE'),
   ctrl.activarPortal
 );
+router.post('/:codigo/reenviar-credenciales',
+  verifyToken, checkPermission('asociados', 'WRITE'),
+  ctrl.reenviarCredenciales
+);
 router.post('/:codigo/desactivar-portal',
   verifyToken, checkPermission('asociados', 'WRITE'),
   ctrl.desactivarPortal

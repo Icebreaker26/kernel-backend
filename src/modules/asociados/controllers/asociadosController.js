@@ -262,6 +262,35 @@ export const activarPortal = async (req, res, next) => {
   }
 };
 
+export const reenviarCredenciales = async (req, res, next) => {
+  try {
+    const { codigo } = req.params;
+
+    const { rows } = await pool.query(
+      'SELECT codigo, email FROM asociados WHERE codigo = $1 AND portal_activo = true',
+      [codigo]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Asociado no encontrado o sin portal activo' });
+
+    const { email } = rows[0];
+    if (!email) return res.status(409).json({ error: 'El asociado no tiene correo registrado. Actívalo manualmente.' });
+
+    const password = generarPassword();
+    const hash     = await bcrypt.hash(password, 10);
+
+    await pool.query(
+      `UPDATE asociados SET password_hash = $1, primer_login = true, updated_at = NOW() WHERE codigo = $2`,
+      [hash, codigo]
+    );
+
+    await enviarCredencialesPortal(email, codigo, password);
+
+    res.json({ ok: true, mensaje: `Credenciales enviadas a ${email}` });
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const desactivarPortal = async (req, res, next) => {
   try {
     const { codigo } = req.params;

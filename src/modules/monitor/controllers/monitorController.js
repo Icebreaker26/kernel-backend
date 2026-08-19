@@ -32,10 +32,18 @@ export const metricas = async (req, res, next) => {
 export const ingresos = async (req, res, next) => {
   try {
     const { rows } = await pool.query(`
-      SELECT codigo, email, portal_activado_at, primer_login
-      FROM asociados
-      WHERE portal_activo = true AND is_active = true
-      ORDER BY portal_activado_at DESC NULLS LAST
+      SELECT a.codigo, a.nombre, a.apellido, a.email, a.portal_activado_at, a.primer_login,
+             el.estado AS email_estado, el.created_at AS email_at, el.error_msg
+      FROM asociados a
+      LEFT JOIN LATERAL (
+        SELECT estado, created_at, error_msg
+        FROM email_logs
+        WHERE asociado_codigo = a.codigo AND tipo = 'credenciales_portal'
+        ORDER BY created_at DESC
+        LIMIT 1
+      ) el ON true
+      WHERE a.portal_activo = true AND a.is_active = true
+      ORDER BY a.portal_activado_at DESC NULLS LAST
       LIMIT 200
     `);
     res.json(rows);

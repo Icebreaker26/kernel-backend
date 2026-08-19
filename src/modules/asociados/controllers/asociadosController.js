@@ -16,7 +16,7 @@ const cookieOpts = () => ({
 });
 
 // Genera una contraseña legible sin caracteres ambiguos (0/O, 1/l/I)
-const generarPassword = () => {
+export const generarPassword = () => {
   const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
   return Array.from({ length: 10 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
 };
@@ -219,9 +219,11 @@ export const registroPortal = async (req, res, next) => {
       [email.toLowerCase(), hash, codigo]
     );
 
-    await enviarCredencialesPortal(email, codigo, password);
+    // Fire-and-forget: el email se envía en segundo plano para no bloquear la respuesta.
+    // Si falla, queda registrado en email_logs y el monitor lo reintenta.
+    enviarCredencialesPortal(email, codigo, password).catch(() => {});
 
-    res.json({ ok: true, mensaje: 'Revisa tu correo con las instrucciones de acceso.' });
+    res.json({ ok: true, mensaje: 'En breve recibirás tus credenciales de acceso por correo.' });
   } catch (err) {
     next(err);
   }

@@ -792,8 +792,21 @@ export const importarCSV = async (req, res, next) => {
       const n = parseFloat(String(str).replace(/[$\s.]/g, '').replace(',', '.'));
       return isNaN(n) || n <= 0 ? null : n;
     };
+    const parseNumeroLocal = (str) => {
+      if (!str) return null;
+      const n = parseFloat(String(str).replace(/[$\s.]/g, '').replace(',', '.'));
+      return isNaN(n) ? null : n;
+    };
+    const parseFechaLocal = (str) => {
+      if (!str || String(str).trim() === '') return null;
+      const parts = String(str).trim().split('/');
+      if (parts.length !== 3) return null;
+      const [d, m, y] = parts;
+      if (!d || !m || !y || y.length < 4) return null;
+      return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    };
 
-    const descuentosMap = new Map(); // 'codigo:lineaId' → { asociado_codigo, linea_id, nombre_linea, valor }
+    const descuentosMap = new Map(); // 'codigo:lineaId' → descuento row
     const codigosValidosSet = new Set(validos.map((v) => v.codigo));
 
     for (const r of registros) {
@@ -804,10 +817,16 @@ export const importarCSV = async (req, res, next) => {
       const valor = parseCuotaNum(r.cuota);
       if (!valor) continue;
       descuentosMap.set(`${codigo}:${lineaId}`, {
-        asociado_codigo: codigo,
-        linea_id:        lineaId,
-        nombre_linea:    CATALOGO_LINEAS[lineaId] ?? `LÍNEA ${lineaId}`,
+        asociado_codigo:     codigo,
+        linea_id:            lineaId,
+        nombre_linea:        CATALOGO_LINEAS[lineaId] ?? `LÍNEA ${lineaId}`,
         valor,
+        valor_obligacion:    parseNumeroLocal(r.valor_obligacion),
+        saldo_credito:       parseNumeroLocal(r.saldo),
+        num_cuotas:          r.plazo ? (parseInt(String(r.plazo).trim(), 10) || null) : null,
+        fecha_vencimiento:   parseFechaLocal(r.fecha_vencimiento),
+        tasa_interes:        parseNumeroLocal(r.tasa_interes),
+        fecha_pri_descuento: parseFechaLocal(r.fecha_pri_decuento),
       });
     }
 
@@ -820,13 +839,28 @@ export const importarCSV = async (req, res, next) => {
       const items = [...descuentosMap.values()];
       for (let i = 0; i < items.length; i += 200) {
         const lote = items.slice(i, i + 200);
-        const vals = lote.map((_, j) => `($${j * 4 + 1},$${j * 4 + 2},$${j * 4 + 3},$${j * 4 + 4})`).join(',');
-        const params = lote.flatMap((d) => [d.asociado_codigo, d.linea_id, d.nombre_linea, d.valor]);
+        const vals = lote.map((_, j) => `($${j*10+1},$${j*10+2},$${j*10+3},$${j*10+4},$${j*10+5},$${j*10+6},$${j*10+7},$${j*10+8},$${j*10+9},$${j*10+10})`).join(',');
+        const params = lote.flatMap((d) => [
+          d.asociado_codigo, d.linea_id, d.nombre_linea, d.valor,
+          d.valor_obligacion, d.saldo_credito, d.num_cuotas, d.fecha_vencimiento, d.tasa_interes,
+          d.fecha_pri_descuento,
+        ]);
         await client.query(
-          `INSERT INTO asociado_descuentos (asociado_codigo, linea_id, nombre_linea, valor)
+          `INSERT INTO asociado_descuentos
+             (asociado_codigo, linea_id, nombre_linea, valor,
+              valor_obligacion, saldo_credito, num_cuotas, fecha_vencimiento, tasa_interes,
+              fecha_pri_descuento)
            VALUES ${vals}
            ON CONFLICT (asociado_codigo, linea_id) DO UPDATE
-             SET nombre_linea = EXCLUDED.nombre_linea, valor = EXCLUDED.valor, updated_at = NOW()`,
+             SET nombre_linea        = EXCLUDED.nombre_linea,
+                 valor               = EXCLUDED.valor,
+                 valor_obligacion    = EXCLUDED.valor_obligacion,
+                 saldo_credito       = EXCLUDED.saldo_credito,
+                 num_cuotas          = EXCLUDED.num_cuotas,
+                 fecha_vencimiento   = EXCLUDED.fecha_vencimiento,
+                 tasa_interes        = EXCLUDED.tasa_interes,
+                 fecha_pri_descuento = EXCLUDED.fecha_pri_descuento,
+                 updated_at          = NOW()`,
           params
         );
       }
@@ -888,7 +922,9 @@ export const importarCSV = async (req, res, next) => {
 export const descuentosPortal = async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT linea_id, nombre_linea, valor
+      `SELECT linea_id, nombre_linea, valor,
+              valor_obligacion, saldo_credito, num_cuotas, fecha_vencimiento, tasa_interes,
+              fecha_pri_descuento
        FROM asociado_descuentos
        WHERE asociado_codigo = $1
        ORDER BY linea_id`,
@@ -1172,7 +1208,9 @@ export const perfilAsociado = async (req, res, next) => {
     );
 
     const { rows: descuentos } = await pool.query(
-      `SELECT linea_id, nombre_linea, valor
+      `SELECT linea_id, nombre_linea, valor,
+              valor_obligacion, saldo_credito, num_cuotas, fecha_vencimiento, tasa_interes,
+              fecha_pri_descuento
        FROM asociado_descuentos
        WHERE asociado_codigo = $1
        ORDER BY linea_id`,

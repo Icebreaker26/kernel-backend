@@ -127,6 +127,9 @@ export const resumen = async (req, res, next) => {
         COALESCE(SUM(ad.saldo_credito), 0)::bigint                                          AS cartera_total,
         COALESCE(SUM(ad.valor_obligacion), 0)::bigint                                       AS obligacion_total,
         COALESCE(SUM(ad.saldo_credito * COALESCE(ad.tasa_interes, 0) / 100), 0)::numeric(16,2) AS intereses_mensual,
+        COALESCE(SUM(
+          CASE WHEN ad.num_cuotas > 0 THEN ad.saldo_credito / ad.num_cuotas ELSE 0 END
+        ), 0)::bigint                                                                          AS capital_mensual,
         CASE WHEN SUM(ad.saldo_credito) > 0
           THEN ROUND(
             SUM(ad.saldo_credito * COALESCE(ad.tasa_interes, 0)) / SUM(ad.saldo_credito)

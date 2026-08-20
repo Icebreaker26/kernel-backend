@@ -6,6 +6,7 @@ import { createApp } from './createApp.js';
 import { env } from './config/env.js';
 import { initNotificationService } from './services/notificationService.js';
 import { startScheduler } from './services/scheduler.js';
+import { startDispatcher } from './services/mailingDispatcher.js';
 import logger from './config/logger.js';
 
 const app        = await createApp();
@@ -44,6 +45,7 @@ io.on('connection', (socket) => {
 
 initNotificationService(io);
 startScheduler();
+startDispatcher();
 
 httpServer.listen(env.PORT, () => {
   logger.info(`Servidor corriendo en puerto ${env.PORT} [${env.NODE_ENV}]`);

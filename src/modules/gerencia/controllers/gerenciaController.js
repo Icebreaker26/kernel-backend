@@ -11,22 +11,32 @@ export const resumen = async (req, res, next) => {
       FROM asociados
     `);
 
-    // Serie temporal de adopción — acumulado mensual desde el primer acceso
-    const { rows: adopcionSerie } = await pool.query(`
-      SELECT
-        TO_CHAR(DATE_TRUNC('month', portal_activado_at AT TIME ZONE 'America/Bogota'), 'YYYY-MM') AS mes,
-        COUNT(*)::int AS nuevos
+    // Serie diaria de adopción — últimos 90 días
+    const { rows: [{ base: adopcionBase }] } = await pool.query(`
+      SELECT COUNT(*)::int AS base
       FROM asociados
-      WHERE portal_activado_at IS NOT NULL AND is_active = true
-      GROUP BY DATE_TRUNC('month', portal_activado_at AT TIME ZONE 'America/Bogota')
-      ORDER BY DATE_TRUNC('month', portal_activado_at AT TIME ZONE 'America/Bogota')
+      WHERE portal_activado_at IS NOT NULL
+        AND is_active = true
+        AND portal_activado_at < NOW() - INTERVAL '90 days'
     `);
 
-    // Acumulado corriente para la curva
-    let acum = 0;
+    const { rows: adopcionSerie } = await pool.query(`
+      SELECT
+        TO_CHAR(DATE(portal_activado_at AT TIME ZONE 'America/Bogota'), 'YYYY-MM-DD') AS dia,
+        COUNT(*)::int AS nuevos
+      FROM asociados
+      WHERE portal_activado_at IS NOT NULL
+        AND is_active = true
+        AND portal_activado_at >= NOW() - INTERVAL '90 days'
+      GROUP BY DATE(portal_activado_at AT TIME ZONE 'America/Bogota')
+      ORDER BY DATE(portal_activado_at AT TIME ZONE 'America/Bogota')
+    `);
+
+    // Acumulado partiendo desde la base anterior a la ventana
+    let acum = adopcionBase;
     const adopcionAcumulada = adopcionSerie.map(row => {
       acum += row.nuevos;
-      return { mes: row.mes, nuevos: row.nuevos, acumulado: acum };
+      return { dia: row.dia, nuevos: row.nuevos, acumulado: acum };
     });
 
     // ── Sorteos activos ──────────────────────────────────────────────────────
@@ -113,12 +123,35 @@ export const resumen = async (req, res, next) => {
     // ── Cartera de créditos ──────────────────────────────────────────────────
     const { rows: [cartera] } = await pool.query(`
       SELECT
-        COUNT(ad.id)::int                              AS creditos_activos,
-        COALESCE(SUM(ad.saldo_credito), 0)::bigint    AS cartera_total,
-        COALESCE(SUM(ad.valor_obligacion), 0)::bigint AS obligacion_total
+        COUNT(ad.id)::int                                                                    AS creditos_activos,
+        COALESCE(SUM(ad.saldo_credito), 0)::bigint                                          AS cartera_total,
+        COALESCE(SUM(ad.valor_obligacion), 0)::bigint                                       AS obligacion_total,
+        COALESCE(SUM(ad.saldo_credito * COALESCE(ad.tasa_interes, 0) / 100), 0)::numeric(16,2) AS intereses_mensual,
+        CASE WHEN SUM(ad.saldo_credito) > 0
+          THEN ROUND(
+            SUM(ad.saldo_credito * COALESCE(ad.tasa_interes, 0)) / SUM(ad.saldo_credito)
+          , 4)
+          ELSE 0
+        END                                                                                    AS tasa_promedio_ponderada
       FROM asociado_descuentos ad
       JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
       WHERE ad.saldo_credito IS NOT NULL AND ad.saldo_credito > 0
+    `);
+
+    // Flujo de vencimientos — próximos 12 meses
+    const { rows: carteraVencimientos } = await pool.query(`
+      SELECT
+        TO_CHAR(DATE_TRUNC('month', ad.fecha_vencimiento), 'YYYY-MM') AS mes,
+        COUNT(ad.id)::int                                              AS creditos,
+        SUM(ad.saldo_credito)::bigint                                  AS capital
+      FROM asociado_descuentos ad
+      JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
+      WHERE ad.saldo_credito > 0
+        AND ad.fecha_vencimiento IS NOT NULL
+        AND ad.fecha_vencimiento >= DATE_TRUNC('month', NOW())
+        AND ad.fecha_vencimiento < DATE_TRUNC('month', NOW()) + INTERVAL '12 months'
+      GROUP BY DATE_TRUNC('month', ad.fecha_vencimiento)
+      ORDER BY DATE_TRUNC('month', ad.fecha_vencimiento)
     `);
 
     const { rows: carteraDistribucion } = await pool.query(`
@@ -164,7 +197,7 @@ export const resumen = async (req, res, next) => {
       sorteos,
       sorteos_serie: sorteosSerie,
       patronales: { ...patronales, top_mora: topMora },
-      cartera: { ...cartera, distribucion: carteraDistribucion },
+      cartera: { ...cartera, distribucion: carteraDistribucion, vencimientos: carteraVencimientos },
       logs,
       pendientes,
     });

@@ -105,7 +105,7 @@ describe('GET /gerencia/resumen', () => {
     const res = await ag.get('/api/gerencia/resumen');
     expect(res.status).toBe(200);
     for (const fila of res.body.asociados.adopcion_serie) {
-      expect(fila).toHaveProperty('mes');
+      expect(fila).toHaveProperty('dia');
       expect(fila).toHaveProperty('nuevos');
       expect(fila).toHaveProperty('acumulado');
       expect(typeof fila.acumulado).toBe('number');

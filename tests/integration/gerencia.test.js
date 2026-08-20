@@ -157,6 +157,130 @@ describe('GET /gerencia/resumen', () => {
       expect(s).toHaveProperty('solicitudes_pendientes');
     }
   });
+
+  test('cartera tiene estructura correcta', async () => {
+    const res = await ag.get('/api/gerencia/resumen');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('cartera');
+    const { cartera } = res.body;
+    expect(cartera).toHaveProperty('creditos_activos');
+    expect(cartera).toHaveProperty('cartera_total');
+    expect(cartera).toHaveProperty('obligacion_total');
+    expect(cartera).toHaveProperty('distribucion');
+    expect(Number.isInteger(cartera.creditos_activos)).toBe(true);
+    expect(cartera.creditos_activos).toBeGreaterThanOrEqual(0);
+    expect(Number(cartera.cartera_total)).toBeGreaterThanOrEqual(0);
+    expect(Array.isArray(cartera.distribucion)).toBe(true);
+  });
+
+  test('distribucion tiene estructura correcta por fila', async () => {
+    const res = await ag.get('/api/gerencia/resumen');
+    expect(res.status).toBe(200);
+    for (const fila of res.body.cartera.distribucion) {
+      expect(fila).toHaveProperty('rango_id');
+      expect(fila).toHaveProperty('rango');
+      expect(fila).toHaveProperty('cantidad');
+      expect(fila).toHaveProperty('subtotal');
+      expect(typeof fila.rango).toBe('string');
+      expect(Number(fila.cantidad)).toBeGreaterThan(0);
+      expect(Number(fila.subtotal)).toBeGreaterThan(0);
+    }
+  });
+
+  test('distribucion ordenada por rango_id ascendente', async () => {
+    const res = await ag.get('/api/gerencia/resumen');
+    expect(res.status).toBe(200);
+    const dist = res.body.cartera.distribucion;
+    for (let i = 1; i < dist.length; i++) {
+      expect(Number(dist[i].rango_id)).toBeGreaterThan(Number(dist[i - 1].rango_id));
+    }
+  });
+});
+
+// ── Cartera — cálculos con datos reales ──────────────────────────────────────
+
+describe('Cartera de créditos — cálculos', () => {
+  let ag;
+  const codigoTest = '99999999';
+
+  beforeAll(async () => {
+    ag = agAdmin();
+    await ag.post('/api/auth/login').send({ email: adminEmail, password: adminPass });
+
+    // Asociado activo de prueba
+    await pool.query(`
+      INSERT INTO asociados (codigo, apellido, nombre, clase_cuota, is_active)
+      VALUES ($1, 'Cartera', 'Test Gerencia', '1', true)
+      ON CONFLICT (codigo) DO UPDATE SET is_active = true
+    `, [codigoTest]);
+
+    // Dos créditos: uno en rango $1M–$5M y otro en rango $5M–$10M
+    await pool.query(`
+      INSERT INTO asociado_descuentos (asociado_codigo, linea_id, nombre_linea, valor, saldo_credito, valor_obligacion)
+      VALUES
+        ($1, 9901, 'Crédito Test A', 100000, 3000000, 5000000),
+        ($1, 9902, 'Crédito Test B', 200000, 7000000, 10000000)
+      ON CONFLICT (asociado_codigo, linea_id) DO UPDATE
+        SET saldo_credito = EXCLUDED.saldo_credito,
+            valor_obligacion = EXCLUDED.valor_obligacion
+    `, [codigoTest]);
+  });
+
+  afterAll(async () => {
+    await pool.query(`DELETE FROM asociado_descuentos WHERE asociado_codigo = $1`, [codigoTest]);
+    await pool.query(`DELETE FROM asociados WHERE codigo = $1`, [codigoTest]);
+  });
+
+  test('cartera_total incluye los saldos de prueba', async () => {
+    const res = await ag.get('/api/gerencia/resumen');
+    expect(res.status).toBe(200);
+    // La suma total debe incluir al menos los 10M de los dos créditos de prueba
+    expect(Number(res.body.cartera.cartera_total)).toBeGreaterThanOrEqual(10_000_000);
+  });
+
+  test('creditos_activos incluye los créditos de prueba', async () => {
+    const res = await ag.get('/api/gerencia/resumen');
+    expect(res.status).toBe(200);
+    expect(res.body.cartera.creditos_activos).toBeGreaterThanOrEqual(2);
+  });
+
+  test('obligacion_total es mayor o igual a cartera_total', async () => {
+    const res = await ag.get('/api/gerencia/resumen');
+    expect(res.status).toBe(200);
+    const { cartera_total, obligacion_total } = res.body.cartera;
+    expect(Number(obligacion_total)).toBeGreaterThanOrEqual(Number(cartera_total));
+  });
+
+  test('distribucion contiene los rangos de los créditos de prueba', async () => {
+    const res = await ag.get('/api/gerencia/resumen');
+    expect(res.status).toBe(200);
+    const dist = res.body.cartera.distribucion;
+    const rangos = dist.map(r => r.rango);
+    // $3M → rango '$1M–$5M' (rango_id 2)
+    expect(rangos).toContain('$1M–$5M');
+    // $7M → rango '$5M–$10M' (rango_id 3)
+    expect(rangos).toContain('$5M–$10M');
+  });
+
+  test('crédito de asociado inactivo no se cuenta', async () => {
+    // Desactivar el asociado de prueba
+    await pool.query(`UPDATE asociados SET is_active = false WHERE codigo = $1`, [codigoTest]);
+
+    const res = await ag.get('/api/gerencia/resumen');
+    expect(res.status).toBe(200);
+
+    // Verificar en DB cuántos créditos activos hay sin el asociado inactivo
+    const { rows: [{ total }] } = await pool.query(`
+      SELECT COUNT(ad.id)::int AS total
+      FROM asociado_descuentos ad
+      JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
+      WHERE ad.saldo_credito > 0
+    `);
+    expect(res.body.cartera.creditos_activos).toBe(total);
+
+    // Reactivar para cleanup
+    await pool.query(`UPDATE asociados SET is_active = true WHERE codigo = $1`, [codigoTest]);
+  });
 });
 
 // ── GET /cobertura/:sorteoId ──────────────────────────────────────────────────

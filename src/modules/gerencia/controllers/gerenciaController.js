@@ -110,6 +110,42 @@ export const resumen = async (req, res, next) => {
       LIMIT 10
     `);
 
+    // ── Cartera de créditos ──────────────────────────────────────────────────
+    const { rows: [cartera] } = await pool.query(`
+      SELECT
+        COUNT(ad.id)::int                              AS creditos_activos,
+        COALESCE(SUM(ad.saldo_credito), 0)::bigint    AS cartera_total,
+        COALESCE(SUM(ad.valor_obligacion), 0)::bigint AS obligacion_total
+      FROM asociado_descuentos ad
+      JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
+      WHERE ad.saldo_credito IS NOT NULL AND ad.saldo_credito > 0
+    `);
+
+    const { rows: carteraDistribucion } = await pool.query(`
+      SELECT
+        CASE
+          WHEN ad.saldo_credito < 1000000   THEN 1
+          WHEN ad.saldo_credito < 5000000   THEN 2
+          WHEN ad.saldo_credito < 10000000  THEN 3
+          WHEN ad.saldo_credito < 20000000  THEN 4
+          ELSE 5
+        END AS rango_id,
+        CASE
+          WHEN ad.saldo_credito < 1000000   THEN '< $1M'
+          WHEN ad.saldo_credito < 5000000   THEN '$1M–$5M'
+          WHEN ad.saldo_credito < 10000000  THEN '$5M–$10M'
+          WHEN ad.saldo_credito < 20000000  THEN '$10M–$20M'
+          ELSE '> $20M'
+        END AS rango,
+        COUNT(*)::int AS cantidad,
+        SUM(ad.saldo_credito)::bigint AS subtotal
+      FROM asociado_descuentos ad
+      JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
+      WHERE ad.saldo_credito > 0
+      GROUP BY rango_id, rango
+      ORDER BY rango_id
+    `);
+
     // ── Solicitudes pendientes totales ───────────────────────────────────────
     const { rows: [pendientes] } = await pool.query(`
       SELECT
@@ -128,6 +164,7 @@ export const resumen = async (req, res, next) => {
       sorteos,
       sorteos_serie: sorteosSerie,
       patronales: { ...patronales, top_mora: topMora },
+      cartera: { ...cartera, distribucion: carteraDistribucion },
       logs,
       pendientes,
     });

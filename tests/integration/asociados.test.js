@@ -1346,3 +1346,201 @@ describe('Asociados — lock de concurrencia', () => {
     }
   });
 });
+
+// ── Campos extendidos: crédito y fecha_pri_descuento ─────────────────────────
+
+describe('Asociados — campos extendidos: crédito y fecha_pri_descuento', () => {
+  const codigoExt = '9998880001';
+  let passwordExt;
+
+  // CSV con todas las columnas relevantes: crédito + fecha_pri_descuento
+  const CSV_EXT = [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto,valor_obligacion,saldo,plazo,fecha_vencimiento,fecha_pri_decuento,tasa_interes',
+    // fila principal
+    `1,${codigoExt},Ext,Campos,1,EMP01,Empresa Test,Pereira,Calle Z,3001234567,,,,,,,01/01/2022,`,
+    // línea de crédito 1004 con todos los campos
+    `1004,${codigoExt},Ext,Campos,1,EMP01,Empresa Test,Pereira,Calle Z,3001234567,350.000,,5000000,2000000,36,31/12/2026,01/01/2024,15`,
+    // línea no-crédito (seguro) con fecha_pri_descuento pero sin campos de crédito
+    `4,${codigoExt},Ext,Campos,1,EMP01,Empresa Test,Pereira,Calle Z,3001234567,15.000,,,,,,01/03/2022,`,
+  ].join('\n');
+
+  const CSV_REIMPORT = [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto,valor_obligacion,saldo,plazo,fecha_vencimiento,fecha_pri_decuento,tasa_interes',
+    `1,${codigoExt},Ext,Campos,1,EMP01,Empresa Test,Pereira,Calle Z,3001234567,,,,,,,01/01/2022,`,
+    // mismo crédito pero saldo actualizado y fecha_pri_descuento distinta
+    `1004,${codigoExt},Ext,Campos,1,EMP01,Empresa Test,Pereira,Calle Z,3001234567,350.000,,5000000,1500000,36,31/12/2026,01/06/2024,15`,
+    // linea 4 se mantiene para no borrarla con el DELETE-before-insert del upsert
+    `4,${codigoExt},Ext,Campos,1,EMP01,Empresa Test,Pereira,Calle Z,3001234567,15.000,,,,,,01/03/2022,`,
+  ].join('\n');
+
+  beforeAll(async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_EXT), 'ext.csv');
+    const { body } = await ag.post(`/api/asociados/${codigoExt}/activar-portal`);
+    passwordExt = body.password;
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM asociado_descuentos WHERE asociado_codigo = $1', [codigoExt]);
+    await pool.query('DELETE FROM sincronizaciones    WHERE usuario_uuid = $1',    [adminUuid]);
+    await pool.query('DELETE FROM asociados           WHERE codigo = $1',          [codigoExt]);
+  });
+
+  // ── DB directa ──────────────────────────────────────────────────────────────
+
+  describe('DB — almacenamiento en import', () => {
+    test('Línea de crédito guarda fecha_pri_descuento', async () => {
+      const { rows } = await pool.query(
+        `SELECT fecha_pri_descuento FROM asociado_descuentos
+         WHERE asociado_codigo = $1 AND linea_id = 1004`,
+        [codigoExt]
+      );
+      expect(rows.length).toBe(1);
+      expect(rows[0].fecha_pri_descuento).not.toBeNull();
+      expect(String(rows[0].fecha_pri_descuento)).toContain('2024-01-01');
+    });
+
+    test('Línea no-crédito guarda fecha_pri_descuento', async () => {
+      const { rows } = await pool.query(
+        `SELECT fecha_pri_descuento FROM asociado_descuentos
+         WHERE asociado_codigo = $1 AND linea_id = 4`,
+        [codigoExt]
+      );
+      expect(rows.length).toBe(1);
+      expect(rows[0].fecha_pri_descuento).not.toBeNull();
+      expect(String(rows[0].fecha_pri_descuento)).toContain('2022-03-01');
+    });
+
+    test('Línea de crédito guarda valor_obligacion, saldo_credito, num_cuotas, fecha_vencimiento, tasa_interes', async () => {
+      const { rows } = await pool.query(
+        `SELECT valor_obligacion, saldo_credito, num_cuotas, fecha_vencimiento, tasa_interes
+         FROM asociado_descuentos WHERE asociado_codigo = $1 AND linea_id = 1004`,
+        [codigoExt]
+      );
+      expect(rows.length).toBe(1);
+      const r = rows[0];
+      expect(Number(r.valor_obligacion)).toBe(5000000);
+      expect(Number(r.saldo_credito)).toBe(2000000);
+      expect(r.num_cuotas).toBe(36);
+      expect(r.fecha_vencimiento).not.toBeNull();
+      expect(Number(r.tasa_interes)).toBe(15);
+    });
+
+    test('Línea no-crédito tiene campos de crédito en NULL', async () => {
+      const { rows } = await pool.query(
+        `SELECT valor_obligacion, saldo_credito, num_cuotas, fecha_vencimiento, tasa_interes
+         FROM asociado_descuentos WHERE asociado_codigo = $1 AND linea_id = 4`,
+        [codigoExt]
+      );
+      const r = rows[0];
+      expect(r.valor_obligacion).toBeNull();
+      expect(r.saldo_credito).toBeNull();
+      expect(r.num_cuotas).toBeNull();
+      expect(r.fecha_vencimiento).toBeNull();
+      expect(r.tasa_interes).toBeNull();
+    });
+
+    test('Reimport upsert actualiza saldo_credito y fecha_pri_descuento', async () => {
+      const ag = agent();
+      await loginAdmin(ag);
+      const importRes = await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_REIMPORT), 'ext2.csv');
+      expect(importRes.status).toBe(200);
+
+      const { rows } = await pool.query(
+        `SELECT saldo_credito, fecha_pri_descuento FROM asociado_descuentos
+         WHERE asociado_codigo = $1 AND linea_id = 1004`,
+        [codigoExt]
+      );
+      expect(Number(rows[0].saldo_credito)).toBe(1500000);
+      expect(String(rows[0].fecha_pri_descuento)).toContain('2024-06-01');
+    });
+  });
+
+  // ── Portal /descuentos ───────────────────────────────────────────────────────
+
+  describe('Portal GET /descuentos — campos extendidos', () => {
+    let agPortal;
+    beforeAll(async () => {
+      agPortal = agent();
+      await agPortal.post('/api/asociados/login').send({ codigo: codigoExt, password: passwordExt });
+    });
+
+    test('Respuesta incluye fecha_pri_descuento en línea de crédito', async () => {
+      const res = await agPortal.get('/api/asociados/descuentos');
+      expect(res.status).toBe(200);
+      const linea = res.body.find((d) => d.linea_id === 1004);
+      expect(linea).toBeDefined();
+      expect(linea.fecha_pri_descuento).not.toBeNull();
+    });
+
+    test('Respuesta incluye fecha_pri_descuento en línea no-crédito', async () => {
+      const res = await agPortal.get('/api/asociados/descuentos');
+      const linea = res.body.find((d) => d.linea_id === 4);
+      expect(linea).toBeDefined();
+      expect(linea.fecha_pri_descuento).not.toBeNull();
+    });
+
+    test('Respuesta incluye campos de crédito en línea 1004', async () => {
+      const res = await agPortal.get('/api/asociados/descuentos');
+      const linea = res.body.find((d) => d.linea_id === 1004);
+      expect(linea).toBeDefined();
+      expect(Number(linea.valor_obligacion)).toBe(5000000);
+      expect(Number(linea.num_cuotas)).toBe(36);
+      expect(Number(linea.tasa_interes)).toBe(15);
+    });
+
+    test('Línea no-crédito tiene valor_obligacion null en respuesta', async () => {
+      const res = await agPortal.get('/api/asociados/descuentos');
+      const linea = res.body.find((d) => d.linea_id === 4);
+      expect(linea.valor_obligacion).toBeNull();
+      expect(linea.saldo_credito).toBeNull();
+    });
+  });
+
+  // ── Admin /:codigo/perfil descuentos ────────────────────────────────────────
+
+  describe('Admin GET /:codigo/perfil — descuentos con campos extendidos', () => {
+    test('Incluye fecha_pri_descuento en línea de crédito', async () => {
+      const ag = agent();
+      await loginAdmin(ag);
+      const res = await ag.get(`/api/asociados/${codigoExt}/perfil`);
+      expect(res.status).toBe(200);
+      const linea = res.body.descuentos.find((d) => d.linea_id === 1004);
+      expect(linea).toBeDefined();
+      expect(linea.fecha_pri_descuento).not.toBeNull();
+    });
+
+    test('Incluye fecha_pri_descuento en línea no-crédito', async () => {
+      const ag = agent();
+      await loginAdmin(ag);
+      const res = await ag.get(`/api/asociados/${codigoExt}/perfil`);
+      const linea = res.body.descuentos.find((d) => d.linea_id === 4);
+      expect(linea).toBeDefined();
+      expect(linea.fecha_pri_descuento).not.toBeNull();
+    });
+
+    test('Incluye campos de crédito en línea 1004', async () => {
+      const ag = agent();
+      await loginAdmin(ag);
+      const res = await ag.get(`/api/asociados/${codigoExt}/perfil`);
+      const linea = res.body.descuentos.find((d) => d.linea_id === 1004);
+      expect(Number(linea.valor_obligacion)).toBe(5000000);
+      expect(Number(linea.num_cuotas)).toBe(36);
+      expect(Number(linea.tasa_interes)).toBe(15);
+      expect(linea.fecha_vencimiento).not.toBeNull();
+    });
+
+    test('Cada descuento incluye los campos: linea_id, nombre_linea, valor, fecha_pri_descuento', async () => {
+      const ag = agent();
+      await loginAdmin(ag);
+      const { body } = await ag.get(`/api/asociados/${codigoExt}/perfil`);
+      body.descuentos.forEach((d) => {
+        expect(d).toHaveProperty('linea_id');
+        expect(d).toHaveProperty('nombre_linea');
+        expect(d).toHaveProperty('valor');
+        expect(d).toHaveProperty('fecha_pri_descuento');
+      });
+    });
+  });
+});

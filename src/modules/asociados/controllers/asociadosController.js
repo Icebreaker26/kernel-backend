@@ -704,83 +704,108 @@ export const importarCSV = async (req, res, next) => {
       );
     }
 
-    // ── Reconciliación línea 15 (cobros externos vs Kernel) ──────────────────────
+    // ── Reconciliación por línea CSV (cobros externos vs Kernel) ─────────────────
     let discrepancias = null;
 
-    const filas15 = registros.filter((r) => String(r.linea ?? '').trim() === '15');
+    // Sorteos activos con línea de reconciliación configurada, agrupados por línea
+    const { rows: sorteosConLinea } = await client.query(
+      `SELECT id, linea_reconciliacion, precio_boleto, tipo_pago
+       FROM sorteos
+       WHERE estado = 'activo' AND linea_reconciliacion IS NOT NULL`
+    );
 
-    if (filas15.length > 0) {
+    if (sorteosConLinea.length > 0) {
       const parseCuotaCOP = (str) => {
         const cleaned = String(str ?? '0').trim().replace(/\./g, '').replace(',', '.');
         return parseFloat(cleaned) || 0;
       };
 
-      // Un registro por código — tomar el primero
-      const mapa15 = new Map();
-      for (const r of filas15) {
-        if (!mapa15.has(r.codigo)) {
-          mapa15.set(r.codigo, {
-            cuota_externa:   parseCuotaCOP(r.cuota),
-            periodo_descto:  String(r.periodo_descto ?? '2').trim(), // '1'=mensual, '2'=quincenal
-            nombre:          `${(r.nombre ?? '').trim()} ${(r.apellido ?? '').trim()}`.trim(),
-            empresa:         (r.nombre_empresa ?? r.empresa_dsto ?? '').trim(),
-          });
-        }
+      // Agrupar sorteos por número de línea
+      const sorteosPorLinea = new Map();
+      for (const s of sorteosConLinea) {
+        const linea = String(s.linea_reconciliacion).trim();
+        if (!sorteosPorLinea.has(linea)) sorteosPorLinea.set(linea, []);
+        sorteosPorLinea.get(linea).push(s);
       }
 
-      // precio_boleto del sorteo activo — para calcular bonos_sugeridos en COBRO_SIN_BOLETO
-      const { rows: sorteoRows } = await client.query(
-        `SELECT precio_boleto FROM sorteos WHERE estado = 'activo' AND precio_boleto > 0 LIMIT 1`
-      );
-      const precioBoleto = parseFloat(sorteoRows[0]?.precio_boleto ?? 0);
-
-      // Total mensual en Kernel por asociado — dentro de la transacción, ve boletos ya liberados
-      const { rows: boletosKernel } = await client.query(`
-        SELECT b.asociado_codigo,
-               SUM(s.precio_boleto)::numeric AS total_mensual,
-               COUNT(*)::int                 AS boletos_count
-        FROM boletos b
-        JOIN sorteos s ON s.id = b.sorteo_id
-        WHERE b.estado = 'asignado' AND s.estado = 'activo' AND s.precio_boleto > 0
-        GROUP BY b.asociado_codigo
-      `);
-      const boletosMap      = new Map(boletosKernel.map((r) => [r.asociado_codigo, parseFloat(r.total_mensual)]));
-      const boletosCountMap = new Map(boletosKernel.map((r) => [r.asociado_codigo, r.boletos_count]));
       const codigosActivosSet = new Set(codigosCSV);
       const validosMap        = new Map(validos.map((v) => [v.codigo, v]));
-
       discrepancias = [];
 
-      // Revisar cada entrada de línea 15
-      for (const [codigo, d] of mapa15) {
-        const activo       = codigosActivosSet.has(codigo);
-        const totalMensual = boletosMap.get(codigo) ?? 0;
-        // periodo_descto: '1-Mensual' → factor 1, '2-Quincenal' → factor 2
-        const factor       = String(d.periodo_descto).startsWith('2') ? 2 : 1;
-        const cuotaKernel  = Math.round((totalMensual / factor) * 100) / 100;
-        const cuotaExterna = Math.round(d.cuota_externa * 100) / 100;
+      for (const [linea, sorteosDeLinea] of sorteosPorLinea) {
+        const filasLinea = registros.filter((r) => String(r.linea ?? '').trim() === linea);
+        if (filasLinea.length === 0) continue;
 
-        const periodo = factor === 2 ? 'quincenal' : 'mensual';
-
-        if (!activo) {
-          discrepancias.push({ tipo: 'COBRO_A_RETIRADO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0, boletos_count: 0, periodo });
-        } else if (totalMensual === 0) {
-          const bonos_sugeridos = precioBoleto > 0 ? Math.round((cuotaExterna * factor) / precioBoleto) : null;
-          discrepancias.push({ tipo: 'COBRO_SIN_BOLETO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0, boletos_count: 0, periodo, bonos_sugeridos });
-        } else if (Math.abs(cuotaExterna - cuotaKernel) > 1) {
-          discrepancias.push({ tipo: 'MONTO_INCORRECTO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: cuotaKernel, diferencia: Math.round((cuotaExterna - cuotaKernel) * 100) / 100, boletos_count: boletosCountMap.get(codigo) ?? 0, periodo });
+        // Un registro por código — tomar el primero
+        const mapaLinea = new Map();
+        for (const r of filasLinea) {
+          if (!mapaLinea.has(r.codigo)) {
+            mapaLinea.set(r.codigo, {
+              cuota_externa:  parseCuotaCOP(r.cuota),
+              periodo_descto: String(r.periodo_descto ?? '2').trim(),
+              nombre:         `${(r.nombre ?? '').trim()} ${(r.apellido ?? '').trim()}`.trim(),
+              empresa:        (r.nombre_empresa ?? r.empresa_dsto ?? '').trim(),
+            });
+          }
         }
-      }
 
-      // Activos con boletos en Kernel pero sin línea 15 en el CSV
-      for (const [codigo, totalMensual] of boletosMap) {
-        if (!mapa15.has(codigo) && codigosActivosSet.has(codigo)) {
-          const asocData = validosMap.get(codigo);
-          if (asocData) {
-            const factor      = String(asocData.clase_cuota).startsWith('2') ? 2 : 1;
-            const cuotaKernel = Math.round((totalMensual / factor) * 100) / 100;
-            const periodo     = factor === 2 ? 'quincenal' : 'mensual';
-            discrepancias.push({ tipo: 'SIN_COBRO_EXTERNO', codigo, nombre: `${asocData.nombre} ${asocData.apellido}`, empresa: asocData.nombre_empresa, cuota_externa: 0, cuota_kernel: cuotaKernel, boletos_count: boletosCountMap.get(codigo) ?? 0, periodo });
+        // precio_boleto, sorteo_id y tipo_pago del primer sorteo con precio de esta línea
+        const sorteoDeLinea  = sorteosDeLinea.find((s) => s.precio_boleto > 0);
+        const precioBoleto   = parseFloat(sorteoDeLinea?.precio_boleto ?? 0);
+        const sorteoIdLinea  = sorteoDeLinea?.id ?? null;
+        // Si todos los sorteos de esta línea son pago único, el factor siempre es 1
+        const esUnico        = sorteosDeLinea.every((s) => s.tipo_pago === 'unico');
+
+        // Boletos de los sorteos de ESTA línea únicamente
+        const sorteoIds = sorteosDeLinea.map((s) => s.id);
+        const { rows: boletosKernel } = await client.query(
+          `SELECT b.asociado_codigo,
+                  SUM(s.precio_boleto)::numeric AS total_mensual,
+                  COUNT(*)::int                 AS boletos_count
+           FROM boletos b
+           JOIN sorteos s ON s.id = b.sorteo_id
+           WHERE b.estado = 'asignado' AND s.estado = 'activo' AND s.precio_boleto > 0
+             AND s.id = ANY($1)
+           GROUP BY b.asociado_codigo`,
+          [sorteoIds]
+        );
+        const boletosMap      = new Map(boletosKernel.map((r) => [r.asociado_codigo, parseFloat(r.total_mensual)]));
+        const boletosCountMap = new Map(boletosKernel.map((r) => [r.asociado_codigo, r.boletos_count]));
+
+        // Revisar cada entrada de esta línea
+        for (const [codigo, d] of mapaLinea) {
+          const activo       = codigosActivosSet.has(codigo);
+          const totalMensual = boletosMap.get(codigo) ?? 0;
+          const factor       = String(d.periodo_descto).startsWith('2') ? 2 : 1;
+          const cuotaExterna = Math.round(d.cuota_externa * 100) / 100;
+          const periodo      = factor === 2 ? 'quincenal' : 'mensual';
+
+          // Para pago único el factor es siempre 1 — no hay cadencia mensual/quincenal
+          const factorEfectivo = esUnico ? 1 : factor;
+          const cuotaKernelEfectiva = Math.round((totalMensual / factorEfectivo) * 100) / 100;
+          const periodoEfectivo     = esUnico ? 'único' : periodo;
+
+          if (!activo) {
+            discrepancias.push({ tipo: 'COBRO_A_RETIRADO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0, boletos_count: 0, periodo: periodoEfectivo, linea, sorteo_id: sorteoIdLinea });
+          } else if (totalMensual === 0) {
+            const bonos_sugeridos = precioBoleto > 0 ? Math.round((cuotaExterna * factorEfectivo) / precioBoleto) : null;
+            discrepancias.push({ tipo: 'COBRO_SIN_BOLETO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0, boletos_count: 0, periodo: periodoEfectivo, bonos_sugeridos, linea, sorteo_id: sorteoIdLinea });
+          } else if (Math.abs(cuotaExterna - cuotaKernelEfectiva) > 1) {
+            discrepancias.push({ tipo: 'MONTO_INCORRECTO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: cuotaKernelEfectiva, diferencia: Math.round((cuotaExterna - cuotaKernelEfectiva) * 100) / 100, boletos_count: boletosCountMap.get(codigo) ?? 0, periodo: periodoEfectivo, linea, sorteo_id: sorteoIdLinea });
+          }
+        }
+
+        // Activos con boletos en Kernel para esta línea pero ausentes en el CSV
+        for (const [codigo, totalMensual] of boletosMap) {
+          if (!mapaLinea.has(codigo) && codigosActivosSet.has(codigo)) {
+            const asocData = validosMap.get(codigo);
+            if (asocData) {
+              // Para pago único: factor 1 siempre; para recurrente: según clase_cuota del asociado
+              const factorSC    = esUnico ? 1 : (String(asocData.clase_cuota).startsWith('2') ? 2 : 1);
+              const cuotaKernel = Math.round((totalMensual / factorSC) * 100) / 100;
+              const periodoSC   = esUnico ? 'único' : (factorSC === 2 ? 'quincenal' : 'mensual');
+              discrepancias.push({ tipo: 'SIN_COBRO_EXTERNO', codigo, nombre: `${asocData.nombre} ${asocData.apellido}`, empresa: asocData.nombre_empresa, cuota_externa: 0, cuota_kernel: cuotaKernel, boletos_count: boletosCountMap.get(codigo) ?? 0, periodo: periodoSC, linea, sorteo_id: sorteoIdLinea });
+            }
           }
         }
       }
@@ -806,7 +831,9 @@ export const importarCSV = async (req, res, next) => {
       return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
     };
 
-    const descuentosMap = new Map(); // 'codigo:lineaId' → descuento row
+    // Usar 'codigo:numero' como clave — permite múltiples créditos de la misma línea
+    const descuentosItems = [];
+    const descuentosKeys  = new Set(); // evitar duplicados exactos dentro del mismo CSV
     const codigosValidosSet = new Set(validos.map((v) => v.codigo));
 
     for (const r of registros) {
@@ -816,11 +843,17 @@ export const importarCSV = async (req, res, next) => {
       if (!codigo || !codigosValidosSet.has(codigo)) continue;
       const valor = parseCuotaNum(r.cuota);
       if (!valor) continue;
-      descuentosMap.set(`${codigo}:${lineaId}`, {
+      const numeroRaw = String(r.numero ?? '').trim();
+      const numero = (numeroRaw && numeroRaw !== '0') ? numeroRaw : null;
+      const key = numero ? `${codigo}:${numero}` : `${codigo}:${lineaId}:${valor}`;
+      if (descuentosKeys.has(key)) continue;
+      descuentosKeys.add(key);
+      descuentosItems.push({
         asociado_codigo:     codigo,
         linea_id:            lineaId,
         nombre_linea:        CATALOGO_LINEAS[lineaId] ?? `LÍNEA ${lineaId}`,
         valor,
+        numero,
         valor_obligacion:    parseNumeroLocal(r.valor_obligacion),
         saldo_credito:       parseNumeroLocal(r.saldo),
         num_cuotas:          r.plazo ? (parseInt(String(r.plazo).trim(), 10) || null) : null,
@@ -830,29 +863,29 @@ export const importarCSV = async (req, res, next) => {
       });
     }
 
-    if (descuentosMap.size > 0) {
-      const codigos = [...new Set([...descuentosMap.values()].map((d) => d.asociado_codigo))];
+    if (descuentosItems.length > 0) {
+      const codigos = [...new Set(descuentosItems.map((d) => d.asociado_codigo))];
       await client.query(
         `DELETE FROM asociado_descuentos WHERE asociado_codigo = ANY($1)`,
         [codigos]
       );
-      const items = [...descuentosMap.values()];
-      for (let i = 0; i < items.length; i += 200) {
-        const lote = items.slice(i, i + 200);
-        const vals = lote.map((_, j) => `($${j*10+1},$${j*10+2},$${j*10+3},$${j*10+4},$${j*10+5},$${j*10+6},$${j*10+7},$${j*10+8},$${j*10+9},$${j*10+10})`).join(',');
+      for (let i = 0; i < descuentosItems.length; i += 200) {
+        const lote = descuentosItems.slice(i, i + 200);
+        const vals = lote.map((_, j) => `($${j*11+1},$${j*11+2},$${j*11+3},$${j*11+4},$${j*11+5},$${j*11+6},$${j*11+7},$${j*11+8},$${j*11+9},$${j*11+10},$${j*11+11})`).join(',');
         const params = lote.flatMap((d) => [
-          d.asociado_codigo, d.linea_id, d.nombre_linea, d.valor,
+          d.asociado_codigo, d.linea_id, d.nombre_linea, d.valor, d.numero,
           d.valor_obligacion, d.saldo_credito, d.num_cuotas, d.fecha_vencimiento, d.tasa_interes,
           d.fecha_pri_descuento,
         ]);
         await client.query(
           `INSERT INTO asociado_descuentos
-             (asociado_codigo, linea_id, nombre_linea, valor,
+             (asociado_codigo, linea_id, nombre_linea, valor, numero,
               valor_obligacion, saldo_credito, num_cuotas, fecha_vencimiento, tasa_interes,
               fecha_pri_descuento)
            VALUES ${vals}
-           ON CONFLICT (asociado_codigo, linea_id) DO UPDATE
-             SET nombre_linea        = EXCLUDED.nombre_linea,
+           ON CONFLICT (asociado_codigo, numero) DO UPDATE
+             SET linea_id            = EXCLUDED.linea_id,
+                 nombre_linea        = EXCLUDED.nombre_linea,
                  valor               = EXCLUDED.valor,
                  valor_obligacion    = EXCLUDED.valor_obligacion,
                  saldo_credito       = EXCLUDED.saldo_credito,
@@ -860,7 +893,8 @@ export const importarCSV = async (req, res, next) => {
                  fecha_vencimiento   = EXCLUDED.fecha_vencimiento,
                  tasa_interes        = EXCLUDED.tasa_interes,
                  fecha_pri_descuento = EXCLUDED.fecha_pri_descuento,
-                 updated_at          = NOW()`,
+                 updated_at          = NOW()
+           WHERE asociado_descuentos.numero IS NOT NULL`,
           params
         );
       }
@@ -922,12 +956,12 @@ export const importarCSV = async (req, res, next) => {
 export const descuentosPortal = async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT linea_id, nombre_linea, valor,
+      `SELECT linea_id, nombre_linea, valor, numero,
               valor_obligacion, saldo_credito, num_cuotas, fecha_vencimiento, tasa_interes,
               fecha_pri_descuento
        FROM asociado_descuentos
        WHERE asociado_codigo = $1
-       ORDER BY linea_id`,
+       ORDER BY linea_id, numero NULLS LAST`,
       [req.asociado.id]
     );
     res.json(rows);
@@ -1208,12 +1242,12 @@ export const perfilAsociado = async (req, res, next) => {
     );
 
     const { rows: descuentos } = await pool.query(
-      `SELECT linea_id, nombre_linea, valor,
+      `SELECT linea_id, nombre_linea, valor, numero,
               valor_obligacion, saldo_credito, num_cuotas, fecha_vencimiento, tasa_interes,
               fecha_pri_descuento
        FROM asociado_descuentos
        WHERE asociado_codigo = $1
-       ORDER BY linea_id`,
+       ORDER BY linea_id, numero NULLS LAST`,
       [codigo]
     );
 

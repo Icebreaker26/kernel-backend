@@ -248,8 +248,6 @@ export const resumen = async (req, res, next) => {
       JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
       WHERE UPPER(ad.nombre_linea) LIKE '%BIENESTAR%'
         AND ad.valor IS NOT NULL AND ad.valor > 0
-        AND ad.fecha_pri_descuento IS NOT NULL
-        AND ad.fecha_pri_descuento <= CURRENT_DATE
     `);
 
     const { rows: bienestarLineas } = await pool.query(`
@@ -261,8 +259,6 @@ export const resumen = async (req, res, next) => {
       JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
       WHERE UPPER(ad.nombre_linea) LIKE '%BIENESTAR%'
         AND ad.valor IS NOT NULL AND ad.valor > 0
-        AND ad.fecha_pri_descuento IS NOT NULL
-        AND ad.fecha_pri_descuento <= CURRENT_DATE
       GROUP BY ad.nombre_linea
       ORDER BY mensual DESC
     `);
@@ -296,8 +292,6 @@ export const resumen = async (req, res, next) => {
        OR UPPER(ad.nombre_linea) LIKE '%FUNERARI%'
        OR UPPER(ad.nombre_linea) LIKE '%OFRENDA%')
       AND ad.valor IS NOT NULL AND ad.valor > 0
-      AND ad.fecha_pri_descuento IS NOT NULL
-      AND ad.fecha_pri_descuento <= CURRENT_DATE
     `;
 
     const { rows: [segurosResumen] } = await pool.query(`
@@ -371,6 +365,79 @@ export const resumen = async (req, res, next) => {
       logs,
       pendientes,
     });
+  } catch (err) { next(err); }
+};
+
+export const lineas = async (req, res, next) => {
+  try {
+    const { rows: [{ total: totalActivos }] } = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM asociados WHERE is_active = true`
+    );
+
+    const { rows } = await pool.query(`
+      SELECT
+        ad.linea_id,
+        MAX(ad.nombre_linea)                                                  AS nombre_linea,
+        COUNT(DISTINCT ad.asociado_codigo)::int                               AS con_linea,
+        COALESCE(SUM(ad.valor), 0)::bigint                                    AS valor_total,
+        ROUND(COALESCE(AVG(ad.valor), 0))::bigint                             AS valor_promedio
+      FROM asociado_descuentos ad
+      JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
+      WHERE ad.valor IS NOT NULL AND ad.valor > 0
+      GROUP BY ad.linea_id
+      ORDER BY COUNT(DISTINCT ad.asociado_codigo) DESC, SUM(ad.valor) DESC
+    `);
+
+    res.json(rows.map(r => ({
+      ...r,
+      sin_linea:      totalActivos - r.con_linea,
+      total_activos:  totalActivos,
+      pct_cobertura:  totalActivos > 0
+        ? Number(((r.con_linea / totalActivos) * 100).toFixed(1))
+        : 0,
+    })));
+  } catch (err) { next(err); }
+};
+
+export const lineaDetalle = async (req, res, next) => {
+  try {
+    const lineaId = parseInt(req.params.lineaId, 10);
+    if (isNaN(lineaId)) return res.status(400).json({ error: 'lineaId inválido' });
+
+    const [{ rows: tienen }, { rows: noTienen }, { rows: [meta] }] = await Promise.all([
+      pool.query(`
+        SELECT
+          a.codigo, a.nombre, a.apellido,
+          ad.valor::bigint AS valor,
+          ad.fecha_pri_descuento
+        FROM asociado_descuentos ad
+        JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
+        WHERE ad.linea_id = $1
+          AND ad.valor IS NOT NULL AND ad.valor > 0
+        ORDER BY a.apellido, a.nombre
+      `, [lineaId]),
+
+      pool.query(`
+        SELECT a.codigo, a.nombre, a.apellido
+        FROM asociados a
+        WHERE a.is_active = true
+          AND NOT EXISTS (
+            SELECT 1 FROM asociado_descuentos ad
+            WHERE ad.asociado_codigo = a.codigo
+              AND ad.linea_id = $1
+              AND ad.valor IS NOT NULL AND ad.valor > 0
+          )
+        ORDER BY a.apellido, a.nombre
+      `, [lineaId]),
+
+      pool.query(`
+        SELECT MAX(ad.nombre_linea) AS nombre_linea
+        FROM asociado_descuentos ad
+        WHERE ad.linea_id = $1
+      `, [lineaId]),
+    ]);
+
+    res.json({ nombre_linea: meta?.nombre_linea ?? `Línea ${lineaId}`, tienen, no_tienen: noTienen });
   } catch (err) { next(err); }
 };
 

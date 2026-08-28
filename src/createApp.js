@@ -19,7 +19,7 @@ export const createApp = async () => {
   app.use(helmet());
   const allowedOrigins = [env.FRONTEND_URL, env.PORTAL_URL].filter(Boolean);
   app.use(cors({ origin: allowedOrigins, credentials: true }));
-  app.use(express.json());
+  app.use(express.json({ limit: '2mb' }));
   app.use(cookieParser());
 
   const modulesPath   = join(__dirname, 'modules');

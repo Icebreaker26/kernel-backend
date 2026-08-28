@@ -631,6 +631,23 @@ describe('Sorteos — premio', () => {
     const res = await ag.put(`/api/sorteos/${sorteoId}`).send({ premio: 'x'.repeat(201) });
     expect(res.status).toBe(400);
   });
+
+  test('PUT /:id linea_reconciliacion → 200 + persiste', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.put(`/api/sorteos/${sorteoId}`).send({ linea_reconciliacion: '1012' });
+    expect(res.status).toBe(200);
+    expect(res.body.linea_reconciliacion).toBe('1012');
+    // limpiar
+    await ag.put(`/api/sorteos/${sorteoId}`).send({ linea_reconciliacion: null });
+  });
+
+  test('PUT /:id linea_reconciliacion no numérica → 400', async () => {
+    const ag = agentAdmin();
+    await loginAdmin(ag);
+    const res = await ag.put(`/api/sorteos/${sorteoId}`).send({ linea_reconciliacion: 'abc' });
+    expect(res.status).toBe(400);
+  });
 });
 
 // ── Asignación en lote por discrepancia ────────────────────────────────────

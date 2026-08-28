@@ -504,10 +504,10 @@ describe('Asociados — reconciliación línea 15 (bonos)', () => {
   ].join('\n');
 
   beforeAll(async () => {
-    // Sorteo activo con precio_boleto = 3000
+    // Sorteo activo con precio_boleto = 3000 y línea CSV 15 configurada
     const { rows: [s] } = await pool.query(
-      `INSERT INTO sorteos (nombre, estado, precio_boleto)
-       VALUES ('Sorteo Recon Test', 'activo', 3000)
+      `INSERT INTO sorteos (nombre, estado, precio_boleto, linea_reconciliacion)
+       VALUES ('Sorteo Recon Test', 'activo', 3000, '15')
        RETURNING id`
     );
     sorteoId = s.id;
@@ -626,7 +626,9 @@ describe('Asociados — reconciliación línea 15 (bonos)', () => {
   });
 
   // Este test va ÚLTIMO: retira los 4 asociados y libera sus boletos
-  test('CSV sin línea 15 → discrepancias es null', async () => {
+  // El sorteo del beforeAll tiene linea_reconciliacion='15' pero el CSV no trae filas de esa línea
+  // → discrepancias es [] (array vacío, no null) porque sí hay sorteos configurados pero sin filas que auditar
+  test('CSV sin filas de línea 15 → discrepancias es array vacío', async () => {
     const csvSinL15 = [
       'codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad',
       `${testCodigo},Torres,Test,1,EMP01,Empresa Test,Pereira`,
@@ -637,7 +639,8 @@ describe('Asociados — reconciliación línea 15 (bonos)', () => {
       .post('/api/asociados/importar')
       .attach('archivo', Buffer.from(csvSinL15), 'sin_l15.csv');
     expect(res.status).toBe(200);
-    expect(res.body.discrepancias).toBeNull();
+    expect(Array.isArray(res.body.discrepancias)).toBe(true);
+    expect(res.body.discrepancias.length).toBe(0);
   });
 });
 
@@ -1531,7 +1534,7 @@ describe('Asociados — campos extendidos: crédito y fecha_pri_descuento', () =
       expect(linea.fecha_vencimiento).not.toBeNull();
     });
 
-    test('Cada descuento incluye los campos: linea_id, nombre_linea, valor, fecha_pri_descuento', async () => {
+    test('Cada descuento incluye los campos: linea_id, nombre_linea, valor, numero, fecha_pri_descuento', async () => {
       const ag = agent();
       await loginAdmin(ag);
       const { body } = await ag.get(`/api/asociados/${codigoExt}/perfil`);
@@ -1539,8 +1542,115 @@ describe('Asociados — campos extendidos: crédito y fecha_pri_descuento', () =
         expect(d).toHaveProperty('linea_id');
         expect(d).toHaveProperty('nombre_linea');
         expect(d).toHaveProperty('valor');
+        expect(d).toHaveProperty('numero');
         expect(d).toHaveProperty('fecha_pri_descuento');
       });
     });
+  });
+});
+
+// ── Múltiples créditos por misma línea (numero como clave) ───────────────────
+
+describe('Asociados — múltiples créditos por misma línea (numero)', () => {
+  const codigoMulti = '9997770001';
+
+  const CSV_DOS_CREDITOS = [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto,valor_obligacion,saldo,plazo,fecha_vencimiento,fecha_pri_decuento,tasa_interes,numero',
+    `1,${codigoMulti},Multi,Test,1,EMP01,Empresa Test,Pereira,Calle M,3001234567,,,,,,,,,`,
+    `1006,${codigoMulti},Multi,Test,1,EMP01,Empresa Test,Pereira,Calle M,3001234567,200.000,,10000000,8000000,60,31/12/2027,01/01/2023,18,CRED-001`,
+    `1006,${codigoMulti},Multi,Test,1,EMP01,Empresa Test,Pereira,Calle M,3001234567,150.000,,5000000,3000000,36,30/06/2026,01/06/2024,16,CRED-002`,
+  ].join('\n');
+
+  const CSV_REIMPORT_MULTI = [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto,valor_obligacion,saldo,plazo,fecha_vencimiento,fecha_pri_decuento,tasa_interes,numero',
+    `1,${codigoMulti},Multi,Test,1,EMP01,Empresa Test,Pereira,Calle M,3001234567,,,,,,,,,`,
+    `1006,${codigoMulti},Multi,Test,1,EMP01,Empresa Test,Pereira,Calle M,3001234567,200.000,,10000000,6000000,60,31/12/2027,01/01/2023,18,CRED-001`,
+    `1006,${codigoMulti},Multi,Test,1,EMP01,Empresa Test,Pereira,Calle M,3001234567,150.000,,5000000,3000000,36,30/06/2026,01/06/2024,16,CRED-002`,
+  ].join('\n');
+
+  const CSV_NUMERO_DUPLICADO = [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto,valor_obligacion,saldo,plazo,fecha_vencimiento,fecha_pri_decuento,tasa_interes,numero',
+    `1,${codigoMulti},Multi,Test,1,EMP01,Empresa Test,Pereira,Calle M,3001234567,,,,,,,,,`,
+    `1006,${codigoMulti},Multi,Test,1,EMP01,Empresa Test,Pereira,Calle M,3001234567,200.000,,10000000,8000000,60,31/12/2027,01/01/2023,18,CRED-DUP`,
+    `1006,${codigoMulti},Multi,Test,1,EMP01,Empresa Test,Pereira,Calle M,3001234567,200.000,,10000000,8000000,60,31/12/2027,01/01/2023,18,CRED-DUP`,
+  ].join('\n');
+
+  let passwordMulti;
+
+  beforeAll(async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_DOS_CREDITOS), 'multi.csv');
+    const { body } = await ag.post(`/api/asociados/${codigoMulti}/activar-portal`);
+    passwordMulti = body.password;
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM asociado_descuentos WHERE asociado_codigo = $1', [codigoMulti]);
+    await pool.query('DELETE FROM sincronizaciones    WHERE usuario_uuid = $1',    [adminUuid]);
+    await pool.query('DELETE FROM asociados           WHERE codigo = $1',          [codigoMulti]);
+  });
+
+  test('CSV con dos créditos 1006 distintos → 2 filas en DB', async () => {
+    const { rows } = await pool.query(
+      `SELECT numero, saldo_credito FROM asociado_descuentos
+       WHERE asociado_codigo = $1 AND linea_id = 1006
+       ORDER BY numero`,
+      [codigoMulti]
+    );
+    expect(rows.length).toBe(2);
+    expect(rows.find((r) => r.numero === 'CRED-001')).toBeDefined();
+    expect(rows.find((r) => r.numero === 'CRED-002')).toBeDefined();
+    expect(Number(rows.find((r) => r.numero === 'CRED-001').saldo_credito)).toBe(8000000);
+    expect(Number(rows.find((r) => r.numero === 'CRED-002').saldo_credito)).toBe(3000000);
+  });
+
+  test('GET /api/asociados/descuentos (portal) — devuelve ambos créditos con campo numero', async () => {
+    const ag = agent();
+    await ag.post('/api/asociados/login').send({ codigo: codigoMulti, password: passwordMulti });
+    const res = await ag.get('/api/asociados/descuentos');
+    expect(res.status).toBe(200);
+    const creditos = res.body.filter((d) => d.linea_id === 1006);
+    expect(creditos.length).toBe(2);
+    expect(creditos.map((d) => d.numero).sort()).toEqual(['CRED-001', 'CRED-002']);
+  });
+
+  test('GET /api/asociados/:codigo/perfil — devuelve ambos créditos con campo numero', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.get(`/api/asociados/${codigoMulti}/perfil`);
+    expect(res.status).toBe(200);
+    const creditos = res.body.descuentos.filter((d) => d.linea_id === 1006);
+    expect(creditos.length).toBe(2);
+    expect(creditos.map((d) => d.numero).sort()).toEqual(['CRED-001', 'CRED-002']);
+  });
+
+  test('Reimport actualiza ambos créditos por separado (DELETE + INSERT por codigo)', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_REIMPORT_MULTI), 'multi2.csv');
+
+    const { rows } = await pool.query(
+      `SELECT numero, saldo_credito FROM asociado_descuentos
+       WHERE asociado_codigo = $1 AND linea_id = 1006
+       ORDER BY numero`,
+      [codigoMulti]
+    );
+    expect(rows.length).toBe(2);
+    expect(Number(rows.find((r) => r.numero === 'CRED-001').saldo_credito)).toBe(6000000);
+    expect(Number(rows.find((r) => r.numero === 'CRED-002').saldo_credito)).toBe(3000000);
+  });
+
+  test('CSV con numero duplicado dentro del mismo lote → solo se guarda una fila', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_NUMERO_DUPLICADO), 'dup.csv');
+
+    const { rows } = await pool.query(
+      `SELECT COUNT(*) AS c FROM asociado_descuentos
+       WHERE asociado_codigo = $1 AND linea_id = 1006 AND numero = 'CRED-DUP'`,
+      [codigoMulti]
+    );
+    expect(Number(rows[0].c)).toBe(1);
   });
 });

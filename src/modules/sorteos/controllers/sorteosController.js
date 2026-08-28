@@ -110,9 +110,10 @@ export const actualizarSorteo = async (req, res, next) => {
     const data = actualizarSorteoSchema.parse(req.body);
     const sets = [];
     const vals = [];
-    if (data.precio_boleto !== undefined) { sets.push(`precio_boleto = $${sets.length + 1}`); vals.push(data.precio_boleto); }
-    if (data.tipo_pago     !== undefined) { sets.push(`tipo_pago = $${sets.length + 1}`);     vals.push(data.tipo_pago); }
-    if (data.premio        !== undefined) { sets.push(`premio = $${sets.length + 1}`);        vals.push(data.premio); }
+    if (data.precio_boleto        !== undefined) { sets.push(`precio_boleto = $${sets.length + 1}`);        vals.push(data.precio_boleto); }
+    if (data.tipo_pago            !== undefined) { sets.push(`tipo_pago = $${sets.length + 1}`);            vals.push(data.tipo_pago); }
+    if (data.premio               !== undefined) { sets.push(`premio = $${sets.length + 1}`);               vals.push(data.premio); }
+    if (data.linea_reconciliacion !== undefined) { sets.push(`linea_reconciliacion = $${sets.length + 1}`); vals.push(data.linea_reconciliacion); }
     vals.push(id);
     const { rows: [sorteo] } = await pool.query(
       `UPDATE sorteos SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${vals.length} RETURNING *`,
@@ -1104,18 +1105,30 @@ export const asignarDiscrepanciasLote = async (req, res, next) => {
     );
     const asociadoMap = Object.fromEntries(asociados.map((a) => [a.codigo, a]));
 
-    // 2. Un query para todos los sorteos activos de las empresas involucradas
-    const empresas = [...new Set(asociados.map((a) => a.empresa_dsto).filter(Boolean))];
-    const { rows: sorteoRows } = await client.query(
-      `SELECT se.empresa_codigo, s.id AS sorteo_id, s.nombre AS sorteo_nombre
-       FROM sorteos s
-       JOIN sorteo_empresas se ON se.sorteo_id = s.id
-       WHERE s.estado = 'activo' AND se.empresa_codigo = ANY($1)`,
-      [empresas]
-    );
-    const sorteoByEmpresa = Object.fromEntries(
-      sorteoRows.map((r) => [r.empresa_codigo, { id: r.sorteo_id, nombre: r.sorteo_nombre }])
-    );
+    // 2a. Sorteos explícitos por ID (items con sorteo_id)
+    const sorteoIdsExplicitos = [...new Set(items.filter((i) => i.sorteo_id).map((i) => i.sorteo_id))];
+    const sorteoByIdMap = {};
+    if (sorteoIdsExplicitos.length > 0) {
+      const { rows: sRows } = await client.query(
+        `SELECT id, nombre FROM sorteos WHERE id = ANY($1) AND estado = 'activo'`,
+        [sorteoIdsExplicitos]
+      );
+      sRows.forEach((r) => { sorteoByIdMap[r.id] = r.nombre; });
+    }
+
+    // 2b. Sorteos por empresa (items sin sorteo_id — fallback)
+    const empresas = [...new Set(asociados.filter((a) => !items.find((i) => i.codigo === a.codigo && i.sorteo_id)).map((a) => a.empresa_dsto).filter(Boolean))];
+    const sorteoByEmpresa = {};
+    if (empresas.length > 0) {
+      const { rows: sorteoRows } = await client.query(
+        `SELECT se.empresa_codigo, s.id AS sorteo_id, s.nombre AS sorteo_nombre
+         FROM sorteos s
+         JOIN sorteo_empresas se ON se.sorteo_id = s.id
+         WHERE s.estado = 'activo' AND se.empresa_codigo = ANY($1)`,
+        [empresas]
+      );
+      sorteoRows.forEach((r) => { sorteoByEmpresa[r.empresa_codigo] = { id: r.sorteo_id, nombre: r.sorteo_nombre }; });
+    }
 
     // 3. Clasificar y agrupar por sorteo
     const fallidos = [];
@@ -1124,11 +1137,24 @@ export const asignarDiscrepanciasLote = async (req, res, next) => {
     for (const item of items) {
       const asoc = asociadoMap[item.codigo];
       if (!asoc) { fallidos.push({ codigo: item.codigo, error: 'Asociado no encontrado o inactivo' }); continue; }
-      if (!asoc.empresa_dsto) { fallidos.push({ codigo: item.codigo, error: 'Sin empresa asignada' }); continue; }
-      const sorteo = sorteoByEmpresa[asoc.empresa_dsto];
-      if (!sorteo) { fallidos.push({ codigo: item.codigo, error: 'Sin sorteo activo para su empresa' }); continue; }
-      if (!bySort[sorteo.id]) bySort[sorteo.id] = { nombre: sorteo.nombre, items: [] };
-      bySort[sorteo.id].items.push({ codigo: item.codigo, cantidad: item.cantidad });
+
+      let sorteoId, sorteoNombre;
+      if (item.sorteo_id) {
+        // Sorteo explícito de la discrepancia — apunta directamente al sorteo auditado
+        sorteoId     = item.sorteo_id;
+        sorteoNombre = sorteoByIdMap[item.sorteo_id];
+        if (!sorteoNombre) { fallidos.push({ codigo: item.codigo, error: 'Sorteo especificado no activo' }); continue; }
+      } else {
+        // Fallback: buscar por empresa
+        if (!asoc.empresa_dsto) { fallidos.push({ codigo: item.codigo, error: 'Sin empresa asignada' }); continue; }
+        const sorteo = sorteoByEmpresa[asoc.empresa_dsto];
+        if (!sorteo) { fallidos.push({ codigo: item.codigo, error: 'Sin sorteo activo para su empresa' }); continue; }
+        sorteoId     = sorteo.id;
+        sorteoNombre = sorteo.nombre;
+      }
+
+      if (!bySort[sorteoId]) bySort[sorteoId] = { nombre: sorteoNombre, items: [] };
+      bySort[sorteoId].items.push({ codigo: item.codigo, cantidad: item.cantidad });
     }
 
     const exitosos = [];
@@ -1217,7 +1243,7 @@ export const asignarDiscrepanciasLote = async (req, res, next) => {
 };
 
 export const asignarPorDiscrepancia = async (req, res, next) => {
-  const { asociado_codigo, cantidad } = req.body;
+  const { asociado_codigo, cantidad, sorteo_id } = req.body;
 
   if (!asociado_codigo || !Number.isInteger(cantidad) || cantidad < 1 || cantidad > 50) {
     return res.status(400).json({ error: 'Datos inválidos' });
@@ -1235,23 +1261,34 @@ export const asignarPorDiscrepancia = async (req, res, next) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Asociado no encontrado o inactivo' });
     }
-    if (!asoc.empresa_dsto) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'El asociado no tiene empresa asignada' });
-    }
 
-    // Sorteo activo donde la empresa del asociado está habilitada
-    const { rows: [sorteo] } = await client.query(
-      `SELECT s.id, s.nombre
-       FROM sorteos s
-       JOIN sorteo_empresas se ON se.sorteo_id = s.id
-       WHERE s.estado = 'activo' AND se.empresa_codigo = $1
-       LIMIT 1`,
-      [asoc.empresa_dsto]
-    );
+    let sorteo;
+    if (sorteo_id) {
+      // Sorteo explícito — apunta directamente al sorteo de la línea auditada
+      const { rows: [s] } = await client.query(
+        `SELECT id, nombre FROM sorteos WHERE id = $1 AND estado = 'activo'`,
+        [sorteo_id]
+      );
+      sorteo = s;
+    } else {
+      // Fallback: primer sorteo activo habilitado para la empresa del asociado
+      if (!asoc.empresa_dsto) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'El asociado no tiene empresa asignada' });
+      }
+      const { rows: [s] } = await client.query(
+        `SELECT s.id, s.nombre
+         FROM sorteos s
+         JOIN sorteo_empresas se ON se.sorteo_id = s.id
+         WHERE s.estado = 'activo' AND se.empresa_codigo = $1
+         LIMIT 1`,
+        [asoc.empresa_dsto]
+      );
+      sorteo = s;
+    }
     if (!sorteo) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'No hay sorteo activo habilitado para la empresa del asociado' });
+      return res.status(409).json({ error: 'No hay sorteo activo disponible para la asignación' });
     }
 
     // Boletos libres aleatorios — SKIP LOCKED para seguridad concurrente

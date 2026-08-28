@@ -276,14 +276,12 @@ describe('Cartera de créditos — cálculos', () => {
     `, [codigoTest]);
 
     // Dos créditos: uno en rango $1M–$5M y otro en rango $5M–$10M
+    await pool.query(`DELETE FROM asociado_descuentos WHERE asociado_codigo = $1`, [codigoTest]);
     await pool.query(`
       INSERT INTO asociado_descuentos (asociado_codigo, linea_id, nombre_linea, valor, saldo_credito, valor_obligacion)
       VALUES
         ($1, 9901, 'Crédito Test A', 100000, 3000000, 5000000),
         ($1, 9902, 'Crédito Test B', 200000, 7000000, 10000000)
-      ON CONFLICT (asociado_codigo, linea_id) DO UPDATE
-        SET saldo_credito = EXCLUDED.saldo_credito,
-            valor_obligacion = EXCLUDED.valor_obligacion
     `, [codigoTest]);
   });
 
@@ -363,6 +361,7 @@ describe('Distribución de plazos — cálculos', () => {
     // Crédito corto plazo (≤12 meses), tasa 2%
     // Crédito mediano plazo (13–24 meses), tasa 3%
     // Crédito largo plazo (25–48 meses), tasa 1.5%
+    await pool.query(`DELETE FROM asociado_descuentos WHERE asociado_codigo = $1`, [codigoPlazos]);
     await pool.query(`
       INSERT INTO asociado_descuentos
         (asociado_codigo, linea_id, nombre_linea, valor, saldo_credito, num_cuotas, tasa_interes)
@@ -370,10 +369,6 @@ describe('Distribución de plazos — cálculos', () => {
         ($1, 8801, 'Corto Test',   50000, 1000000, 6,  2.0),
         ($1, 8802, 'Mediano Test', 50000, 4000000, 18, 3.0),
         ($1, 8803, 'Largo Test',   50000, 9000000, 36, 1.5)
-      ON CONFLICT (asociado_codigo, linea_id) DO UPDATE
-        SET saldo_credito = EXCLUDED.saldo_credito,
-            num_cuotas    = EXCLUDED.num_cuotas,
-            tasa_interes  = EXCLUDED.tasa_interes
     `, [codigoPlazos]);
   });
 
@@ -460,12 +455,10 @@ describe('Bienestar — estructura y cálculos', () => {
       ON CONFLICT (codigo) DO UPDATE SET is_active = true
     `, [codigoBien]);
 
+    await pool.query(`DELETE FROM asociado_descuentos WHERE asociado_codigo = $1`, [codigoBien]);
     await pool.query(`
       INSERT INTO asociado_descuentos (asociado_codigo, linea_id, nombre_linea, valor, fecha_pri_descuento)
       VALUES ($1, 17, 'FONDO DE BIENESTAR', 25000, '2024-01-01')
-      ON CONFLICT (asociado_codigo, linea_id) DO UPDATE
-        SET valor = EXCLUDED.valor,
-            fecha_pri_descuento = EXCLUDED.fecha_pri_descuento
     `, [codigoBien]);
   });
 
@@ -532,8 +525,8 @@ describe('Bienestar — estructura y cálculos', () => {
     expect(sumaLineas).toBe(Number(bienestar.mensual));
   });
 
-  test('sin fecha_pri_descuento no se cuenta en bienestar', async () => {
-    // Quitar la fecha — simula que aún no empieza a pagar
+  test('sin fecha_pri_descuento igual se cuenta en bienestar', async () => {
+    // Quitar la fecha — igual debe contarse (fecha_pri_descuento no es requisito)
     await pool.query(`
       UPDATE asociado_descuentos SET fecha_pri_descuento = NULL
       WHERE asociado_codigo = $1 AND linea_id = 17
@@ -547,7 +540,6 @@ describe('Bienestar — estructura y cálculos', () => {
       FROM asociado_descuentos ad
       JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
       WHERE UPPER(ad.nombre_linea) LIKE '%BIENESTAR%' AND ad.valor > 0
-        AND ad.fecha_pri_descuento IS NOT NULL AND ad.fecha_pri_descuento <= CURRENT_DATE
     `);
     expect(Number(res.body.bienestar.mensual)).toBe(Number(total));
 
@@ -607,7 +599,6 @@ describe('Bienestar — estructura y cálculos', () => {
       FROM asociado_descuentos ad
       JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
       WHERE UPPER(ad.nombre_linea) LIKE '%BIENESTAR%' AND ad.valor > 0
-        AND ad.fecha_pri_descuento IS NOT NULL AND ad.fecha_pri_descuento <= CURRENT_DATE
     `);
     expect(Number(res.body.bienestar.mensual)).toBe(Number(total));
     await pool.query(`UPDATE asociados SET is_active = true WHERE codigo = $1`, [codigoBien]);
@@ -630,6 +621,7 @@ describe('Seguros — estructura y cálculos', () => {
       ON CONFLICT (codigo) DO UPDATE SET is_active = true
     `, [codigoSeg]);
 
+    await pool.query(`DELETE FROM asociado_descuentos WHERE asociado_codigo = $1`, [codigoSeg]);
     await pool.query(`
       INSERT INTO asociado_descuentos (asociado_codigo, linea_id, nombre_linea, valor, fecha_pri_descuento)
       VALUES
@@ -638,9 +630,6 @@ describe('Seguros — estructura y cálculos', () => {
         ($1, 1027, 'SOAT',                        12000, '2024-06-01'),
         ($1, 24,   'LOS OLIVOS - SERVICIO EXEQUIAL', 8000, '2024-02-01'),
         ($1, 1040, 'FUNERARIA LOS OLIVOS',         6000, '2024-04-01')
-      ON CONFLICT (asociado_codigo, linea_id) DO UPDATE
-        SET valor = EXCLUDED.valor,
-            fecha_pri_descuento = EXCLUDED.fecha_pri_descuento
     `, [codigoSeg]);
   });
 
@@ -728,7 +717,7 @@ describe('Seguros — estructura y cálculos', () => {
     }
   });
 
-  test('sin fecha_pri_descuento no se cuenta en seguros', async () => {
+  test('sin fecha_pri_descuento igual se cuenta en seguros', async () => {
     await pool.query(`
       UPDATE asociado_descuentos SET fecha_pri_descuento = NULL
       WHERE asociado_codigo = $1 AND linea_id = 5
@@ -748,7 +737,6 @@ describe('Seguros — estructura y cálculos', () => {
              OR UPPER(ad.nombre_linea) LIKE '%FUNERARI%'
              OR UPPER(ad.nombre_linea) LIKE '%OFRENDA%')
         AND ad.valor > 0
-        AND ad.fecha_pri_descuento IS NOT NULL AND ad.fecha_pri_descuento <= CURRENT_DATE
     `);
     expect(Number(res.body.seguros.mensual)).toBe(Number(total));
 
@@ -774,7 +762,6 @@ describe('Seguros — estructura y cálculos', () => {
              OR UPPER(ad.nombre_linea) LIKE '%FUNERARI%'
              OR UPPER(ad.nombre_linea) LIKE '%OFRENDA%')
         AND ad.valor > 0
-        AND ad.fecha_pri_descuento IS NOT NULL AND ad.fecha_pri_descuento <= CURRENT_DATE
     `);
     expect(Number(res.body.seguros.mensual)).toBe(Number(total));
 
@@ -822,5 +809,234 @@ describe('GET /gerencia/cobertura/:sorteoId', () => {
     const res = await ag.get('/api/gerencia/cobertura/no-es-un-uuid');
     // PostgreSQL rechazará el UUID inválido — debe llegar respuesta (no timeout)
     expect([400, 422, 500]).toContain(res.status);
+  });
+});
+
+// ── GET /gerencia/lineas ──────────────────────────────────────────────────────
+
+describe('GET /gerencia/lineas', () => {
+  let ag;
+  const codigoLinea = '55555555';
+  const lineaIdTest = 7001;
+
+  beforeAll(async () => {
+    ag = agAdmin();
+    await ag.post('/api/auth/login').send({ email: adminEmail, password: adminPass });
+
+    await pool.query(`
+      INSERT INTO asociados (codigo, apellido, nombre, clase_cuota, is_active)
+      VALUES ($1, 'Lineas', 'Test Gerencia', '1', true)
+      ON CONFLICT (codigo) DO UPDATE SET is_active = true
+    `, [codigoLinea]);
+
+    await pool.query(`DELETE FROM asociado_descuentos WHERE asociado_codigo = $1`, [codigoLinea]);
+    // Sin fecha_pri_descuento intencionalmente — penetración no debe depender de ese campo
+    await pool.query(`
+      INSERT INTO asociado_descuentos (asociado_codigo, linea_id, nombre_linea, valor)
+      VALUES ($1, $2, 'LÍNEA TEST GERENCIA', 15000)
+    `, [codigoLinea, lineaIdTest]);
+  });
+
+  afterAll(async () => {
+    await pool.query(`DELETE FROM asociado_descuentos WHERE asociado_codigo = $1`, [codigoLinea]);
+    await pool.query(`DELETE FROM asociados WHERE codigo = $1`, [codigoLinea]);
+  });
+
+  test('Rechaza sin token', async () => {
+    const res = await request(app).get('/api/gerencia/lineas');
+    expect(res.status).toBe(401);
+  });
+
+  test('Devuelve array con estructura correcta', async () => {
+    const res = await ag.get('/api/gerencia/lineas');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBeGreaterThan(0);
+
+    for (const l of res.body) {
+      expect(l).toHaveProperty('linea_id');
+      expect(l).toHaveProperty('nombre_linea');
+      expect(l).toHaveProperty('con_linea');
+      expect(l).toHaveProperty('sin_linea');
+      expect(l).toHaveProperty('total_activos');
+      expect(l).toHaveProperty('valor_total');
+      expect(l).toHaveProperty('valor_promedio');
+      expect(l).toHaveProperty('pct_cobertura');
+      expect(Number(l.con_linea)).toBeGreaterThan(0);
+      expect(Number(l.sin_linea)).toBeGreaterThanOrEqual(0);
+      expect(Number(l.total_activos)).toBeGreaterThan(0);
+      expect(Number(l.con_linea) + Number(l.sin_linea)).toBe(Number(l.total_activos));
+    }
+  });
+
+  test('La línea seed aparece con datos correctos', async () => {
+    const res = await ag.get('/api/gerencia/lineas');
+    expect(res.status).toBe(200);
+
+    const linea = res.body.find(l => l.linea_id === lineaIdTest);
+    expect(linea).toBeDefined();
+    expect(linea.nombre_linea).toBe('LÍNEA TEST GERENCIA');
+    expect(Number(linea.con_linea)).toBeGreaterThanOrEqual(1);
+    expect(Number(linea.valor_total)).toBeGreaterThanOrEqual(15000);
+    expect(Number(linea.pct_cobertura)).toBeGreaterThanOrEqual(0);
+    expect(Number(linea.pct_cobertura)).toBeLessThanOrEqual(100);
+    // La cobertura es positiva cuando hay al menos 1 asociado con la línea
+    expect(linea.con_linea).toBeGreaterThanOrEqual(1);
+  });
+
+  test('con_linea + sin_linea = total_activos en toda la lista', async () => {
+    const res = await ag.get('/api/gerencia/lineas');
+    expect(res.status).toBe(200);
+    for (const l of res.body) {
+      expect(Number(l.con_linea) + Number(l.sin_linea)).toBe(Number(l.total_activos));
+    }
+  });
+
+  test('Asociado inactivo no cuenta en con_linea', async () => {
+    await pool.query(`UPDATE asociados SET is_active = false WHERE codigo = $1`, [codigoLinea]);
+
+    const res = await ag.get('/api/gerencia/lineas');
+    expect(res.status).toBe(200);
+
+    const linea = res.body.find(l => l.linea_id === lineaIdTest);
+    // La línea puede desaparecer si era el único con esa línea activa
+    if (linea) {
+      // Si aún aparece, la suma sigue siendo coherente
+      expect(Number(linea.con_linea) + Number(l.sin_linea)).toBe(Number(linea.total_activos));
+    }
+
+    await pool.query(`UPDATE asociados SET is_active = true WHERE codigo = $1`, [codigoLinea]);
+  });
+});
+
+// ── GET /gerencia/lineas/:lineaId ─────────────────────────────────────────────
+
+describe('GET /gerencia/lineas/:lineaId', () => {
+  let ag;
+  const codigoA   = '55500001';
+  const codigoB   = '55500002';
+  const codigoC   = '55500003'; // activo pero sin la línea
+  const lineaId   = 7002;
+
+  beforeAll(async () => {
+    ag = agAdmin();
+    await ag.post('/api/auth/login').send({ email: adminEmail, password: adminPass });
+
+    // 3 asociados activos — A y B tienen la línea, C no
+    for (const [codigo, apellido] of [[codigoA,'LineaA'],[codigoB,'LineaB'],[codigoC,'LineaC']]) {
+      await pool.query(`
+        INSERT INTO asociados (codigo, apellido, nombre, clase_cuota, is_active)
+        VALUES ($1, $2, 'Test', '1', true)
+        ON CONFLICT (codigo) DO UPDATE SET is_active = true
+      `, [codigo, apellido]);
+    }
+
+    await pool.query(`DELETE FROM asociado_descuentos WHERE asociado_codigo = ANY($1)`, [[codigoA, codigoB, codigoC]]);
+    // Sin fecha_pri_descuento — penetración no debe depender de ese campo
+    await pool.query(`
+      INSERT INTO asociado_descuentos (asociado_codigo, linea_id, nombre_linea, valor)
+      VALUES
+        ($1, $3, 'LÍNEA DETALLE TEST', 20000),
+        ($2, $3, 'LÍNEA DETALLE TEST', 30000)
+    `, [codigoA, codigoB, lineaId]);
+  });
+
+  afterAll(async () => {
+    await pool.query(`DELETE FROM asociado_descuentos WHERE asociado_codigo = ANY($1)`, [[codigoA, codigoB, codigoC]]);
+    await pool.query(`DELETE FROM asociados WHERE codigo = ANY($1)`, [[codigoA, codigoB, codigoC]]);
+  });
+
+  test('Rechaza sin token', async () => {
+    const res = await request(app).get(`/api/gerencia/lineas/${lineaId}`);
+    expect(res.status).toBe(401);
+  });
+
+  test('lineaId no numérico devuelve 400', async () => {
+    const res = await ag.get('/api/gerencia/lineas/abc');
+    expect(res.status).toBe(400);
+  });
+
+  test('Devuelve nombre_linea, tienen y no_tienen', async () => {
+    const res = await ag.get(`/api/gerencia/lineas/${lineaId}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('nombre_linea');
+    expect(res.body).toHaveProperty('tienen');
+    expect(res.body).toHaveProperty('no_tienen');
+    expect(Array.isArray(res.body.tienen)).toBe(true);
+    expect(Array.isArray(res.body.no_tienen)).toBe(true);
+  });
+
+  test('tienen contiene exactamente A y B con valores correctos', async () => {
+    const res = await ag.get(`/api/gerencia/lineas/${lineaId}`);
+    expect(res.status).toBe(200);
+
+    const { tienen } = res.body;
+    const codigos = tienen.map(a => a.codigo);
+    expect(codigos).toContain(codigoA);
+    expect(codigos).toContain(codigoB);
+
+    for (const a of tienen) {
+      expect(a).toHaveProperty('codigo');
+      expect(a).toHaveProperty('nombre');
+      expect(a).toHaveProperty('apellido');
+      expect(a).toHaveProperty('valor');
+      expect(Number(a.valor)).toBeGreaterThan(0);
+    }
+
+    const a = tienen.find(x => x.codigo === codigoA);
+    expect(Number(a.valor)).toBe(20000);
+    const b = tienen.find(x => x.codigo === codigoB);
+    expect(Number(b.valor)).toBe(30000);
+  });
+
+  test('no_tienen contiene a C y NO contiene a A ni B', async () => {
+    const res = await ag.get(`/api/gerencia/lineas/${lineaId}`);
+    expect(res.status).toBe(200);
+
+    const { no_tienen } = res.body;
+    const codigos = no_tienen.map(a => a.codigo);
+    expect(codigos).toContain(codigoC);
+    expect(codigos).not.toContain(codigoA);
+    expect(codigos).not.toContain(codigoB);
+
+    for (const a of no_tienen) {
+      expect(a).toHaveProperty('codigo');
+      expect(a).toHaveProperty('nombre');
+      expect(a).toHaveProperty('apellido');
+      expect(a).not.toHaveProperty('valor');
+    }
+  });
+
+  test('tienen + no_tienen = total asociados activos', async () => {
+    const res = await ag.get(`/api/gerencia/lineas/${lineaId}`);
+    expect(res.status).toBe(200);
+
+    const { rows: [{ total }] } = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM asociados WHERE is_active = true`
+    );
+    expect(res.body.tienen.length + res.body.no_tienen.length).toBe(total);
+  });
+
+  test('Asociado inactivo no aparece ni en tienen ni en no_tienen', async () => {
+    await pool.query(`UPDATE asociados SET is_active = false WHERE codigo = $1`, [codigoA]);
+
+    const res = await ag.get(`/api/gerencia/lineas/${lineaId}`);
+    expect(res.status).toBe(200);
+
+    const todosLos = [...res.body.tienen, ...res.body.no_tienen].map(a => a.codigo);
+    expect(todosLos).not.toContain(codigoA);
+
+    await pool.query(`UPDATE asociados SET is_active = true WHERE codigo = $1`, [codigoA]);
+  });
+
+  test('Línea inexistente devuelve tienen=[] y no_tienen con todos los activos', async () => {
+    const res = await ag.get('/api/gerencia/lineas/999999');
+    expect(res.status).toBe(200);
+    expect(res.body.tienen.length).toBe(0);
+
+    const { rows: [{ total }] } = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM asociados WHERE is_active = true`
+    );
+    expect(res.body.no_tienen.length).toBe(total);
   });
 });

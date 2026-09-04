@@ -1,8 +1,21 @@
 import { z } from 'zod';
 
 export const causarSchema = z.object({
-  periodo: z.string().regex(/^\d{4}-\d{2}$/, 'Formato requerido: YYYY-MM'),
+  periodo:  z.string().regex(/^\d{4}-\d{2}$/, 'Formato requerido: YYYY-MM'),
+  quincena: z.preprocess(
+    (v) => (v === null || v === undefined || v === '') ? null : Number(v),
+    z.number().int().min(1).max(2).nullable().optional()
+  ),
 }).strict();
+
+export const previewSchema = z.object({
+  periodo:        z.string().regex(/^\d{4}-\d{2}$/, 'Formato requerido: YYYY-MM'),
+  quincena:       z.preprocess(
+    (v) => (v === undefined || v === '' || v === 'null') ? null : Number(v),
+    z.number().int().min(1).max(2).nullable().optional().default(null)
+  ),
+  empresa_codigo: z.string().optional(),
+});
 
 export const registrarPagoSchema = z.object({
   fecha_pago: z.string().min(1, 'La fecha es obligatoria'),

@@ -840,6 +840,7 @@ describe('Asociados — pago en efectivo por bono', () => {
   });
 
   afterEach(async () => {
+    await pool.query(`DELETE FROM cobros_efectivo WHERE registrado_por_uuid = $1`, [adminUuid]);
     await pool.query(`DELETE FROM admin_logs WHERE usuario_uuid = $1 AND accion = 'PAGO_EFECTIVO_DISCREPANCIA'`, [adminUuid]);
     await pool.query('DELETE FROM sincronizaciones WHERE id = $1', [sincId]);
   });

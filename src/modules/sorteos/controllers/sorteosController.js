@@ -684,7 +684,14 @@ export const estadisticasSorteo = async (req, res, next) => {
       ORDER BY boletos DESC
     `, [id]);
 
-    res.json({ ocupacion, evolucion, porEmpresa, topAsociados, porCiudad });
+    const { rows: [cobrosEfectivo] } = await pool.query(`
+      SELECT
+        COALESCE(SUM(monto), 0)::numeric AS total,
+        COUNT(*)::int                    AS count
+      FROM cobros_efectivo WHERE sorteo_id = $1
+    `, [id]);
+
+    res.json({ ocupacion, evolucion, porEmpresa, topAsociados, porCiudad, cobrosEfectivo });
   } catch (err) { next(err); }
 };
 

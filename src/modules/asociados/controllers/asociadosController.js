@@ -1152,7 +1152,7 @@ export const agregarPagoEfectivo = async (req, res, next) => {
     await client.query('BEGIN');
 
     const { rows: [row] } = await client.query(
-      `SELECT detalle FROM sincronizaciones WHERE id = $1 FOR UPDATE`,
+      `SELECT detalle, TO_CHAR(created_at, 'YYYY-MM') AS periodo FROM sincronizaciones WHERE id = $1 FOR UPDATE`,
       [id]
     );
     if (!row) {
@@ -1221,6 +1221,17 @@ export const agregarPagoEfectivo = async (req, res, next) => {
         JSON.stringify({ tipo_discrepancia, numero_bono, monto, tipo_pago, comprobante, comentario, sync_id: id }),
       ]
     );
+    if (disc.sorteo_id) {
+      await client.query(
+        `INSERT INTO cobros_efectivo
+           (asociado_codigo, sorteo_id, numero_bono, monto, tipo_pago, comprobante,
+            comentario, tipo_discrepancia, periodo, sync_id, registrado_por_uuid)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (sync_id, asociado_codigo, tipo_discrepancia, numero_bono) DO NOTHING`,
+        [codigo, disc.sorteo_id, numero_bono, monto, tipo_pago, comprobante,
+         comentario, tipo_discrepancia, row.periodo, id, req.user.id]
+      );
+    }
     await client.query('COMMIT');
     res.json({ ok: true, subsanada: disc.subsanada ?? false, pagos_count: pagos.length, boletos_count });
   } catch (err) {

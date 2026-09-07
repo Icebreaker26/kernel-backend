@@ -69,6 +69,10 @@ router.get('/:codigo/historial-aporte',
   verifyToken, checkPermission('asociados', 'READ'),
   ctrl.historialAporte
 );
+router.get('/:codigo/discrepancias',
+  verifyToken, checkPermission('asociados', 'READ'),
+  ctrl.discrepanciasCodigo
+);
 
 // Activación del portal (opt-in)
 router.post('/:codigo/activar-portal',

@@ -1142,6 +1142,30 @@ export const subsanarDiscrepancia = async (req, res, next) => {
   }
 };
 
+export const discrepanciasCodigo = async (req, res, next) => {
+  try {
+    const { codigo } = req.params;
+    const { rows } = await pool.query(
+      `SELECT
+         s.id          AS sync_id,
+         s.created_at  AS sync_fecha,
+         disc.value    AS discrepancia
+       FROM sincronizaciones s,
+            jsonb_array_elements(s.detalle->'discrepancias') AS disc(value)
+       WHERE s.revertido_at IS NULL
+         AND jsonb_typeof(s.detalle->'discrepancias') = 'array'
+         AND disc.value->>'codigo' = $1
+         AND disc.value->>'tipo' = ANY(ARRAY['MONTO_INCORRECTO','SIN_COBRO_EXTERNO'])
+       ORDER BY s.created_at DESC
+       LIMIT 20`,
+      [codigo]
+    );
+    res.json(rows.map((r) => ({ sync_id: r.sync_id, sync_fecha: r.sync_fecha, ...r.discrepancia })));
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const listarAsociados = async (req, res, next) => {
   try {
     const { q } = req.query;

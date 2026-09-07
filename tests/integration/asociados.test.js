@@ -1654,3 +1654,129 @@ describe('Asociados — múltiples créditos por misma línea (numero)', () => {
     expect(Number(rows[0].c)).toBe(1);
   });
 });
+
+// ── GET /:codigo/discrepancias ────────────────────────────────────────────────
+
+describe('Asociados — GET /:codigo/discrepancias', () => {
+  const COD_MAL2 = '8881111111'; // MONTO_INCORRECTO
+  const COD_SC2  = '8882222222'; // SIN_COBRO_EXTERNO
+  const COD_OK2  = '8883333333'; // sin discrepancia
+  let sorteoDiscId;
+
+  const buildCSV = () => [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto',
+    `1,${testCodigo},Torres,Test,1,EMP01,Empresa Test,Pereira,Calle 1,3001234567,,`,
+    `1,${COD_MAL2},MontoMal2,Disc,1,EMP_D,Empresa Disc,Bogota,Calle A,3000000001,,`,
+    `1,${COD_SC2},SinCobro2,Disc,1,EMP_D,Empresa Disc,Bogota,Calle B,3000000002,,`,
+    `1,${COD_OK2},SinDisc,Ok,1,EMP_D,Empresa Disc,Bogota,Calle C,3000000003,,`,
+    `15,${COD_MAL2},MontoMal2,Disc,1,EMP_D,Empresa Disc,Bogota,Calle A,3000000001,2.000,1-Mensual`, // cuota incorrecta
+    `15,${COD_OK2},SinDisc,Ok,1,EMP_D,Empresa Disc,Bogota,Calle C,3000000003,3.000,1-Mensual`,      // cuota correcta
+    // COD_SC2 ausente en línea 15 → SIN_COBRO_EXTERNO
+  ].join('\n');
+
+  beforeAll(async () => {
+    const { rows: [s] } = await pool.query(
+      `INSERT INTO sorteos (nombre, estado, precio_boleto, linea_reconciliacion)
+       VALUES ('Sorteo Disc Test', 'activo', 3000, '15')
+       RETURNING id`
+    );
+    sorteoDiscId = s.id;
+
+    for (const [codigo, apellido] of [[COD_MAL2, 'MontoMal2'], [COD_SC2, 'SinCobro2'], [COD_OK2, 'SinDisc']]) {
+      await pool.query(
+        `INSERT INTO asociados (codigo, apellido, nombre, clase_cuota, empresa_dsto, nombre_empresa, ciudad)
+         VALUES ($1, $2, 'Disc', '1', 'EMP_D', 'Empresa Disc', 'Bogota')
+         ON CONFLICT (codigo) DO UPDATE SET is_active = true`,
+        [codigo, apellido]
+      );
+    }
+
+    // Boletos: COD_MAL2 (951) con cuota incorrecta, COD_SC2 (952) sin cobro externo
+    for (const [numero, codigo] of [[951, COD_MAL2], [952, COD_SC2]]) {
+      await pool.query(
+        `INSERT INTO boletos (numero, sorteo_id, asociado_codigo, estado, fecha_asignacion)
+         VALUES ($1, $2, $3, 'asignado', NOW())
+         ON CONFLICT (numero, sorteo_id) DO UPDATE SET estado = 'asignado', asociado_codigo = $3`,
+        [numero, sorteoDiscId, codigo]
+      );
+    }
+
+    // Importar para generar las discrepancias en sincronizaciones.detalle
+    const ag = request.agent(app);
+    await loginAdmin(ag);
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(buildCSV()), 'disc.csv');
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM sorteo_logs    WHERE sorteo_id = $1',      [sorteoDiscId]);
+    await pool.query('DELETE FROM boletos        WHERE sorteo_id = $1',      [sorteoDiscId]);
+    await pool.query('DELETE FROM sorteos        WHERE id = $1',             [sorteoDiscId]);
+    await pool.query('DELETE FROM asociados      WHERE codigo = ANY($1)',    [[COD_MAL2, COD_SC2, COD_OK2]]);
+    await pool.query('DELETE FROM empresas       WHERE codigo = $1',         ['EMP_D']);
+    await pool.query('DELETE FROM sincronizaciones WHERE usuario_uuid = $1', [adminUuid]);
+  });
+
+  test('GET sin token → 401', async () => {
+    const res = await request(app).get(`/api/asociados/${COD_MAL2}/discrepancias`);
+    expect(res.status).toBe(401);
+  });
+
+  test('Asociado con MONTO_INCORRECTO → devuelve la discrepancia', async () => {
+    const ag = request.agent(app);
+    await loginAdmin(ag);
+    const res = await ag.get(`/api/asociados/${COD_MAL2}/discrepancias`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBeGreaterThanOrEqual(1);
+    const d = res.body[0];
+    expect(d.tipo).toBe('MONTO_INCORRECTO');
+    expect(d.codigo).toBe(COD_MAL2);
+    expect(d).toHaveProperty('cuota_externa');
+    expect(d).toHaveProperty('cuota_kernel');
+    expect(d).toHaveProperty('diferencia');
+    expect(d).toHaveProperty('sync_id');
+    expect(d).toHaveProperty('sync_fecha');
+  });
+
+  test('Asociado con SIN_COBRO_EXTERNO → devuelve la discrepancia', async () => {
+    const ag = request.agent(app);
+    await loginAdmin(ag);
+    const res = await ag.get(`/api/asociados/${COD_SC2}/discrepancias`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBeGreaterThanOrEqual(1);
+    const d = res.body[0];
+    expect(d.tipo).toBe('SIN_COBRO_EXTERNO');
+    expect(d.codigo).toBe(COD_SC2);
+    expect(d).toHaveProperty('cuota_kernel');
+    expect(d).toHaveProperty('boletos_count');
+  });
+
+  test('Asociado sin discrepancias → array vacío', async () => {
+    const ag = request.agent(app);
+    await loginAdmin(ag);
+    const res = await ag.get(`/api/asociados/${COD_OK2}/discrepancias`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBe(0);
+  });
+
+  test('No devuelve COBRO_A_RETIRADO ni COBRO_SIN_BOLETO', async () => {
+    const ag = request.agent(app);
+    await loginAdmin(ag);
+    // COD_MAL2 solo tiene MONTO_INCORRECTO
+    const res = await ag.get(`/api/asociados/${COD_MAL2}/discrepancias`);
+    expect(res.status).toBe(200);
+    const tipos = res.body.map((d) => d.tipo);
+    expect(tipos).not.toContain('COBRO_A_RETIRADO');
+    expect(tipos).not.toContain('COBRO_SIN_BOLETO');
+  });
+
+  test('Asociado inexistente → array vacío (sin error)', async () => {
+    const ag = request.agent(app);
+    await loginAdmin(ag);
+    const res = await ag.get('/api/asociados/0000000000/discrepancias');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+});

@@ -732,6 +732,26 @@ export const importarCSV = async (req, res, next) => {
       const validosMap        = new Map(validos.map((v) => [v.codigo, v]));
       discrepancias = [];
 
+      // Pagos en efectivo — supresión diferenciada por tipo de sorteo:
+      //   recurrente → solo suprime el mes en que se registró el pago
+      //   único      → suprime indefinidamente (el asociado ya pagó su boleto una vez)
+      const periodoActual  = new Date().toISOString().slice(0, 7);
+      const sorteoUnicoIds = sorteosConLinea
+        .filter((s) => s.tipo_pago === 'unico')
+        .map((s) => s.id);
+
+      const { rows: cobrosSupresion } = await client.query(
+        `SELECT DISTINCT asociado_codigo, sorteo_id FROM cobros_efectivo
+         WHERE periodo = $1
+            OR sorteo_id = ANY($2::uuid[])`,
+        [periodoActual, sorteoUnicoIds]
+      );
+      const cobertosEfectivoMap = new Map();
+      for (const r of cobrosSupresion) {
+        if (!cobertosEfectivoMap.has(r.asociado_codigo)) cobertosEfectivoMap.set(r.asociado_codigo, new Set());
+        cobertosEfectivoMap.get(r.asociado_codigo).add(r.sorteo_id);
+      }
+
       for (const [linea, sorteosDeLinea] of sorteosPorLinea) {
         const filasLinea = registros.filter((r) => String(r.linea ?? '').trim() === linea);
         if (filasLinea.length === 0) continue;
@@ -758,6 +778,12 @@ export const importarCSV = async (req, res, next) => {
 
         // Boletos de los sorteos de ESTA línea únicamente
         const sorteoIds = sorteosDeLinea.map((s) => s.id);
+        // Asociados con cobro en efectivo para CUALQUIER sorteo de esta línea
+        const tieneCobroEfectivo = (codigo) => {
+          const pagados = cobertosEfectivoMap.get(codigo);
+          return pagados ? sorteoIds.some((sid) => pagados.has(sid)) : false;
+        };
+
         const { rows: boletosKernel } = await client.query(
           `SELECT b.asociado_codigo,
                   SUM(s.precio_boleto)::numeric AS total_mensual,
@@ -790,14 +816,14 @@ export const importarCSV = async (req, res, next) => {
           } else if (totalMensual === 0) {
             const bonos_sugeridos = precioBoleto > 0 ? Math.round((cuotaExterna * factorEfectivo) / precioBoleto) : null;
             discrepancias.push({ tipo: 'COBRO_SIN_BOLETO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0, boletos_count: 0, periodo: periodoEfectivo, bonos_sugeridos, linea, sorteo_id: sorteoIdLinea });
-          } else if (Math.abs(cuotaExterna - cuotaKernelEfectiva) > 1) {
+          } else if (Math.abs(cuotaExterna - cuotaKernelEfectiva) > 1 && !tieneCobroEfectivo(codigo)) {
             discrepancias.push({ tipo: 'MONTO_INCORRECTO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: cuotaKernelEfectiva, diferencia: Math.round((cuotaExterna - cuotaKernelEfectiva) * 100) / 100, boletos_count: boletosCountMap.get(codigo) ?? 0, periodo: periodoEfectivo, linea, sorteo_id: sorteoIdLinea });
           }
         }
 
         // Activos con boletos en Kernel para esta línea pero ausentes en el CSV
         for (const [codigo, totalMensual] of boletosMap) {
-          if (!mapaLinea.has(codigo) && codigosActivosSet.has(codigo)) {
+          if (!mapaLinea.has(codigo) && codigosActivosSet.has(codigo) && !tieneCobroEfectivo(codigo)) {
             const asocData = validosMap.get(codigo);
             if (asocData) {
               // Para pago único: factor 1 siempre; para recurrente: según clase_cuota del asociado
@@ -1152,7 +1178,7 @@ export const agregarPagoEfectivo = async (req, res, next) => {
     await client.query('BEGIN');
 
     const { rows: [row] } = await client.query(
-      `SELECT detalle FROM sincronizaciones WHERE id = $1 FOR UPDATE`,
+      `SELECT detalle, TO_CHAR(created_at, 'YYYY-MM') AS periodo FROM sincronizaciones WHERE id = $1 FOR UPDATE`,
       [id]
     );
     if (!row) {
@@ -1182,7 +1208,20 @@ export const agregarPagoEfectivo = async (req, res, next) => {
       return res.status(409).json({ error: `El bono #${numero_bono} ya tiene un pago registrado` });
     }
 
-    pagos.push({ numero_bono, monto, tipo_pago, comprobante, comentario, registrado_at: new Date().toISOString() });
+    const { rows: [usuario] } = await client.query(
+      `SELECT nombre FROM global_usuarios WHERE id = $1`,
+      [req.user.id]
+    );
+    pagos.push({
+      numero_bono,
+      monto,
+      tipo_pago,
+      comprobante,
+      comentario,
+      registrado_at:         new Date().toISOString(),
+      registrado_por_uuid:   req.user.id,
+      registrado_por_nombre: usuario?.nombre ?? req.user.email,
+    });
     disc.pagos_efectivo = pagos;
 
     const boletos_count = Math.max(disc.boletos_count ?? 1, 1);
@@ -1196,6 +1235,45 @@ export const agregarPagoEfectivo = async (req, res, next) => {
       `UPDATE sincronizaciones SET detalle = $1 WHERE id = $2`,
       [JSON.stringify(detalle), id]
     );
+    await client.query(
+      `INSERT INTO admin_logs (usuario_uuid, accion, objetivo_tipo, objetivo_id, objetivo_nombre, detalle)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        req.user.id,
+        'PAGO_EFECTIVO_DISCREPANCIA',
+        'asociado',
+        codigo,
+        disc.nombre ?? codigo,
+        JSON.stringify({ tipo_discrepancia, numero_bono, monto, tipo_pago, comprobante, comentario, sync_id: id }),
+      ]
+    );
+    if (disc.sorteo_id) {
+      await client.query(
+        `INSERT INTO cobros_efectivo
+           (asociado_codigo, sorteo_id, numero_bono, monto, tipo_pago, comprobante,
+            comentario, tipo_discrepancia, periodo, sync_id, registrado_por_uuid)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (sync_id, asociado_codigo, tipo_discrepancia, numero_bono) DO NOTHING`,
+        [codigo, disc.sorteo_id, numero_bono, monto, tipo_pago, comprobante,
+         comentario, tipo_discrepancia, row.periodo, id, req.user.id]
+      );
+      const { rows: [sorteoExiste] } = await client.query(
+        `SELECT 1 FROM sorteos WHERE id = $1`, [disc.sorteo_id]
+      );
+      if (sorteoExiste) {
+        await client.query(
+          `INSERT INTO sorteo_logs (sorteo_id, numero, accion, asociado_codigo, empleado_uuid, detalle)
+           VALUES ($1, $2, 'PAGO_EFECTIVO', $3, $4, $5)`,
+          [
+            disc.sorteo_id,
+            numero_bono,
+            codigo,
+            req.user.id,
+            `${tipo_pago === 'banco' ? 'Banco' : 'Caja'} · comprobante ${comprobante}${comentario ? ` · ${comentario}` : ''}`,
+          ]
+        );
+      }
+    }
     await client.query('COMMIT');
     res.json({ ok: true, subsanada: disc.subsanada ?? false, pagos_count: pagos.length, boletos_count });
   } catch (err) {
@@ -1210,18 +1288,21 @@ export const discrepanciasCodigo = async (req, res, next) => {
   try {
     const { codigo } = req.params;
     const { rows } = await pool.query(
-      `SELECT
+      `WITH ultimo_sync AS (
+         SELECT id, created_at FROM sincronizaciones
+         WHERE revertido_at IS NULL
+         ORDER BY created_at DESC LIMIT 1
+       )
+       SELECT
          s.id          AS sync_id,
          s.created_at  AS sync_fecha,
          disc.value    AS discrepancia
-       FROM sincronizaciones s,
+       FROM sincronizaciones s
+       JOIN ultimo_sync us ON s.id = us.id,
             jsonb_array_elements(s.detalle->'discrepancias') AS disc(value)
-       WHERE s.revertido_at IS NULL
-         AND jsonb_typeof(s.detalle->'discrepancias') = 'array'
+       WHERE jsonb_typeof(s.detalle->'discrepancias') = 'array'
          AND disc.value->>'codigo' = $1
-         AND disc.value->>'tipo' = ANY(ARRAY['MONTO_INCORRECTO','SIN_COBRO_EXTERNO'])
-       ORDER BY s.created_at DESC
-       LIMIT 20`,
+         AND disc.value->>'tipo' = ANY(ARRAY['MONTO_INCORRECTO','SIN_COBRO_EXTERNO'])`,
       [codigo]
     );
     res.json(rows.map((r) => ({ sync_id: r.sync_id, sync_fecha: r.sync_fecha, ...r.discrepancia })));

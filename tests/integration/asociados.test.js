@@ -840,6 +840,9 @@ describe('Asociados — pago en efectivo por bono', () => {
   });
 
   afterEach(async () => {
+    await pool.query(`DELETE FROM sorteo_logs WHERE empleado_uuid = $1 AND accion = 'PAGO_EFECTIVO'`, [adminUuid]);
+    await pool.query(`DELETE FROM cobros_efectivo WHERE registrado_por_uuid = $1`, [adminUuid]);
+    await pool.query(`DELETE FROM admin_logs WHERE usuario_uuid = $1 AND accion = 'PAGO_EFECTIVO_DISCREPANCIA'`, [adminUuid]);
     await pool.query('DELETE FROM sincronizaciones WHERE id = $1', [sincId]);
   });
 
@@ -929,7 +932,7 @@ describe('Asociados — pago en efectivo por bono', () => {
     expect(res.body.pagos_count).toBe(1);
   });
 
-  test('Cada pago persiste comprobante, tipo_pago y comentario en JSONB', async () => {
+  test('Cada pago persiste comprobante, tipo_pago, comentario y registrado_por en JSONB', async () => {
     const ag = agent();
     await loginAdmin(ag);
     await ag.post(`/api/asociados/sincronizaciones/${sincId}/subsanar/${codigoPago}/pago`)
@@ -941,6 +944,32 @@ describe('Asociados — pago en efectivo por bono', () => {
     expect(pago.tipo_pago).toBe('banco');
     expect(pago.comentario).toBe('Contexto de prueba');
     expect(pago.registrado_at).toBeDefined();
+    expect(pago.registrado_por_uuid).toBe(adminUuid);
+    expect(pago.registrado_por_nombre).toBeDefined();
+  });
+
+  test('Registrar pago inserta entrada en admin_logs', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    await ag.post(`/api/asociados/sincronizaciones/${sincId}/subsanar/${codigoPago}/pago`)
+      .send({ tipo_discrepancia: 'SIN_COBRO_EXTERNO', numero_bono: 101, monto: 3000, tipo_pago: 'caja', comprobante: 'LOG-001', comentario: 'Test log' });
+
+    const { rows } = await pool.query(
+      `SELECT accion, objetivo_tipo, objetivo_id, detalle
+       FROM admin_logs
+       WHERE usuario_uuid = $1 AND accion = 'PAGO_EFECTIVO_DISCREPANCIA'
+       ORDER BY created_at DESC LIMIT 1`,
+      [adminUuid]
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].accion).toBe('PAGO_EFECTIVO_DISCREPANCIA');
+    expect(rows[0].objetivo_tipo).toBe('asociado');
+    expect(rows[0].objetivo_id).toBe(codigoPago);
+    const detalle = JSON.parse(rows[0].detalle);
+    expect(detalle.numero_bono).toBe(101);
+    expect(detalle.tipo_pago).toBe('caja');
+    expect(detalle.comprobante).toBe('LOG-001');
+    expect(detalle.sync_id).toBe(sincId);
   });
 });
 
@@ -1810,6 +1839,7 @@ describe('Asociados — GET /:codigo/discrepancias', () => {
   const COD_SC2  = '8882222222'; // SIN_COBRO_EXTERNO
   const COD_OK2  = '8883333333'; // sin discrepancia
   let sorteoDiscId;
+  let initialSyncId; // ID del sync generado en beforeAll — usado por tests que subsanan discrepancias
 
   const buildCSV = () => [
     'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto',
@@ -1823,6 +1853,13 @@ describe('Asociados — GET /:codigo/discrepancias', () => {
   ].join('\n');
 
   beforeAll(async () => {
+    // Limpiar stale data de ejecuciones anteriores
+    await pool.query(`DELETE FROM cobros_efectivo WHERE asociado_codigo = ANY($1)`, [[COD_MAL2, COD_SC2, COD_OK2]]);
+    // Eliminar sorteos con linea='15' de corridas anteriores para garantizar sorteo_id correcto en el sync
+    await pool.query(`DELETE FROM boletos WHERE sorteo_id IN (SELECT id FROM sorteos WHERE linea_reconciliacion = '15')`);
+    await pool.query(`DELETE FROM sorteo_logs WHERE sorteo_id IN (SELECT id FROM sorteos WHERE linea_reconciliacion = '15')`);
+    await pool.query(`DELETE FROM sorteos WHERE linea_reconciliacion = '15'`);
+
     const { rows: [s] } = await pool.query(
       `INSERT INTO sorteos (nombre, estado, precio_boleto, linea_reconciliacion)
        VALUES ('Sorteo Disc Test', 'activo', 3000, '15')
@@ -1853,9 +1890,15 @@ describe('Asociados — GET /:codigo/discrepancias', () => {
     const ag = request.agent(app);
     await loginAdmin(ag);
     await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(buildCSV()), 'disc.csv');
+    const { rows: [s2] } = await pool.query(
+      `SELECT id FROM sincronizaciones WHERE usuario_uuid = $1 ORDER BY created_at DESC LIMIT 1`,
+      [adminUuid]
+    );
+    initialSyncId = s2.id;
   });
 
   afterAll(async () => {
+    await pool.query('DELETE FROM cobros_efectivo WHERE asociado_codigo = ANY($1)', [[COD_MAL2, COD_SC2, COD_OK2]]);
     await pool.query('DELETE FROM sorteo_logs    WHERE sorteo_id = $1',      [sorteoDiscId]);
     await pool.query('DELETE FROM boletos        WHERE sorteo_id = $1',      [sorteoDiscId]);
     await pool.query('DELETE FROM sorteos        WHERE id = $1',             [sorteoDiscId]);
@@ -1924,6 +1967,109 @@ describe('Asociados — GET /:codigo/discrepancias', () => {
     const ag = request.agent(app);
     await loginAdmin(ag);
     const res = await ag.get('/api/asociados/0000000000/discrepancias');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  test('Registrar pago crea entrada en sorteo_logs con accion PAGO_EFECTIVO', async () => {
+    const ag = request.agent(app);
+    await loginAdmin(ag);
+    const pagoRes = await ag
+      .post(`/api/asociados/sincronizaciones/${initialSyncId}/subsanar/${COD_SC2}/pago`)
+      .send({ tipo_discrepancia: 'SIN_COBRO_EXTERNO', numero_bono: 952, monto: 3000, tipo_pago: 'banco', comprobante: 'LOG-SC2-001', comentario: 'Test log sorteo' });
+    expect(pagoRes.status).toBe(200);
+    const { rows } = await pool.query(
+      `SELECT accion, numero, asociado_codigo, detalle
+       FROM sorteo_logs
+       WHERE sorteo_id = $1 AND accion = 'PAGO_EFECTIVO'
+       ORDER BY created_at DESC LIMIT 1`,
+      [sorteoDiscId]
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].numero).toBe(952);
+    expect(rows[0].asociado_codigo).toBe(COD_SC2);
+    expect(rows[0].detalle).toContain('LOG-SC2-001');
+    // Limpiar
+    await pool.query(`DELETE FROM sorteo_logs WHERE sorteo_id = $1 AND accion = 'PAGO_EFECTIVO'`, [sorteoDiscId]);
+    await pool.query(`DELETE FROM cobros_efectivo WHERE asociado_codigo = $1`, [COD_SC2]);
+    await pool.query(`DELETE FROM admin_logs WHERE objetivo_id = $1 AND accion = 'PAGO_EFECTIVO_DISCREPANCIA'`, [COD_SC2]);
+  });
+
+  test('cobros_efectivo del periodo actual suprime la discrepancia en el siguiente sync', async () => {
+    const periodoActual = new Date().toISOString().slice(0, 7);
+    // Consultar el mismo sorteoIdLinea que usaría el sync para línea '15'
+    const { rows: [sorteoLinea] } = await pool.query(
+      `SELECT id FROM sorteos WHERE linea_reconciliacion = '15' AND estado = 'activo' AND precio_boleto > 0 ORDER BY created_at LIMIT 1`
+    );
+    const sorteoIdLinea = sorteoLinea?.id ?? sorteoDiscId;
+    // Insertar pago manual para COD_SC2 en el periodo actual
+    await pool.query(
+      `INSERT INTO cobros_efectivo
+         (asociado_codigo, sorteo_id, numero_bono, monto, tipo_pago, comprobante, tipo_discrepancia, periodo, registrado_por_uuid)
+       VALUES ($1, $2, 952, 3000, 'banco', 'TEST-SUP-001', 'SIN_COBRO_EXTERNO', $3, $4)`,
+      [COD_SC2, sorteoIdLinea, periodoActual, adminUuid]
+    );
+    // Verificar que el cobros_efectivo se insertó correctamente
+    const { rows: cobrosCheck } = await pool.query(
+      `SELECT asociado_codigo, sorteo_id FROM cobros_efectivo WHERE periodo = $1 AND asociado_codigo = $2`,
+      [periodoActual, COD_SC2]
+    );
+    // Correr un nuevo sync — COD_SC2 sigue sin aparecer en línea 15 del CSV
+    const ag = request.agent(app);
+    await loginAdmin(ag);
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(buildCSV()), 'sup.csv');
+    // El endpoint de discrepancias del último sync no debe incluir SIN_COBRO_EXTERNO para COD_SC2
+    const res = await ag.get(`/api/asociados/${COD_SC2}/discrepancias`);
+    expect(cobrosCheck.length).toBeGreaterThan(0);                              // cobros_efectivo insertado
+    expect(cobrosCheck[0].asociado_codigo).toBe(COD_SC2);
+    expect(cobrosCheck[0].sorteo_id).toBe(sorteoIdLinea); // UUID debe coincidir con lo que el sync usará
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.every((d) => d.tipo !== 'SIN_COBRO_EXTERNO')).toBe(true);
+    // Limpiar
+    await pool.query(`DELETE FROM cobros_efectivo WHERE asociado_codigo = $1 AND periodo = $2`, [COD_SC2, periodoActual]);
+  });
+
+  test('sorteo tipo_pago=unico: cobros_efectivo de periodo anterior sigue suprimiendo', async () => {
+    // Cambiar sorteoDiscId a tipo_pago='unico' para este test
+    await pool.query(`UPDATE sorteos SET tipo_pago = 'unico' WHERE id = $1`, [sorteoDiscId]);
+    const periodoAnterior = (() => {
+      const d = new Date(); d.setMonth(d.getMonth() - 1);
+      return d.toISOString().slice(0, 7);
+    })();
+    await pool.query(
+      `INSERT INTO cobros_efectivo
+         (asociado_codigo, sorteo_id, numero_bono, monto, tipo_pago, comprobante, tipo_discrepancia, periodo, registrado_por_uuid)
+       VALUES ($1, $2, 952, 3000, 'banco', 'TEST-UNICO-001', 'SIN_COBRO_EXTERNO', $3, $4)`,
+      [COD_SC2, sorteoDiscId, periodoAnterior, adminUuid]
+    );
+    const ag = request.agent(app);
+    await loginAdmin(ag);
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(buildCSV()), 'unico.csv');
+    const res = await ag.get(`/api/asociados/${COD_SC2}/discrepancias`);
+    expect(res.status).toBe(200);
+    expect(res.body.every((d) => d.tipo !== 'SIN_COBRO_EXTERNO')).toBe(true);
+    // Limpiar
+    await pool.query(`DELETE FROM cobros_efectivo WHERE asociado_codigo = $1 AND comprobante = 'TEST-UNICO-001'`, [COD_SC2]);
+    await pool.query(`UPDATE sorteos SET tipo_pago = 'recurrente' WHERE id = $1`, [sorteoDiscId]);
+  });
+
+  test('Solo muestra discrepancias del sync más reciente — sync posterior limpio oculta las anteriores', async () => {
+    // Importar un CSV sin línea 15 después del sync que generó discrepancias.
+    // El sync más reciente queda sin discrepancias para COD_MAL2 → perfil devuelve [].
+    const ag = request.agent(app);
+    await loginAdmin(ag);
+    const csvLimpio = [
+      'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto',
+      `1,${testCodigo},Torres,Test,1,EMP01,Empresa Test,Pereira,Calle 1,3001234567,,`,
+      `1,${COD_MAL2},MontoMal2,Disc,1,EMP_D,Empresa Disc,Bogota,Calle A,3000000001,,`,
+      `1,${COD_SC2},SinCobro2,Disc,1,EMP_D,Empresa Disc,Bogota,Calle B,3000000002,,`,
+      `1,${COD_OK2},SinDisc,Ok,1,EMP_D,Empresa Disc,Bogota,Calle C,3000000003,,`,
+      // Sin línea 15 → reconciliación genera discrepancias = []
+    ].join('\n');
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(csvLimpio), 'limpio.csv');
+
+    const res = await ag.get(`/api/asociados/${COD_MAL2}/discrepancias`);
     expect(res.status).toBe(200);
     expect(res.body).toEqual([]);
   });

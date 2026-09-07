@@ -48,6 +48,8 @@ export const resumen = async (req, res, next) => {
         (COUNT(b.numero) FILTER (WHERE b.estado = 'pendiente_adquisicion'))::int          AS boletos_pendientes,
         (COUNT(b.numero) FILTER (WHERE b.estado IN ('asignado','pendiente_retiro')))
           * s.precio_boleto                                                                AS ingreso_mensual,
+        (SELECT COALESCE(SUM(ce.monto), 0)
+         FROM cobros_efectivo ce WHERE ce.sorteo_id = s.id)::bigint                       AS recaudo_efectivo,
         (SELECT COUNT(*)::int FROM solicitudes_bono
          WHERE sorteo_id = s.id AND estado = 'pendiente')                                 AS solicitudes_pendientes
       FROM sorteos s

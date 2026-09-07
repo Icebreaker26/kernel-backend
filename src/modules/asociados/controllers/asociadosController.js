@@ -1119,7 +1119,37 @@ export const detalleSincronizacion = async (req, res, next) => {
       [id]
     );
     if (!row) return res.status(404).json({ error: 'Sincronización no encontrada' });
-    res.json(row.detalle ?? {});
+
+    const detalle = row.detalle ?? {};
+
+    // Enriquecer discrepancias con pagos de cobros_efectivo (fuente de verdad, multi-sync)
+    if (Array.isArray(detalle.discrepancias) && detalle.discrepancias.length > 0) {
+      const conSorteo = detalle.discrepancias.filter((d) => d.sorteo_id);
+      if (conSorteo.length > 0) {
+        const codigos   = conSorteo.map((d) => d.codigo);
+        const sorteoIds = conSorteo.map((d) => d.sorteo_id);
+        const { rows: cobros } = await pool.query(
+          `SELECT ce.asociado_codigo, ce.sorteo_id,
+                  json_agg(json_build_object(
+                    'numero_bono', ce.numero_bono, 'monto', ce.monto,
+                    'tipo_pago',   ce.tipo_pago,   'comprobante', ce.comprobante,
+                    'comentario',  ce.comentario,  'registrado_at', ce.created_at
+                  ) ORDER BY ce.created_at) AS pagos
+           FROM cobros_efectivo ce
+           JOIN (SELECT UNNEST($1::text[]) AS codigo, UNNEST($2::uuid[]) AS sorteo_id) pares
+             ON pares.codigo = ce.asociado_codigo AND pares.sorteo_id = ce.sorteo_id
+           GROUP BY ce.asociado_codigo, ce.sorteo_id`,
+          [codigos, sorteoIds]
+        );
+        const cobrosMap = new Map(cobros.map((r) => [`${r.asociado_codigo}:${r.sorteo_id}`, r.pagos]));
+        detalle.discrepancias = detalle.discrepancias.map((d) => ({
+          ...d,
+          pagos_efectivo: cobrosMap.get(`${d.codigo}:${d.sorteo_id}`) ?? d.pagos_efectivo ?? [],
+        }));
+      }
+    }
+
+    res.json(detalle);
   } catch (err) {
     next(err);
   }

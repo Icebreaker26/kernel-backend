@@ -1927,4 +1927,24 @@ describe('Asociados — GET /:codigo/discrepancias', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual([]);
   });
+
+  test('Solo muestra discrepancias del sync más reciente — sync posterior limpio oculta las anteriores', async () => {
+    // Importar un CSV sin línea 15 después del sync que generó discrepancias.
+    // El sync más reciente queda sin discrepancias para COD_MAL2 → perfil devuelve [].
+    const ag = request.agent(app);
+    await loginAdmin(ag);
+    const csvLimpio = [
+      'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto',
+      `1,${testCodigo},Torres,Test,1,EMP01,Empresa Test,Pereira,Calle 1,3001234567,,`,
+      `1,${COD_MAL2},MontoMal2,Disc,1,EMP_D,Empresa Disc,Bogota,Calle A,3000000001,,`,
+      `1,${COD_SC2},SinCobro2,Disc,1,EMP_D,Empresa Disc,Bogota,Calle B,3000000002,,`,
+      `1,${COD_OK2},SinDisc,Ok,1,EMP_D,Empresa Disc,Bogota,Calle C,3000000003,,`,
+      // Sin línea 15 → reconciliación genera discrepancias = []
+    ].join('\n');
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(csvLimpio), 'limpio.csv');
+
+    const res = await ag.get(`/api/asociados/${COD_MAL2}/discrepancias`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
 });

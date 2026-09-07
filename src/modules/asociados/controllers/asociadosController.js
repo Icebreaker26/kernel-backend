@@ -1210,18 +1210,21 @@ export const discrepanciasCodigo = async (req, res, next) => {
   try {
     const { codigo } = req.params;
     const { rows } = await pool.query(
-      `SELECT
+      `WITH ultimo_sync AS (
+         SELECT id, created_at FROM sincronizaciones
+         WHERE revertido_at IS NULL
+         ORDER BY created_at DESC LIMIT 1
+       )
+       SELECT
          s.id          AS sync_id,
          s.created_at  AS sync_fecha,
          disc.value    AS discrepancia
-       FROM sincronizaciones s,
+       FROM sincronizaciones s
+       JOIN ultimo_sync us ON s.id = us.id,
             jsonb_array_elements(s.detalle->'discrepancias') AS disc(value)
-       WHERE s.revertido_at IS NULL
-         AND jsonb_typeof(s.detalle->'discrepancias') = 'array'
+       WHERE jsonb_typeof(s.detalle->'discrepancias') = 'array'
          AND disc.value->>'codigo' = $1
-         AND disc.value->>'tipo' = ANY(ARRAY['MONTO_INCORRECTO','SIN_COBRO_EXTERNO'])
-       ORDER BY s.created_at DESC
-       LIMIT 20`,
+         AND disc.value->>'tipo' = ANY(ARRAY['MONTO_INCORRECTO','SIN_COBRO_EXTERNO'])`,
       [codigo]
     );
     res.json(rows.map((r) => ({ sync_id: r.sync_id, sync_fecha: r.sync_fecha, ...r.discrepancia })));

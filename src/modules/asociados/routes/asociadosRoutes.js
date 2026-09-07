@@ -56,6 +56,10 @@ router.patch('/sincronizaciones/:id/subsanar/:codigo',
   verifyToken, checkPermission('asociados', 'WRITE'),
   ctrl.subsanarDiscrepancia
 );
+router.post('/sincronizaciones/:id/subsanar/:codigo/pago',
+  verifyToken, checkPermission('asociados', 'WRITE'),
+  ctrl.agregarPagoEfectivo
+);
 router.post('/sincronizaciones/:id/revertir',
   verifyToken, checkPermission('asociados', 'WRITE'),
   ctrl.revertirSincronizacion
@@ -68,6 +72,10 @@ router.get('/:codigo/perfil',
 router.get('/:codigo/historial-aporte',
   verifyToken, checkPermission('asociados', 'READ'),
   ctrl.historialAporte
+);
+router.get('/:codigo/discrepancias',
+  verifyToken, checkPermission('asociados', 'READ'),
+  ctrl.discrepanciasCodigo
 );
 
 // Activación del portal (opt-in)

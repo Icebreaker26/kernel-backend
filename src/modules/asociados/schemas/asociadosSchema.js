@@ -20,6 +20,15 @@ export const subsanarSchema = z.object({
   sorteo_nombre: z.string().max(200).optional(),
 });
 
+export const pagoEfectivoSchema = z.object({
+  tipo_discrepancia: z.enum(['SIN_COBRO_EXTERNO', 'MONTO_INCORRECTO']),
+  numero_bono:       z.number().int().positive(),
+  monto:             z.number().positive(),
+  tipo_pago:         z.enum(['banco', 'caja']),
+  comprobante:       z.string().min(1).max(100),
+  comentario:        z.string().max(500).optional().default(''),
+});
+
 export const guardarEmailSchema = z.object({
   email:        z.string().email('Correo electrónico inválido'),
   emailConfirm: z.string().email(),

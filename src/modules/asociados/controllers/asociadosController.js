@@ -732,22 +732,18 @@ export const importarCSV = async (req, res, next) => {
       const validosMap        = new Map(validos.map((v) => [v.codigo, v]));
       discrepancias = [];
 
-      // Pagos en efectivo — supresión diferenciada por tipo de sorteo:
-      //   recurrente → solo suprime el mes en que se registró el pago
-      //   único      → suprime indefinidamente (el asociado ya pagó su boleto una vez)
-      const periodoActual  = new Date().toISOString().slice(0, 7);
-      const sorteoUnicoIds = sorteosConLinea
-        .filter((s) => s.tipo_pago === 'unico')
-        .map((s) => s.id);
+      // Pagos en efectivo — supresión por sorteo_id para todos los tipos de sorteo.
+      // Un pago en efectivo registrado para un bono de un sorteo suprime la discrepancia
+      // indefinidamente (el asociado paga en caja/banco, no por nómina, de forma permanente).
+      const todosSorteoIds = sorteosConLinea.map((s) => s.id);
 
       // Map<codigo, Map<sorteo_id, pagos_count>> — se suprime solo si pagos >= boletos
       const { rows: cobrosSupresion } = await client.query(
         `SELECT asociado_codigo, sorteo_id, COUNT(DISTINCT numero_bono)::int AS pagos_count
          FROM cobros_efectivo
-         WHERE periodo = $1
-            OR sorteo_id = ANY($2::uuid[])
+         WHERE sorteo_id = ANY($1::uuid[])
          GROUP BY asociado_codigo, sorteo_id`,
-        [periodoActual, sorteoUnicoIds]
+        [todosSorteoIds]
       );
       const cobertosEfectivoMap = new Map();
       for (const r of cobrosSupresion) {

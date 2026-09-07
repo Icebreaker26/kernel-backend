@@ -1995,8 +1995,12 @@ describe('Asociados — GET /:codigo/discrepancias', () => {
     await pool.query(`DELETE FROM admin_logs WHERE objetivo_id = $1 AND accion = 'PAGO_EFECTIVO_DISCREPANCIA'`, [COD_SC2]);
   });
 
-  test('cobros_efectivo del periodo actual suprime la discrepancia en el siguiente sync', async () => {
-    const periodoActual = new Date().toISOString().slice(0, 7);
+  test('cobros_efectivo suprime discrepancia en syncs posteriores independientemente del periodo', async () => {
+    // Usar un periodo anterior para verificar que la supresión NO depende del mes actual
+    const periodoActual = (() => {
+      const d = new Date(); d.setMonth(d.getMonth() - 1);
+      return d.toISOString().slice(0, 7);
+    })();
     // Consultar el mismo sorteoIdLinea que usaría el sync para línea '15'
     const { rows: [sorteoLinea] } = await pool.query(
       `SELECT id FROM sorteos WHERE linea_reconciliacion = '15' AND estado = 'activo' AND precio_boleto > 0 ORDER BY created_at LIMIT 1`

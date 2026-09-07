@@ -840,6 +840,7 @@ describe('Asociados — pago en efectivo por bono', () => {
   });
 
   afterEach(async () => {
+    await pool.query(`DELETE FROM admin_logs WHERE usuario_uuid = $1 AND accion = 'PAGO_EFECTIVO_DISCREPANCIA'`, [adminUuid]);
     await pool.query('DELETE FROM sincronizaciones WHERE id = $1', [sincId]);
   });
 
@@ -929,7 +930,7 @@ describe('Asociados — pago en efectivo por bono', () => {
     expect(res.body.pagos_count).toBe(1);
   });
 
-  test('Cada pago persiste comprobante, tipo_pago y comentario en JSONB', async () => {
+  test('Cada pago persiste comprobante, tipo_pago, comentario y registrado_por en JSONB', async () => {
     const ag = agent();
     await loginAdmin(ag);
     await ag.post(`/api/asociados/sincronizaciones/${sincId}/subsanar/${codigoPago}/pago`)
@@ -941,6 +942,32 @@ describe('Asociados — pago en efectivo por bono', () => {
     expect(pago.tipo_pago).toBe('banco');
     expect(pago.comentario).toBe('Contexto de prueba');
     expect(pago.registrado_at).toBeDefined();
+    expect(pago.registrado_por_uuid).toBe(adminUuid);
+    expect(pago.registrado_por_nombre).toBeDefined();
+  });
+
+  test('Registrar pago inserta entrada en admin_logs', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    await ag.post(`/api/asociados/sincronizaciones/${sincId}/subsanar/${codigoPago}/pago`)
+      .send({ tipo_discrepancia: 'SIN_COBRO_EXTERNO', numero_bono: 101, monto: 3000, tipo_pago: 'caja', comprobante: 'LOG-001', comentario: 'Test log' });
+
+    const { rows } = await pool.query(
+      `SELECT accion, objetivo_tipo, objetivo_id, detalle
+       FROM admin_logs
+       WHERE usuario_uuid = $1 AND accion = 'PAGO_EFECTIVO_DISCREPANCIA'
+       ORDER BY created_at DESC LIMIT 1`,
+      [adminUuid]
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].accion).toBe('PAGO_EFECTIVO_DISCREPANCIA');
+    expect(rows[0].objetivo_tipo).toBe('asociado');
+    expect(rows[0].objetivo_id).toBe(codigoPago);
+    const detalle = JSON.parse(rows[0].detalle);
+    expect(detalle.numero_bono).toBe(101);
+    expect(detalle.tipo_pago).toBe('caja');
+    expect(detalle.comprobante).toBe('LOG-001');
+    expect(detalle.sync_id).toBe(sincId);
   });
 });
 

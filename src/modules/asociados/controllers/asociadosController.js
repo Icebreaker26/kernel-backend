@@ -1182,7 +1182,20 @@ export const agregarPagoEfectivo = async (req, res, next) => {
       return res.status(409).json({ error: `El bono #${numero_bono} ya tiene un pago registrado` });
     }
 
-    pagos.push({ numero_bono, monto, tipo_pago, comprobante, comentario, registrado_at: new Date().toISOString() });
+    const { rows: [usuario] } = await client.query(
+      `SELECT nombre FROM global_usuarios WHERE id = $1`,
+      [req.user.id]
+    );
+    pagos.push({
+      numero_bono,
+      monto,
+      tipo_pago,
+      comprobante,
+      comentario,
+      registrado_at:         new Date().toISOString(),
+      registrado_por_uuid:   req.user.id,
+      registrado_por_nombre: usuario?.nombre ?? req.user.email,
+    });
     disc.pagos_efectivo = pagos;
 
     const boletos_count = Math.max(disc.boletos_count ?? 1, 1);
@@ -1195,6 +1208,18 @@ export const agregarPagoEfectivo = async (req, res, next) => {
     await client.query(
       `UPDATE sincronizaciones SET detalle = $1 WHERE id = $2`,
       [JSON.stringify(detalle), id]
+    );
+    await client.query(
+      `INSERT INTO admin_logs (usuario_uuid, accion, objetivo_tipo, objetivo_id, objetivo_nombre, detalle)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        req.user.id,
+        'PAGO_EFECTIVO_DISCREPANCIA',
+        'asociado',
+        codigo,
+        disc.nombre ?? codigo,
+        JSON.stringify({ tipo_discrepancia, numero_bono, monto, tipo_pago, comprobante, comentario, sync_id: id }),
+      ]
     );
     await client.query('COMMIT');
     res.json({ ok: true, subsanada: disc.subsanada ?? false, pagos_count: pagos.length, boletos_count });

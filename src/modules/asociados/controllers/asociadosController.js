@@ -759,28 +759,32 @@ export const importarCSV = async (req, res, next) => {
         const filasLinea = registros.filter((r) => String(r.linea ?? '').trim() === linea);
         if (filasLinea.length === 0) continue;
 
-        // Agrupar por código — acumular cuota_externa si el asociado aparece en múltiples filas
-        const mapaLinea = new Map();
-        for (const r of filasLinea) {
-          const cuota = parseCuotaCOP(r.cuota);
-          if (!mapaLinea.has(r.codigo)) {
-            mapaLinea.set(r.codigo, {
-              cuota_externa:  cuota,
-              periodo_descto: String(r.periodo_descto ?? '2').trim(),
-              nombre:         `${(r.nombre ?? '').trim()} ${(r.apellido ?? '').trim()}`.trim(),
-              empresa:        (r.nombre_empresa ?? r.empresa_dsto ?? '').trim(),
-            });
-          } else {
-            mapaLinea.get(r.codigo).cuota_externa += cuota;
-          }
-        }
-
         // precio_boleto, sorteo_id y tipo_pago del primer sorteo con precio de esta línea
         const sorteoDeLinea  = sorteosDeLinea.find((s) => s.precio_boleto > 0);
         const precioBoleto   = parseFloat(sorteoDeLinea?.precio_boleto ?? 0);
         const sorteoIdLinea  = sorteoDeLinea?.id ?? null;
         // Si todos los sorteos de esta línea son pago único, el factor siempre es 1
         const esUnico        = sorteosDeLinea.every((s) => s.tipo_pago === 'unico');
+
+        // Agrupar por código — normalizar cuota a mensual al acumular para que filas con
+        // diferente periodo_descto (quincenal=×2, mensual=×1) sean comparables entre sí y
+        // contra totalMensual de Kernel. Pago único siempre factor=1.
+        const mapaLinea = new Map();
+        for (const r of filasLinea) {
+          const cuota      = parseCuotaCOP(r.cuota);
+          const periodoStr = String(r.periodo_descto ?? '2').trim();
+          const factorFila = esUnico ? 1 : (periodoStr.startsWith('2') ? 2 : 1);
+          if (!mapaLinea.has(r.codigo)) {
+            mapaLinea.set(r.codigo, {
+              cuota_externa_mensual: cuota * factorFila,
+              periodo_descto:        periodoStr,
+              nombre:                `${(r.nombre ?? '').trim()} ${(r.apellido ?? '').trim()}`.trim(),
+              empresa:               (r.nombre_empresa ?? r.empresa_dsto ?? '').trim(),
+            });
+          } else {
+            mapaLinea.get(r.codigo).cuota_externa_mensual += cuota * factorFila;
+          }
+        }
 
         // Boletos de los sorteos de ESTA línea únicamente
         const sorteoIds = sorteosDeLinea.map((s) => s.id);
@@ -808,23 +812,19 @@ export const importarCSV = async (req, res, next) => {
         const boletosMap      = new Map(boletosKernel.map((r) => [r.asociado_codigo, parseFloat(r.total_mensual)]));
         const boletosCountMap = new Map(boletosKernel.map((r) => [r.asociado_codigo, r.boletos_count]));
 
-        // Revisar cada entrada de esta línea
+        // Revisar cada entrada de esta línea — comparar en términos mensuales
         for (const [codigo, d] of mapaLinea) {
-          const activo       = codigosActivosSet.has(codigo);
-          const totalMensual = boletosMap.get(codigo) ?? 0;
-          const factor       = String(d.periodo_descto).startsWith('2') ? 2 : 1;
-          const cuotaExterna = Math.round(d.cuota_externa * 100) / 100;
-          const periodo      = factor === 2 ? 'quincenal' : 'mensual';
-
-          // Para pago único el factor es siempre 1 — no hay cadencia mensual/quincenal
-          const factorEfectivo = esUnico ? 1 : factor;
-          const cuotaKernelEfectiva = Math.round((totalMensual / factorEfectivo) * 100) / 100;
-          const periodoEfectivo     = esUnico ? 'único' : periodo;
+          const activo              = codigosActivosSet.has(codigo);
+          const totalMensual        = boletosMap.get(codigo) ?? 0;
+          const cuotaExterna        = Math.round((d.cuota_externa_mensual ?? 0) * 100) / 100;
+          const cuotaKernelEfectiva = Math.round(totalMensual * 100) / 100;
+          const factor              = String(d.periodo_descto).startsWith('2') ? 2 : 1;
+          const periodoEfectivo     = esUnico ? 'único' : (factor === 2 ? 'quincenal' : 'mensual');
 
           if (!activo) {
             discrepancias.push({ tipo: 'COBRO_A_RETIRADO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0, boletos_count: 0, periodo: periodoEfectivo, linea, sorteo_id: sorteoIdLinea });
           } else if (totalMensual === 0) {
-            const bonos_sugeridos = precioBoleto > 0 ? Math.round((cuotaExterna * factorEfectivo) / precioBoleto) : null;
+            const bonos_sugeridos = precioBoleto > 0 ? Math.round(cuotaExterna / precioBoleto) : null;
             discrepancias.push({ tipo: 'COBRO_SIN_BOLETO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0, boletos_count: 0, periodo: periodoEfectivo, bonos_sugeridos, linea, sorteo_id: sorteoIdLinea });
           } else if (Math.abs(cuotaExterna - cuotaKernelEfectiva) > 1 && !tieneCobroEfectivo(codigo)) {
             discrepancias.push({ tipo: 'MONTO_INCORRECTO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: cuotaKernelEfectiva, diferencia: Math.round((cuotaExterna - cuotaKernelEfectiva) * 100) / 100, boletos_count: boletosCountMap.get(codigo) ?? 0, periodo: periodoEfectivo, linea, sorteo_id: sorteoIdLinea });

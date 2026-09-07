@@ -732,6 +732,14 @@ export const importarCSV = async (req, res, next) => {
       const validosMap        = new Map(validos.map((v) => [v.codigo, v]));
       discrepancias = [];
 
+      // Pagos en efectivo ya registrados este mes — suprimen la discrepancia del sync actual
+      const periodoActual = new Date().toISOString().slice(0, 7);
+      const { rows: cobrosDelMes } = await client.query(
+        `SELECT DISTINCT asociado_codigo, sorteo_id FROM cobros_efectivo WHERE periodo = $1`,
+        [periodoActual]
+      );
+      const cobertosEfectivo = new Set(cobrosDelMes.map((r) => `${r.asociado_codigo}:${r.sorteo_id}`));
+
       for (const [linea, sorteosDeLinea] of sorteosPorLinea) {
         const filasLinea = registros.filter((r) => String(r.linea ?? '').trim() === linea);
         if (filasLinea.length === 0) continue;
@@ -790,14 +798,14 @@ export const importarCSV = async (req, res, next) => {
           } else if (totalMensual === 0) {
             const bonos_sugeridos = precioBoleto > 0 ? Math.round((cuotaExterna * factorEfectivo) / precioBoleto) : null;
             discrepancias.push({ tipo: 'COBRO_SIN_BOLETO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0, boletos_count: 0, periodo: periodoEfectivo, bonos_sugeridos, linea, sorteo_id: sorteoIdLinea });
-          } else if (Math.abs(cuotaExterna - cuotaKernelEfectiva) > 1) {
+          } else if (Math.abs(cuotaExterna - cuotaKernelEfectiva) > 1 && !cobertosEfectivo.has(`${codigo}:${sorteoIdLinea}`)) {
             discrepancias.push({ tipo: 'MONTO_INCORRECTO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: cuotaKernelEfectiva, diferencia: Math.round((cuotaExterna - cuotaKernelEfectiva) * 100) / 100, boletos_count: boletosCountMap.get(codigo) ?? 0, periodo: periodoEfectivo, linea, sorteo_id: sorteoIdLinea });
           }
         }
 
         // Activos con boletos en Kernel para esta línea pero ausentes en el CSV
         for (const [codigo, totalMensual] of boletosMap) {
-          if (!mapaLinea.has(codigo) && codigosActivosSet.has(codigo)) {
+          if (!mapaLinea.has(codigo) && codigosActivosSet.has(codigo) && !cobertosEfectivo.has(`${codigo}:${sorteoIdLinea}`)) {
             const asocData = validosMap.get(codigo);
             if (asocData) {
               // Para pago único: factor 1 siempre; para recurrente: según clase_cuota del asociado

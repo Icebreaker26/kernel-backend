@@ -1956,6 +1956,33 @@ describe('Asociados — GET /:codigo/discrepancias', () => {
     expect(res.body).toEqual([]);
   });
 
+  test('cobros_efectivo del periodo actual suprime la discrepancia en el siguiente sync', async () => {
+    const periodoActual = new Date().toISOString().slice(0, 7);
+    // Consultar el mismo sorteoIdLinea que usaría el sync para línea '15'
+    const { rows: [sorteoLinea] } = await pool.query(
+      `SELECT id FROM sorteos WHERE linea_reconciliacion = '15' AND estado = 'activo' AND precio_boleto > 0 ORDER BY created_at LIMIT 1`
+    );
+    const sorteoIdLinea = sorteoLinea?.id ?? sorteoDiscId;
+    // Insertar pago manual para COD_SC2 en el periodo actual
+    await pool.query(
+      `INSERT INTO cobros_efectivo
+         (asociado_codigo, sorteo_id, numero_bono, monto, tipo_pago, comprobante, tipo_discrepancia, periodo, registrado_por_uuid)
+       VALUES ($1, $2, 952, 3000, 'banco', 'TEST-SUP-001', 'SIN_COBRO_EXTERNO', $3, $4)`,
+      [COD_SC2, sorteoIdLinea, periodoActual, adminUuid]
+    );
+    // Correr un nuevo sync — COD_SC2 sigue sin aparecer en línea 15 del CSV
+    const ag = request.agent(app);
+    await loginAdmin(ag);
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(buildCSV()), 'sup.csv');
+    // El endpoint de discrepancias del último sync no debe incluir SIN_COBRO_EXTERNO para COD_SC2
+    const res = await ag.get(`/api/asociados/${COD_SC2}/discrepancias`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.every((d) => d.tipo !== 'SIN_COBRO_EXTERNO')).toBe(true);
+    // Limpiar
+    await pool.query(`DELETE FROM cobros_efectivo WHERE asociado_codigo = $1 AND periodo = $2`, [COD_SC2, periodoActual]);
+  });
+
   test('Solo muestra discrepancias del sync más reciente — sync posterior limpio oculta las anteriores', async () => {
     // Importar un CSV sin línea 15 después del sync que generó discrepancias.
     // El sync más reciente queda sin discrepancias para COD_MAL2 → perfil devuelve [].

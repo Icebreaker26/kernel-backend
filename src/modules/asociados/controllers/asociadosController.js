@@ -1343,7 +1343,41 @@ export const discrepanciasCodigo = async (req, res, next) => {
          AND disc.value->>'tipo' = ANY(ARRAY['MONTO_INCORRECTO','SIN_COBRO_EXTERNO'])`,
       [codigo]
     );
-    res.json(rows.map((r) => ({ sync_id: r.sync_id, sync_fecha: r.sync_fecha, ...r.discrepancia })));
+
+    // Enriquecer con cobros_efectivo en vivo (mismo patrón que detalleSincronizacion)
+    const sorteoIds = rows
+      .map((r) => r.discrepancia?.sorteo_id)
+      .filter(Boolean);
+
+    let cobrosMap = new Map();
+    if (sorteoIds.length > 0) {
+      const { rows: cobros } = await pool.query(
+        `SELECT ce.asociado_codigo, ce.sorteo_id,
+                json_agg(json_build_object(
+                  'numero_bono', ce.numero_bono,
+                  'monto',       ce.monto,
+                  'periodo',     ce.periodo,
+                  'tipo_pago',   ce.tipo_pago
+                ) ORDER BY ce.created_at) AS pagos
+         FROM cobros_efectivo ce
+         WHERE ce.asociado_codigo = $1
+           AND ce.sorteo_id = ANY($2::uuid[])
+         GROUP BY ce.asociado_codigo, ce.sorteo_id`,
+        [codigo, sorteoIds]
+      );
+      for (const c of cobros) {
+        cobrosMap.set(c.sorteo_id, c.pagos);
+      }
+    }
+
+    res.json(
+      rows.map((r) => ({
+        sync_id: r.sync_id,
+        sync_fecha: r.sync_fecha,
+        ...r.discrepancia,
+        pagos_efectivo: cobrosMap.get(r.discrepancia?.sorteo_id) ?? [],
+      }))
+    );
   } catch (err) {
     next(err);
   }

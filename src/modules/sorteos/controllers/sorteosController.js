@@ -761,6 +761,47 @@ export const reporteParticipantes = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const reporteCobertura = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { rows } = await pool.query(`
+      SELECT
+        a.codigo,
+        a.nombre,
+        a.apellido,
+        a.nombre_empresa,
+        a.clase_cuota,
+        COALESCE(b.boletos_activos, 0)::int            AS boletos_activos,
+        COALESCE(b.numeros_activos, ARRAY[]::int[])    AS numeros_activos,
+        (COALESCE(b.boletos_activos, 0) > 0)           AS tiene_bono
+      FROM asociados a
+      LEFT JOIN (
+        SELECT
+          asociado_codigo,
+          COUNT(*) FILTER (WHERE estado = 'asignado')::int          AS boletos_activos,
+          ARRAY_AGG(numero ORDER BY numero) FILTER (WHERE estado = 'asignado') AS numeros_activos
+        FROM boletos
+        WHERE sorteo_id = $1 AND asociado_codigo IS NOT NULL
+        GROUP BY asociado_codigo
+      ) b ON b.asociado_codigo = a.codigo
+      WHERE a.is_active = true
+      ORDER BY a.apellido, a.nombre
+    `, [id]);
+
+    res.json(rows.map((r) => ({
+      codigo:        r.codigo,
+      nombre:        r.nombre,
+      apellido:      r.apellido,
+      nombre_completo: `${r.nombre} ${r.apellido}`,
+      empresa:       r.nombre_empresa ?? '',
+      clase_cuota:   r.clase_cuota === '1' ? 'Quincenal' : r.clase_cuota === '2' ? 'Mensual' : r.clase_cuota ?? '',
+      tiene_bono:    r.tiene_bono,
+      boletos_activos: r.boletos_activos,
+      numeros:       (r.numeros_activos ?? []).map((n) => String(n).padStart(3, '0')).join(', '),
+    })));
+  } catch (err) { next(err); }
+};
+
 export const historialAsociadoSorteo = async (req, res, next) => {
   try {
     const { id, codigo } = req.params;

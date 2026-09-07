@@ -740,16 +740,19 @@ export const importarCSV = async (req, res, next) => {
         .filter((s) => s.tipo_pago === 'unico')
         .map((s) => s.id);
 
+      // Map<codigo, Map<sorteo_id, pagos_count>> — se suprime solo si pagos >= boletos
       const { rows: cobrosSupresion } = await client.query(
-        `SELECT DISTINCT asociado_codigo, sorteo_id FROM cobros_efectivo
+        `SELECT asociado_codigo, sorteo_id, COUNT(DISTINCT numero_bono)::int AS pagos_count
+         FROM cobros_efectivo
          WHERE periodo = $1
-            OR sorteo_id = ANY($2::uuid[])`,
+            OR sorteo_id = ANY($2::uuid[])
+         GROUP BY asociado_codigo, sorteo_id`,
         [periodoActual, sorteoUnicoIds]
       );
       const cobertosEfectivoMap = new Map();
       for (const r of cobrosSupresion) {
-        if (!cobertosEfectivoMap.has(r.asociado_codigo)) cobertosEfectivoMap.set(r.asociado_codigo, new Set());
-        cobertosEfectivoMap.get(r.asociado_codigo).add(r.sorteo_id);
+        if (!cobertosEfectivoMap.has(r.asociado_codigo)) cobertosEfectivoMap.set(r.asociado_codigo, new Map());
+        cobertosEfectivoMap.get(r.asociado_codigo).set(r.sorteo_id, r.pagos_count);
       }
 
       for (const [linea, sorteosDeLinea] of sorteosPorLinea) {
@@ -778,10 +781,14 @@ export const importarCSV = async (req, res, next) => {
 
         // Boletos de los sorteos de ESTA línea únicamente
         const sorteoIds = sorteosDeLinea.map((s) => s.id);
-        // Asociados con cobro en efectivo para CUALQUIER sorteo de esta línea
+        // Suprime solo cuando pagos >= boletos (un pago parcial no elimina la discrepancia)
         const tieneCobroEfectivo = (codigo) => {
           const pagados = cobertosEfectivoMap.get(codigo);
-          return pagados ? sorteoIds.some((sid) => pagados.has(sid)) : false;
+          if (!pagados) return false;
+          const boletosNecesarios = boletosCountMap.get(codigo) ?? 0;
+          if (boletosNecesarios === 0) return false;
+          const totalPagos = sorteoIds.reduce((sum, sid) => sum + (pagados.get(sid) ?? 0), 0);
+          return totalPagos >= boletosNecesarios;
         };
 
         const { rows: boletosKernel } = await client.query(

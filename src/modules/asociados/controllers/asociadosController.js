@@ -4,7 +4,7 @@ import { parse } from 'csv-parse/sync';
 import iconv from 'iconv-lite';
 import pool from '../../../db/database.js';
 import { env } from '../../../config/env.js';
-import { loginAsociadoSchema, importarFilaSchema, solicitarPortalSchema, registroPortalSchema, cambiarPasswordSchema, subsanarSchema, guardarEmailSchema } from '../schemas/asociadosSchema.js';
+import { loginAsociadoSchema, importarFilaSchema, solicitarPortalSchema, registroPortalSchema, cambiarPasswordSchema, subsanarSchema, pagoEfectivoSchema, guardarEmailSchema } from '../schemas/asociadosSchema.js';
 import { notificarUsuario, notificarAdmins } from '../../../services/notificationService.js';
 import { enviarCredencialesPortal } from '../../../services/emailService.js';
 
@@ -1134,6 +1134,70 @@ export const subsanarDiscrepancia = async (req, res, next) => {
     );
     await client.query('COMMIT');
     res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+};
+
+export const agregarPagoEfectivo = async (req, res, next) => {
+  const { id, codigo } = req.params;
+  let parsed;
+  try { parsed = pagoEfectivoSchema.parse(req.body); } catch (err) { return next(err); }
+  const { tipo_discrepancia, numero_bono, monto, tipo_pago, comprobante, comentario } = parsed;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: [row] } = await client.query(
+      `SELECT detalle FROM sincronizaciones WHERE id = $1 FOR UPDATE`,
+      [id]
+    );
+    if (!row) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Sincronización no encontrada' });
+    }
+
+    const detalle = row.detalle ?? {};
+    if (!Array.isArray(detalle.discrepancias)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'La sincronización no tiene discrepancias' });
+    }
+
+    const idx = detalle.discrepancias.findIndex(
+      (d) => d.codigo === codigo && d.tipo === tipo_discrepancia
+    );
+    if (idx === -1) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Discrepancia no encontrada' });
+    }
+
+    const disc = detalle.discrepancias[idx];
+    const pagos = disc.pagos_efectivo ?? [];
+
+    if (pagos.some((p) => p.numero_bono === numero_bono)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: `El bono #${numero_bono} ya tiene un pago registrado` });
+    }
+
+    pagos.push({ numero_bono, monto, tipo_pago, comprobante, comentario, registrado_at: new Date().toISOString() });
+    disc.pagos_efectivo = pagos;
+
+    const boletos_count = Math.max(disc.boletos_count ?? 1, 1);
+    if (pagos.length >= boletos_count) {
+      disc.subsanada    = true;
+      disc.subsanada_at = new Date().toISOString();
+    }
+
+    detalle.discrepancias[idx] = disc;
+    await client.query(
+      `UPDATE sincronizaciones SET detalle = $1 WHERE id = $2`,
+      [JSON.stringify(detalle), id]
+    );
+    await client.query('COMMIT');
+    res.json({ ok: true, subsanada: disc.subsanada ?? false, pagos_count: pagos.length, boletos_count });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);

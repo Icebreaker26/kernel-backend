@@ -1291,7 +1291,7 @@ export const agregarPagoEfectivo = async (req, res, next) => {
            (asociado_codigo, sorteo_id, numero_bono, monto, tipo_pago, comprobante,
             comentario, tipo_discrepancia, periodo, sync_id, registrado_por_uuid)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-         ON CONFLICT (sync_id, asociado_codigo, tipo_discrepancia, numero_bono) DO NOTHING`,
+         ON CONFLICT (asociado_codigo, sorteo_id, numero_bono) DO NOTHING`,
         [codigo, disc.sorteo_id, numero_bono, monto, tipo_pago, comprobante,
          comentario, tipo_discrepancia, row.periodo, id, req.user.id]
       );

@@ -759,16 +759,19 @@ export const importarCSV = async (req, res, next) => {
         const filasLinea = registros.filter((r) => String(r.linea ?? '').trim() === linea);
         if (filasLinea.length === 0) continue;
 
-        // Un registro por código — tomar el primero
+        // Agrupar por código — acumular cuota_externa si el asociado aparece en múltiples filas
         const mapaLinea = new Map();
         for (const r of filasLinea) {
+          const cuota = parseCuotaCOP(r.cuota);
           if (!mapaLinea.has(r.codigo)) {
             mapaLinea.set(r.codigo, {
-              cuota_externa:  parseCuotaCOP(r.cuota),
+              cuota_externa:  cuota,
               periodo_descto: String(r.periodo_descto ?? '2').trim(),
               nombre:         `${(r.nombre ?? '').trim()} ${(r.apellido ?? '').trim()}`.trim(),
               empresa:        (r.nombre_empresa ?? r.empresa_dsto ?? '').trim(),
             });
+          } else {
+            mapaLinea.get(r.codigo).cuota_externa += cuota;
           }
         }
 

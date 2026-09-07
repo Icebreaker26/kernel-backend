@@ -732,13 +732,25 @@ export const importarCSV = async (req, res, next) => {
       const validosMap        = new Map(validos.map((v) => [v.codigo, v]));
       discrepancias = [];
 
-      // Pagos en efectivo ya registrados este mes — suprimen la discrepancia del sync actual
-      const periodoActual = new Date().toISOString().slice(0, 7);
-      const { rows: cobrosDelMes } = await client.query(
-        `SELECT DISTINCT asociado_codigo, sorteo_id FROM cobros_efectivo WHERE periodo = $1`,
-        [periodoActual]
+      // Pagos en efectivo — supresión diferenciada por tipo de sorteo:
+      //   recurrente → solo suprime el mes en que se registró el pago
+      //   único      → suprime indefinidamente (el asociado ya pagó su boleto una vez)
+      const periodoActual  = new Date().toISOString().slice(0, 7);
+      const sorteoUnicoIds = sorteosConLinea
+        .filter((s) => s.tipo_pago === 'unico')
+        .map((s) => s.id);
+
+      const { rows: cobrosSupresion } = await client.query(
+        `SELECT DISTINCT asociado_codigo, sorteo_id FROM cobros_efectivo
+         WHERE periodo = $1
+            OR sorteo_id = ANY($2::uuid[])`,
+        [periodoActual, sorteoUnicoIds]
       );
-      const cobertosEfectivo = new Set(cobrosDelMes.map((r) => `${r.asociado_codigo}:${r.sorteo_id}`));
+      const cobertosEfectivoMap = new Map();
+      for (const r of cobrosSupresion) {
+        if (!cobertosEfectivoMap.has(r.asociado_codigo)) cobertosEfectivoMap.set(r.asociado_codigo, new Set());
+        cobertosEfectivoMap.get(r.asociado_codigo).add(r.sorteo_id);
+      }
 
       for (const [linea, sorteosDeLinea] of sorteosPorLinea) {
         const filasLinea = registros.filter((r) => String(r.linea ?? '').trim() === linea);
@@ -766,6 +778,12 @@ export const importarCSV = async (req, res, next) => {
 
         // Boletos de los sorteos de ESTA línea únicamente
         const sorteoIds = sorteosDeLinea.map((s) => s.id);
+        // Asociados con cobro en efectivo para CUALQUIER sorteo de esta línea
+        const tieneCobroEfectivo = (codigo) => {
+          const pagados = cobertosEfectivoMap.get(codigo);
+          return pagados ? sorteoIds.some((sid) => pagados.has(sid)) : false;
+        };
+
         const { rows: boletosKernel } = await client.query(
           `SELECT b.asociado_codigo,
                   SUM(s.precio_boleto)::numeric AS total_mensual,
@@ -798,14 +816,14 @@ export const importarCSV = async (req, res, next) => {
           } else if (totalMensual === 0) {
             const bonos_sugeridos = precioBoleto > 0 ? Math.round((cuotaExterna * factorEfectivo) / precioBoleto) : null;
             discrepancias.push({ tipo: 'COBRO_SIN_BOLETO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: 0, boletos_count: 0, periodo: periodoEfectivo, bonos_sugeridos, linea, sorteo_id: sorteoIdLinea });
-          } else if (Math.abs(cuotaExterna - cuotaKernelEfectiva) > 1 && !cobertosEfectivo.has(`${codigo}:${sorteoIdLinea}`)) {
+          } else if (Math.abs(cuotaExterna - cuotaKernelEfectiva) > 1 && !tieneCobroEfectivo(codigo)) {
             discrepancias.push({ tipo: 'MONTO_INCORRECTO', codigo, nombre: d.nombre, empresa: d.empresa, cuota_externa: cuotaExterna, cuota_kernel: cuotaKernelEfectiva, diferencia: Math.round((cuotaExterna - cuotaKernelEfectiva) * 100) / 100, boletos_count: boletosCountMap.get(codigo) ?? 0, periodo: periodoEfectivo, linea, sorteo_id: sorteoIdLinea });
           }
         }
 
         // Activos con boletos en Kernel para esta línea pero ausentes en el CSV
         for (const [codigo, totalMensual] of boletosMap) {
-          if (!mapaLinea.has(codigo) && codigosActivosSet.has(codigo) && !cobertosEfectivo.has(`${codigo}:${sorteoIdLinea}`)) {
+          if (!mapaLinea.has(codigo) && codigosActivosSet.has(codigo) && !tieneCobroEfectivo(codigo)) {
             const asocData = validosMap.get(codigo);
             if (asocData) {
               // Para pago único: factor 1 siempre; para recurrente: según clase_cuota del asociado
@@ -1239,6 +1257,22 @@ export const agregarPagoEfectivo = async (req, res, next) => {
         [codigo, disc.sorteo_id, numero_bono, monto, tipo_pago, comprobante,
          comentario, tipo_discrepancia, row.periodo, id, req.user.id]
       );
+      const { rows: [sorteoExiste] } = await client.query(
+        `SELECT 1 FROM sorteos WHERE id = $1`, [disc.sorteo_id]
+      );
+      if (sorteoExiste) {
+        await client.query(
+          `INSERT INTO sorteo_logs (sorteo_id, numero, accion, asociado_codigo, empleado_uuid, detalle)
+           VALUES ($1, $2, 'PAGO_EFECTIVO', $3, $4, $5)`,
+          [
+            disc.sorteo_id,
+            numero_bono,
+            codigo,
+            req.user.id,
+            `${tipo_pago === 'banco' ? 'Banco' : 'Caja'} · comprobante ${comprobante}${comentario ? ` · ${comentario}` : ''}`,
+          ]
+        );
+      }
     }
     await client.query('COMMIT');
     res.json({ ok: true, subsanada: disc.subsanada ?? false, pagos_count: pagos.length, boletos_count });

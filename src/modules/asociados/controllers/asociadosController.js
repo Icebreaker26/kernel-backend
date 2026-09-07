@@ -827,9 +827,11 @@ export const importarCSV = async (req, res, next) => {
           }
         }
 
-        // Activos con boletos en Kernel para esta línea pero ausentes en el CSV
+        // Activos con boletos en Kernel para esta línea pero ausentes en el CSV.
+        // Se incluyen aunque tengan cobros_efectivo — aparecerán como SUBSANADO en el audit,
+        // dando visibilidad de "esta persona paga en efectivo y no está en el externo".
         for (const [codigo, totalMensual] of boletosMap) {
-          if (!mapaLinea.has(codigo) && codigosActivosSet.has(codigo) && !tieneCobroEfectivo(codigo)) {
+          if (!mapaLinea.has(codigo) && codigosActivosSet.has(codigo)) {
             const asocData = validosMap.get(codigo);
             if (asocData) {
               // Para pago único: factor 1 siempre; para recurrente: según clase_cuota del asociado

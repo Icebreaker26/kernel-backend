@@ -1995,8 +1995,10 @@ describe('Asociados — GET /:codigo/discrepancias', () => {
     await pool.query(`DELETE FROM admin_logs WHERE objetivo_id = $1 AND accion = 'PAGO_EFECTIVO_DISCREPANCIA'`, [COD_SC2]);
   });
 
-  test('cobros_efectivo suprime discrepancia en syncs posteriores independientemente del periodo', async () => {
-    // Usar un periodo anterior para verificar que la supresión NO depende del mes actual
+  test('cobros_efectivo: discrepancia persiste visible como SUBSANADO — no desaparece del audit', async () => {
+    // El pago en efectivo ya no suprime la discrepancia; la persona sigue apareciendo
+    // en el audit como SIN_COBRO_EXTERNO con pagos_efectivo, mostrando SUBSANADO en la UI.
+    // Esto evita que queden invisible cuando desaparecen del CSV por haber pagado en caja.
     const periodoActual = (() => {
       const d = new Date(); d.setMonth(d.getMonth() - 1);
       return d.toISOString().slice(0, 7);
@@ -2006,7 +2008,7 @@ describe('Asociados — GET /:codigo/discrepancias', () => {
       `SELECT id FROM sorteos WHERE linea_reconciliacion = '15' AND estado = 'activo' AND precio_boleto > 0 ORDER BY created_at LIMIT 1`
     );
     const sorteoIdLinea = sorteoLinea?.id ?? sorteoDiscId;
-    // Insertar pago manual para COD_SC2 en el periodo actual
+    // Insertar pago manual para COD_SC2
     await pool.query(
       `INSERT INTO cobros_efectivo
          (asociado_codigo, sorteo_id, numero_bono, monto, tipo_pago, comprobante, tipo_discrepancia, periodo, registrado_por_uuid)
@@ -2022,20 +2024,21 @@ describe('Asociados — GET /:codigo/discrepancias', () => {
     const ag = request.agent(app);
     await loginAdmin(ag);
     await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(buildCSV()), 'sup.csv');
-    // El endpoint de discrepancias del último sync no debe incluir SIN_COBRO_EXTERNO para COD_SC2
+    // La discrepancia SIN_COBRO_EXTERNO DEBE aparecer (visible en audit como SUBSANADO)
     const res = await ag.get(`/api/asociados/${COD_SC2}/discrepancias`);
-    expect(cobrosCheck.length).toBeGreaterThan(0);                              // cobros_efectivo insertado
+    expect(cobrosCheck.length).toBeGreaterThan(0);
     expect(cobrosCheck[0].asociado_codigo).toBe(COD_SC2);
-    expect(cobrosCheck[0].sorteo_id).toBe(sorteoIdLinea); // UUID debe coincidir con lo que el sync usará
+    expect(cobrosCheck[0].sorteo_id).toBe(sorteoIdLinea);
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body)).toBe(true);
-    expect(res.body.every((d) => d.tipo !== 'SIN_COBRO_EXTERNO')).toBe(true);
+    // Aparece como SIN_COBRO_EXTERNO (visible en audit), no suprimido
+    expect(res.body.some((d) => d.tipo === 'SIN_COBRO_EXTERNO')).toBe(true);
     // Limpiar
     await pool.query(`DELETE FROM cobros_efectivo WHERE asociado_codigo = $1 AND periodo = $2`, [COD_SC2, periodoActual]);
   });
 
-  test('sorteo tipo_pago=unico: cobros_efectivo de periodo anterior sigue suprimiendo', async () => {
-    // Cambiar sorteoDiscId a tipo_pago='unico' para este test
+  test('sorteo tipo_pago=unico: cobros_efectivo aparece como SUBSANADO aunque desaparezca del CSV', async () => {
+    // Igual que recurrente: la discrepancia se genera pero visible como SUBSANADO en audit
     await pool.query(`UPDATE sorteos SET tipo_pago = 'unico' WHERE id = $1`, [sorteoDiscId]);
     const periodoAnterior = (() => {
       const d = new Date(); d.setMonth(d.getMonth() - 1);
@@ -2052,7 +2055,8 @@ describe('Asociados — GET /:codigo/discrepancias', () => {
     await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(buildCSV()), 'unico.csv');
     const res = await ag.get(`/api/asociados/${COD_SC2}/discrepancias`);
     expect(res.status).toBe(200);
-    expect(res.body.every((d) => d.tipo !== 'SIN_COBRO_EXTERNO')).toBe(true);
+    // Aparece como SIN_COBRO_EXTERNO (visible en audit como SUBSANADO via pagos_efectivo)
+    expect(res.body.some((d) => d.tipo === 'SIN_COBRO_EXTERNO')).toBe(true);
     // Limpiar
     await pool.query(`DELETE FROM cobros_efectivo WHERE asociado_codigo = $1 AND comprobante = 'TEST-UNICO-001'`, [COD_SC2]);
     await pool.query(`UPDATE sorteos SET tipo_pago = 'recurrente' WHERE id = $1`, [sorteoDiscId]);

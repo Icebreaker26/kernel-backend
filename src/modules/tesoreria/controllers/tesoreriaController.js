@@ -247,54 +247,152 @@ export const crearMovimiento = async (req, res, next) => {
 
 // ── Dashboard ──────────────────────────────────────────────────────────────────
 
+const dashboardFacturas = async () => {
+  // Estado + monto por estado
+  const { rows: porEstado } = await pool.query(`
+    SELECT estado,
+           COUNT(*)::int                    AS cantidad,
+           COALESCE(SUM(monto), 0)::numeric AS monto_total
+      FROM tesoreria_facturas
+     GROUP BY estado
+  `);
+
+  // Alertas: vencidas y urgentes (pendiente o aprobada)
+  const { rows: [alertas] } = await pool.query(`
+    SELECT
+      COUNT(*) FILTER (
+        WHERE estado IN ('pendiente_aprobacion','aprobada')
+          AND fecha_vencimiento < CURRENT_DATE
+      )::int AS vencidas,
+      COALESCE(SUM(monto) FILTER (
+        WHERE estado IN ('pendiente_aprobacion','aprobada')
+          AND fecha_vencimiento < CURRENT_DATE
+      ), 0)::numeric AS monto_vencido,
+      COUNT(*) FILTER (
+        WHERE estado IN ('pendiente_aprobacion','aprobada')
+          AND fecha_vencimiento >= CURRENT_DATE
+          AND fecha_vencimiento <= CURRENT_DATE + INTERVAL '5 days'
+      )::int AS urgentes,
+      COALESCE(SUM(monto) FILTER (
+        WHERE estado IN ('pendiente_aprobacion','aprobada')
+      ), 0)::numeric AS monto_pendiente
+    FROM tesoreria_facturas
+  `);
+
+  // Eficiencia: promedio de días por etapa + tasa de rechazo
+  const { rows: [eficiencia] } = await pool.query(`
+    SELECT
+      ROUND(AVG(
+        EXTRACT(DAY FROM (f.created_at - f.fecha_entrega_area::timestamptz))
+      ) FILTER (WHERE f.fecha_entrega_area IS NOT NULL))::int   AS avg_dias_area_contable,
+      ROUND(AVG(
+        EXTRACT(DAY FROM (f.aprobado_at - f.created_at))
+      ) FILTER (WHERE f.aprobado_at IS NOT NULL))::int           AS avg_dias_control_interno,
+      ROUND(AVG(
+        (mov.fecha - f.aprobado_at::date)
+      ) FILTER (WHERE mov.fecha IS NOT NULL AND f.aprobado_at IS NOT NULL))::int AS avg_dias_tesoreria,
+      COUNT(*) FILTER (WHERE f.estado = 'rechazada')::int       AS total_rechazadas,
+      COUNT(*) FILTER (WHERE f.estado IN ('aprobada','pagada','rechazada'))::int AS total_procesadas
+    FROM tesoreria_facturas f
+    LEFT JOIN tesoreria_movimientos mov ON mov.id = f.movimiento_id
+  `);
+
+  // Top 5 proveedores por monto pagado (global, no filtrado por mes)
+  const { rows: topProveedores } = await pool.query(`
+    SELECT p.nombre, p.tipo_pago,
+           COUNT(f.id)::int            AS total_facturas,
+           COALESCE(SUM(f.monto), 0)  AS monto_total
+      FROM tesoreria_facturas f
+      JOIN tesoreria_proveedores p ON p.id = f.proveedor_id
+     WHERE f.estado = 'pagada'
+     GROUP BY p.id, p.nombre, p.tipo_pago
+     ORDER BY monto_total DESC
+     LIMIT 5
+  `);
+
+  // Monto pagado por mes — últimos 6 meses
+  const { rows: tendencia } = await pool.query(`
+    SELECT to_char(mov.fecha, 'YYYY-MM') AS mes,
+           COUNT(f.id)::int              AS cantidad,
+           COALESCE(SUM(f.monto), 0)    AS monto_total
+      FROM tesoreria_facturas f
+      JOIN tesoreria_movimientos mov ON mov.id = f.movimiento_id
+     WHERE f.estado = 'pagada'
+       AND mov.fecha >= date_trunc('month', CURRENT_DATE) - INTERVAL '5 months'
+     GROUP BY mes
+     ORDER BY mes
+  `);
+
+  // Monto comprometido por área (facturas activas)
+  const { rows: porArea } = await pool.query(`
+    SELECT area_responsable,
+           COUNT(*)::int               AS cantidad,
+           COALESCE(SUM(monto), 0)    AS monto_total
+      FROM tesoreria_facturas
+     WHERE estado IN ('pendiente_aprobacion','aprobada')
+       AND area_responsable IS NOT NULL
+     GROUP BY area_responsable
+     ORDER BY monto_total DESC
+  `);
+
+  return { por_estado: porEstado, alertas, eficiencia, top_proveedores: topProveedores, tendencia, por_area: porArea };
+};
+
 export const dashboard = async (req, res, next) => {
   try {
     const hoy  = new Date();
     const mes  = req.query.mes || `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}`;
 
-    const { rows: cuentas } = await pool.query(`
-      SELECT c.id, c.nombre, c.tipo, c.moneda,
-             (${saldoActual}) AS saldo_actual
-        FROM tesoreria_cuentas c
-       WHERE c.is_active = true
-       ORDER BY c.tipo, c.nombre
-    `);
-
-    const { rows: flujo } = await pool.query(`
-      SELECT
-        COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE 0 END), 0) AS ingresos,
-        COALESCE(SUM(CASE WHEN tipo = 'egreso'  THEN monto ELSE 0 END), 0) AS egresos
-      FROM tesoreria_movimientos
-      WHERE to_char(fecha, 'YYYY-MM') = $1
-    `, [mes]);
-
-    const { rows: porCategoria } = await pool.query(`
-      SELECT cat.nombre, cat.color, cat.tipo,
-             COALESCE(SUM(m.monto), 0) AS total
-        FROM tesoreria_movimientos m
-        JOIN tesoreria_categorias cat ON cat.id = m.categoria_id
-       WHERE to_char(m.fecha, 'YYYY-MM') = $1
-         AND m.tipo IN ('ingreso', 'egreso')
-       GROUP BY cat.id, cat.nombre, cat.color, cat.tipo
-       ORDER BY total DESC
-    `, [mes]);
-
-    const { rows: ultimosMovimientos } = await pool.query(`
-      SELECT m.id, m.tipo, m.monto, m.fecha, m.descripcion,
-             c.nombre AS cuenta_nombre,
-             cat.nombre AS categoria_nombre, cat.color AS categoria_color
-        FROM tesoreria_movimientos m
-        LEFT JOIN tesoreria_cuentas c ON c.id = m.cuenta_id
-        LEFT JOIN tesoreria_categorias cat ON cat.id = m.categoria_id
-       ORDER BY m.fecha DESC, m.created_at DESC
-       LIMIT 10
-    `);
+    const [
+      { rows: cuentas },
+      { rows: flujo },
+      { rows: porCategoria },
+      { rows: ultimosMovimientos },
+      facturas,
+    ] = await Promise.all([
+      pool.query(`
+        SELECT c.id, c.nombre, c.tipo, c.moneda,
+               (${saldoActual}) AS saldo_actual
+          FROM tesoreria_cuentas c
+         WHERE c.is_active = true
+         ORDER BY c.tipo, c.nombre
+      `),
+      pool.query(`
+        SELECT
+          COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE 0 END), 0) AS ingresos,
+          COALESCE(SUM(CASE WHEN tipo = 'egreso'  THEN monto ELSE 0 END), 0) AS egresos
+        FROM tesoreria_movimientos
+        WHERE to_char(fecha, 'YYYY-MM') = $1
+      `, [mes]),
+      pool.query(`
+        SELECT cat.nombre, cat.color, cat.tipo,
+               COALESCE(SUM(m.monto), 0) AS total
+          FROM tesoreria_movimientos m
+          JOIN tesoreria_categorias cat ON cat.id = m.categoria_id
+         WHERE to_char(m.fecha, 'YYYY-MM') = $1
+           AND m.tipo IN ('ingreso', 'egreso')
+         GROUP BY cat.id, cat.nombre, cat.color, cat.tipo
+         ORDER BY total DESC
+      `, [mes]),
+      pool.query(`
+        SELECT m.id, m.tipo, m.monto, m.fecha, m.descripcion,
+               c.nombre AS cuenta_nombre,
+               cat.nombre AS categoria_nombre, cat.color AS categoria_color
+          FROM tesoreria_movimientos m
+          LEFT JOIN tesoreria_cuentas c ON c.id = m.cuenta_id
+          LEFT JOIN tesoreria_categorias cat ON cat.id = m.categoria_id
+         ORDER BY m.fecha DESC, m.created_at DESC
+         LIMIT 10
+      `),
+      dashboardFacturas(),
+    ]);
 
     res.json({
       cuentas,
       flujo: flujo[0],
       por_categoria: porCategoria,
       ultimos_movimientos: ultimosMovimientos,
+      facturas,
       mes,
     });
   } catch (err) { next(err); }

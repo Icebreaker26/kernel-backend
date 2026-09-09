@@ -4,6 +4,8 @@ import {
   crearCategoriaSchema, actualizarCategoriaSchema,
   crearPeriodoSchema,
   crearMovimientoSchema,
+  crearProveedorSchema, actualizarProveedorSchema,
+  crearFacturaSchema, pagarFacturaSchema, rechazarFacturaSchema,
 } from '../schemas/tesoreriaSchema.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -295,5 +297,213 @@ export const dashboard = async (req, res, next) => {
       ultimos_movimientos: ultimosMovimientos,
       mes,
     });
+  } catch (err) { next(err); }
+};
+
+// ── Proveedores ────────────────────────────────────────────────────────────────
+
+export const listarProveedores = async (req, res, next) => {
+  try {
+    const { tipo_pago, is_active = 'true' } = req.query;
+    const conds = [`p.is_active = $1`];
+    const vals  = [is_active === 'true'];
+    let i = 2;
+    if (tipo_pago) { conds.push(`p.tipo_pago = $${i++}`); vals.push(tipo_pago); }
+    const { rows } = await pool.query(`
+      SELECT p.*,
+             COUNT(f.id) FILTER (WHERE f.estado = 'pendiente_aprobacion') AS facturas_pendientes,
+             COUNT(f.id) FILTER (WHERE f.estado = 'aprobada')             AS facturas_aprobadas
+        FROM tesoreria_proveedores p
+        LEFT JOIN tesoreria_facturas f ON f.proveedor_id = p.id
+       WHERE ${conds.join(' AND ')}
+       GROUP BY p.id
+       ORDER BY p.nombre
+    `, vals);
+    res.json(rows);
+  } catch (err) { next(err); }
+};
+
+export const crearProveedor = async (req, res, next) => {
+  try {
+    const data = crearProveedorSchema.parse(req.body);
+    const { rows } = await pool.query(`
+      INSERT INTO tesoreria_proveedores
+        (nombre, nit, email, telefono, tipo_pago, frecuencia, categoria, notas)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
+    `, [
+      data.nombre, data.nit || null, data.email || null, data.telefono || null,
+      data.tipo_pago, data.frecuencia || null, data.categoria || null, data.notas || null,
+    ]);
+    res.status(201).json(rows[0]);
+  } catch (err) { next(err); }
+};
+
+export const actualizarProveedor = async (req, res, next) => {
+  try {
+    const data = actualizarProveedorSchema.parse(req.body);
+    const sets = [];
+    const vals = [];
+    let i = 1;
+    const map = { nombre: 'nombre', nit: 'nit', email: 'email', telefono: 'telefono',
+                  frecuencia: 'frecuencia', categoria: 'categoria', notas: 'notas', is_active: 'is_active' };
+    for (const [k, col] of Object.entries(map)) {
+      if (data[k] !== undefined) {
+        sets.push(`${col} = $${i++}`);
+        vals.push(['nit','email','telefono','frecuencia','categoria','notas'].includes(k)
+          ? (data[k] || null) : data[k]);
+      }
+    }
+    if (!sets.length) return res.status(400).json({ error: 'Sin campos a actualizar' });
+    sets.push(`updated_at = NOW()`);
+    vals.push(req.params.id);
+    const { rows } = await pool.query(
+      `UPDATE tesoreria_proveedores SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`, vals
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Proveedor no encontrado' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+};
+
+// ── Facturas ───────────────────────────────────────────────────────────────────
+
+const facturaBase = `
+  SELECT f.*,
+         p.nombre  AS proveedor_nombre,
+         p.tipo_pago AS proveedor_tipo,
+         p.frecuencia AS proveedor_frecuencia,
+         p.categoria AS proveedor_categoria,
+         c.nombre  AS cuenta_pago_nombre,
+         u.nombre  AS registrado_por_nombre,
+         ua.nombre AS aprobado_por_nombre
+    FROM tesoreria_facturas f
+    JOIN tesoreria_proveedores p  ON p.id = f.proveedor_id
+    LEFT JOIN tesoreria_cuentas c ON c.id = f.cuenta_pago_id
+    LEFT JOIN global_usuarios u   ON u.id = f.registrado_por
+    LEFT JOIN global_usuarios ua  ON ua.id = f.aprobado_por
+`;
+
+export const listarFacturas = async (req, res, next) => {
+  try {
+    const { estado, proveedor_id, desde, hasta, vence_antes } = req.query;
+    const conds = [];
+    const vals  = [];
+    let i = 1;
+    if (estado)       { conds.push(`f.estado = $${i++}`);                vals.push(estado); }
+    if (proveedor_id) { conds.push(`f.proveedor_id = $${i++}`);          vals.push(proveedor_id); }
+    if (desde)        { conds.push(`f.fecha_recibida >= $${i++}`);        vals.push(desde); }
+    if (hasta)        { conds.push(`f.fecha_recibida <= $${i++}`);        vals.push(hasta); }
+    if (vence_antes)  { conds.push(`f.fecha_vencimiento <= $${i++}`);    vals.push(vence_antes); }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    const { rows } = await pool.query(`${facturaBase} ${where} ORDER BY f.fecha_vencimiento ASC`, vals);
+    res.json(rows);
+  } catch (err) { next(err); }
+};
+
+export const getFactura = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`${facturaBase} WHERE f.id = $1`, [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Factura no encontrada' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+};
+
+export const crearFactura = async (req, res, next) => {
+  try {
+    const data = crearFacturaSchema.parse(req.body);
+    const { rows } = await pool.query(`
+      INSERT INTO tesoreria_facturas
+        (proveedor_id, monto, fecha_recibida, fecha_vencimiento, descripcion, soporte, cuenta_pago_id, registrado_por)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
+    `, [
+      data.proveedor_id, data.monto, data.fecha_recibida, data.fecha_vencimiento,
+      data.descripcion || null, data.soporte || null,
+      data.cuenta_pago_id || null, req.user.id,
+    ]);
+    res.status(201).json(rows[0]);
+  } catch (err) { next(err); }
+};
+
+export const pagarFactura = async (req, res, next) => {
+  try {
+    const data = pagarFacturaSchema.parse(req.body);
+    const { rows: [factura] } = await pool.query(
+      `SELECT f.*, p.nombre AS proveedor_nombre FROM tesoreria_facturas f JOIN tesoreria_proveedores p ON p.id = f.proveedor_id WHERE f.id = $1`,
+      [req.params.id]
+    );
+    if (!factura) return res.status(404).json({ error: 'Factura no encontrada' });
+    if (factura.estado !== 'aprobada') return res.status(400).json({ error: 'La factura debe estar aprobada para pagarse' });
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Crear el movimiento de egreso
+      const { rows: [mov] } = await client.query(`
+        INSERT INTO tesoreria_movimientos
+          (tipo, monto, fecha, descripcion, referencia, cuenta_id, categoria_id, periodo_id, registrado_por)
+        SELECT 'egreso', $1, $2, $3, $4, $5,
+               (SELECT id FROM tesoreria_categorias WHERE nombre = 'Pago a proveedor' LIMIT 1),
+               $6, $7
+        RETURNING *
+      `, [
+        factura.monto,
+        data.fecha_pago,
+        `Pago factura — ${factura.proveedor_nombre}${factura.descripcion ? ': ' + factura.descripcion : ''}`,
+        data.referencia || null,
+        data.cuenta_pago_id,
+        data.periodo_id || null,
+        req.user.id,
+      ]);
+
+      // Marcar factura como pagada y vincular el movimiento
+      await client.query(`
+        UPDATE tesoreria_facturas
+           SET estado = 'pagada', movimiento_id = $1, cuenta_pago_id = $2, updated_at = NOW()
+         WHERE id = $3
+      `, [mov.id, data.cuenta_pago_id, req.params.id]);
+
+      await client.query('COMMIT');
+      res.json({ ok: true, movimiento_id: mov.id });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (err) { next(err); }
+};
+
+// ── Control Interno — aprobación (también usado desde control_interno module) ──
+
+export const aprobarFactura = async (req, res, next) => {
+  try {
+    const { rows: [f] } = await pool.query(
+      `SELECT estado FROM tesoreria_facturas WHERE id = $1`, [req.params.id]
+    );
+    if (!f) return res.status(404).json({ error: 'Factura no encontrada' });
+    if (f.estado !== 'pendiente_aprobacion') return res.status(400).json({ error: `Estado actual: ${f.estado}` });
+    const { rows } = await pool.query(`
+      UPDATE tesoreria_facturas
+         SET estado = 'aprobada', aprobado_por = $1, aprobado_at = NOW(), updated_at = NOW()
+       WHERE id = $2 RETURNING *
+    `, [req.user.id, req.params.id]);
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+};
+
+export const rechazarFactura = async (req, res, next) => {
+  try {
+    const { motivo } = rechazarFacturaSchema.parse(req.body);
+    const { rows: [f] } = await pool.query(
+      `SELECT estado FROM tesoreria_facturas WHERE id = $1`, [req.params.id]
+    );
+    if (!f) return res.status(404).json({ error: 'Factura no encontrada' });
+    if (f.estado !== 'pendiente_aprobacion') return res.status(400).json({ error: `Estado actual: ${f.estado}` });
+    const { rows } = await pool.query(`
+      UPDATE tesoreria_facturas
+         SET estado = 'rechazada', rechazo_motivo = $1, aprobado_por = $2, aprobado_at = NOW(), updated_at = NOW()
+       WHERE id = $3 RETURNING *
+    `, [motivo, req.user.id, req.params.id]);
+    res.json(rows[0]);
   } catch (err) { next(err); }
 };

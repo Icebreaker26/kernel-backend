@@ -44,6 +44,60 @@ export const crearPeriodoSchema = z.object({
 
 const uuidOpcional = z.string().uuid().nullable().optional().or(z.literal(''));
 
+// ── Proveedores ────────────────────────────────────────────────────────────────
+
+export const crearProveedorSchema = z.object({
+  nombre:     z.string().min(1),
+  nit:        z.string().optional().or(z.literal('')),
+  email:      z.string().email().optional().or(z.literal('')),
+  telefono:   z.string().optional().or(z.literal('')),
+  tipo_pago:  z.enum(['recurrente', 'unico']),
+  frecuencia: z.enum(['mensual', 'bimestral', 'trimestral', 'semestral', 'anual']).optional().or(z.literal('')),
+  categoria:  z.string().optional().or(z.literal('')),
+  notas:      z.string().optional().or(z.literal('')),
+}).superRefine((data, ctx) => {
+  if (data.tipo_pago === 'recurrente' && (!data.frecuencia || data.frecuencia === '')) {
+    ctx.addIssue({ code: 'custom', path: ['frecuencia'], message: 'Requerida para proveedores recurrentes' });
+  }
+  if (data.tipo_pago === 'unico' && data.frecuencia && data.frecuencia !== '') {
+    ctx.addIssue({ code: 'custom', path: ['frecuencia'], message: 'No aplica para pagos únicos' });
+  }
+});
+
+export const actualizarProveedorSchema = z.object({
+  nombre:    z.string().min(1).optional(),
+  nit:       z.string().optional().or(z.literal('')),
+  email:     z.string().email().optional().or(z.literal('')),
+  telefono:  z.string().optional().or(z.literal('')),
+  frecuencia: z.enum(['mensual', 'bimestral', 'trimestral', 'semestral', 'anual']).optional().or(z.literal('')),
+  categoria: z.string().optional().or(z.literal('')),
+  notas:     z.string().optional().or(z.literal('')),
+  is_active: z.boolean().optional(),
+}).strict();
+
+// ── Facturas ───────────────────────────────────────────────────────────────────
+
+export const crearFacturaSchema = z.object({
+  proveedor_id:      z.string().uuid(),
+  monto:             z.preprocess((v) => Number(v), z.number().positive()),
+  fecha_recibida:    z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  fecha_vencimiento: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  descripcion:       z.string().optional().or(z.literal('')),
+  soporte:           z.string().optional().or(z.literal('')),
+  cuenta_pago_id:    uuidOpcional,
+});
+
+export const pagarFacturaSchema = z.object({
+  cuenta_pago_id: z.string().uuid(),
+  fecha_pago:     z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  referencia:     z.string().optional().or(z.literal('')),
+  periodo_id:     uuidOpcional,
+});
+
+export const rechazarFacturaSchema = z.object({
+  motivo: z.string().min(1),
+});
+
 export const crearMovimientoSchema = z.object({
   tipo:                  z.enum(['ingreso', 'egreso', 'traslado']),
   monto:                 z.preprocess((v) => Number(v), z.number().positive()),

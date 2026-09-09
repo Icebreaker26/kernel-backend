@@ -29,4 +29,15 @@ router.put('/periodos/:id/cerrar', checkPermission('tesoreria', 'WRITE'), ctrl.c
 router.get('/movimientos',   checkPermission('tesoreria', 'READ'),   ctrl.listarMovimientos);
 router.post('/movimientos',  checkPermission('tesoreria', 'WRITE'),  ctrl.crearMovimiento);
 
+// ── Proveedores ────────────────────────────────────────────────────────────────
+router.get('/proveedores',      checkPermission('tesoreria', 'READ'),   ctrl.listarProveedores);
+router.post('/proveedores',     checkPermission('tesoreria', 'WRITE'),  ctrl.crearProveedor);
+router.put('/proveedores/:id',  checkPermission('tesoreria', 'WRITE'),  ctrl.actualizarProveedor);
+
+// ── Facturas ───────────────────────────────────────────────────────────────────
+router.get('/facturas',              checkPermission('tesoreria', 'READ'),   ctrl.listarFacturas);
+router.get('/facturas/:id',          checkPermission('tesoreria', 'READ'),   ctrl.getFactura);
+router.post('/facturas',             checkPermission('tesoreria', 'WRITE'),  ctrl.crearFactura);
+router.put('/facturas/:id/pagar',    checkPermission('tesoreria', 'WRITE'),  ctrl.pagarFactura);
+
 export default router;

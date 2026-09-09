@@ -368,18 +368,30 @@ export const actualizarProveedor = async (req, res, next) => {
 
 const facturaBase = `
   SELECT f.*,
-         p.nombre  AS proveedor_nombre,
-         p.tipo_pago AS proveedor_tipo,
+         p.nombre     AS proveedor_nombre,
+         p.nit        AS proveedor_nit,
+         p.tipo_pago  AS proveedor_tipo,
          p.frecuencia AS proveedor_frecuencia,
-         p.categoria AS proveedor_categoria,
-         c.nombre  AS cuenta_pago_nombre,
-         u.nombre  AS registrado_por_nombre,
-         ua.nombre AS aprobado_por_nombre
+         p.categoria  AS proveedor_categoria,
+         c.nombre     AS cuenta_pago_nombre,
+         u.nombre     AS registrado_por_nombre,
+         ua.nombre    AS aprobado_por_nombre,
+         mov.fecha    AS fecha_pago,
+         CASE WHEN f.fecha_entrega_area IS NOT NULL
+              THEN EXTRACT(DAY FROM (f.created_at - f.fecha_entrega_area::timestamptz))::int
+         END AS dias_area_contable,
+         CASE WHEN f.aprobado_at IS NOT NULL
+              THEN EXTRACT(DAY FROM (f.aprobado_at - f.created_at))::int
+         END AS dias_control_interno,
+         CASE WHEN f.aprobado_at IS NOT NULL AND mov.fecha IS NOT NULL
+              THEN (mov.fecha - f.aprobado_at::date)::int
+         END AS dias_tesoreria
     FROM tesoreria_facturas f
-    JOIN tesoreria_proveedores p  ON p.id = f.proveedor_id
-    LEFT JOIN tesoreria_cuentas c ON c.id = f.cuenta_pago_id
-    LEFT JOIN global_usuarios u   ON u.id = f.registrado_por
-    LEFT JOIN global_usuarios ua  ON ua.id = f.aprobado_por
+    JOIN tesoreria_proveedores p   ON p.id  = f.proveedor_id
+    LEFT JOIN tesoreria_cuentas c  ON c.id  = f.cuenta_pago_id
+    LEFT JOIN global_usuarios u    ON u.id  = f.registrado_por
+    LEFT JOIN global_usuarios ua   ON ua.id = f.aprobado_por
+    LEFT JOIN tesoreria_movimientos mov ON mov.id = f.movimiento_id
 `;
 
 export const listarFacturas = async (req, res, next) => {
@@ -412,12 +424,21 @@ export const crearFactura = async (req, res, next) => {
     const data = crearFacturaSchema.parse(req.body);
     const { rows } = await pool.query(`
       INSERT INTO tesoreria_facturas
-        (proveedor_id, monto, fecha_recibida, fecha_vencimiento, descripcion, soporte, cuenta_pago_id, registrado_por)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
+        (proveedor_id, monto, fecha_emision, fecha_recibida, fecha_vencimiento,
+         area_responsable, fecha_entrega_area, descripcion, numero_factura,
+         cuenta_pago_id, registrado_por)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *
     `, [
-      data.proveedor_id, data.monto, data.fecha_recibida, data.fecha_vencimiento,
-      data.descripcion || null, data.soporte || null,
-      data.cuenta_pago_id || null, req.user.id,
+      data.proveedor_id, data.monto,
+      data.fecha_emision     || null,
+      data.fecha_recibida,
+      data.fecha_vencimiento,
+      data.area_responsable  || null,
+      data.fecha_entrega_area || null,
+      data.descripcion       || null,
+      data.numero_factura    || null,
+      data.cuenta_pago_id    || null,
+      req.user.id,
     ]);
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }

@@ -78,13 +78,16 @@ export const actualizarProveedorSchema = z.object({
 // ── Facturas ───────────────────────────────────────────────────────────────────
 
 export const crearFacturaSchema = z.object({
-  proveedor_id:      z.string().uuid(),
-  monto:             z.preprocess((v) => Number(v), z.number().positive()),
-  fecha_recibida:    z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  fecha_vencimiento: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  descripcion:       z.string().optional().or(z.literal('')),
-  soporte:           z.string().optional().or(z.literal('')),
-  cuenta_pago_id:    uuidOpcional,
+  proveedor_id:       z.string().uuid(),
+  monto:              z.preprocess((v) => Number(v), z.number().positive()),
+  fecha_emision:      z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().or(z.literal('')),
+  fecha_recibida:     z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  fecha_vencimiento:  z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  area_responsable:   z.string().optional().or(z.literal('')),
+  fecha_entrega_area: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().or(z.literal('')),
+  descripcion:        z.string().optional().or(z.literal('')),
+  numero_factura:     z.string().optional().or(z.literal('')),
+  cuenta_pago_id:     uuidOpcional,
 });
 
 export const pagarFacturaSchema = z.object({

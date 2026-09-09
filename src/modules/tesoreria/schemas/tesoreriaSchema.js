@@ -88,6 +88,14 @@ export const crearFacturaSchema = z.object({
   descripcion:        z.string().optional().or(z.literal('')),
   numero_factura:     z.string().optional().or(z.literal('')),
   cuenta_pago_id:     uuidOpcional,
+  retencion_fuente:   z.preprocess((v) => Number(v), z.number().min(0)).default(0),
+  retencion_ica:      z.preprocess((v) => Number(v), z.number().min(0)).default(0),
+  retencion_iva:      z.preprocess((v) => Number(v), z.number().min(0)).default(0),
+}).superRefine((d, ctx) => {
+  const total = d.retencion_fuente + d.retencion_ica + d.retencion_iva;
+  if (total >= d.monto) {
+    ctx.addIssue({ code: 'custom', path: ['retencion_fuente'], message: 'Las retenciones no pueden superar el monto de la factura' });
+  }
 });
 
 export const pagarFacturaSchema = z.object({

@@ -555,6 +555,7 @@ const facturaBase = `
          u.nombre     AS registrado_por_nombre,
          ua.nombre    AS aprobado_por_nombre,
          mov.fecha    AS fecha_pago,
+         mov.referencia AS pago_referencia,
          CASE WHEN f.fecha_entrega_area IS NOT NULL
               THEN EXTRACT(DAY FROM (f.created_at - f.fecha_entrega_area::timestamptz))::int
          END AS dias_area_contable,
@@ -610,20 +611,24 @@ export const crearFactura = async (req, res, next) => {
       INSERT INTO tesoreria_facturas
         (proveedor_id, monto, fecha_emision, fecha_recibida, fecha_vencimiento,
          area_responsable, fecha_entrega_area, descripcion, numero_factura,
-         cuenta_pago_id, registrado_por, requiere_aprobacion_gerencia)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *
+         cuenta_pago_id, registrado_por, requiere_aprobacion_gerencia,
+         retencion_fuente, retencion_ica, retencion_iva)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *
     `, [
       data.proveedor_id, data.monto,
-      data.fecha_emision     || null,
+      data.fecha_emision      || null,
       data.fecha_recibida,
       data.fecha_vencimiento,
-      data.area_responsable  || null,
+      data.area_responsable   || null,
       data.fecha_entrega_area || null,
-      data.descripcion       || null,
-      data.numero_factura    || null,
-      data.cuenta_pago_id    || null,
+      data.descripcion        || null,
+      data.numero_factura     || null,
+      data.cuenta_pago_id     || null,
       req.user.id,
       requiereGerencia,
+      data.retencion_fuente,
+      data.retencion_ica,
+      data.retencion_iva,
     ]);
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -656,7 +661,7 @@ export const pagarFactura = async (req, res, next) => {
                $6, $7
         RETURNING *
       `, [
-        factura.monto,
+        factura.monto_neto,
         data.fecha_pago,
         `Pago factura — ${factura.proveedor_nombre}${factura.descripcion ? ': ' + factura.descripcion : ''}`,
         data.referencia || null,
@@ -680,6 +685,39 @@ export const pagarFactura = async (req, res, next) => {
     } finally {
       client.release();
     }
+  } catch (err) { next(err); }
+};
+
+// ── Contable — reenvío tras rechazo ───────────────────────────────────────────
+
+export const reenviarFactura = async (req, res, next) => {
+  try {
+    const { rows: [f] } = await pool.query(
+      `SELECT estado, monto FROM tesoreria_facturas WHERE id = $1`, [req.params.id]
+    );
+    if (!f) return res.status(404).json({ error: 'Factura no encontrada' });
+    if (f.estado !== 'rechazada') return res.status(400).json({ error: 'Solo se pueden reenviar facturas en estado rechazada' });
+
+    const { rows: [umbral] } = await pool.query(
+      `SELECT monto_umbral FROM tesoreria_config_umbrales WHERE tipo_operacion = 'egreso_proveedor' LIMIT 1`
+    );
+    const requiereGerencia = umbral && Number(f.monto) > Number(umbral.monto_umbral);
+
+    const { rows } = await pool.query(`
+      UPDATE tesoreria_facturas
+         SET estado                      = 'pendiente_aprobacion',
+             rechazo_motivo              = NULL,
+             aprobado_por                = NULL,
+             aprobado_at                 = NULL,
+             aprobacion_vence_at         = NULL,
+             aprobado_gerencia_por       = NULL,
+             aprobado_gerencia_at        = NULL,
+             requiere_aprobacion_gerencia = $1,
+             updated_at                  = NOW()
+       WHERE id = $2
+       RETURNING *
+    `, [requiereGerencia, req.params.id]);
+    res.json(rows[0]);
   } catch (err) { next(err); }
 };
 

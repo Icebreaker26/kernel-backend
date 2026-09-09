@@ -867,7 +867,7 @@ export const importarCSV = async (req, res, next) => {
 
     // Usar 'codigo:numero' como clave — permite múltiples créditos de la misma línea
     const descuentosItems = [];
-    const descuentosKeys  = new Set(); // evitar duplicados exactos dentro del mismo CSV
+    const descuentosKeys  = new Set();
     const codigosValidosSet = new Set(validos.map((v) => v.codigo));
 
     for (const r of registros) {
@@ -897,25 +897,111 @@ export const importarCSV = async (req, res, next) => {
       });
     }
 
+    // Acumula entradas de historial — se inserta después de obtener sincId
+    const historialEntradas = [];
+
     if (descuentosItems.length > 0) {
-      const codigos = [...new Set(descuentosItems.map((d) => d.asociado_codigo))];
-      await client.query(
-        `DELETE FROM asociado_descuentos WHERE asociado_codigo = ANY($1)`,
-        [codigos]
+      const codigosDesc = [...new Set(descuentosItems.map((d) => d.asociado_codigo))];
+
+      // Leer estado actual — solo filas de origen 'csv' para no tocar entradas manuales (Fase 3)
+      const { rows: actuales } = await client.query(
+        `SELECT id, asociado_codigo, linea_id, numero, nombre_linea,
+                valor, valor_obligacion, saldo_credito, num_cuotas,
+                fecha_vencimiento, tasa_interes, fecha_pri_descuento, is_active
+         FROM asociado_descuentos
+         WHERE asociado_codigo = ANY($1) AND origen = 'csv'`,
+        [codigosDesc]
       );
+      // Mapa de estado actual: 'codigo:numero' o 'codigo:lineaId:valor' → fila
+      const actualesMap = new Map();
+      for (const a of actuales) {
+        const k = a.numero ? `${a.asociado_codigo}:${a.numero}` : `${a.asociado_codigo}:${a.linea_id}:${a.valor}`;
+        actualesMap.set(k, a);
+      }
+
+      // Solo campos numéricos — valor_nuevo es NUMERIC(14,2), fechas no caben
+      const todosLosCampos = ['valor', 'valor_obligacion', 'saldo_credito', 'num_cuotas', 'tasa_interes'];
+
+      const ahora = new Date();
+
+      for (const item of descuentosItems) {
+        const k = item.numero
+          ? `${item.asociado_codigo}:${item.numero}`
+          : `${item.asociado_codigo}:${item.linea_id}:${item.valor}`;
+        const prev = actualesMap.get(k);
+
+        if (!prev) {
+          // Aparición nueva — registrar todos los campos con valor como entrada inicial
+          for (const campo of todosLosCampos) {
+            const vn = item[campo] ?? null;
+            if (vn !== null) {
+              historialEntradas.push({
+                asociado_codigo: item.asociado_codigo,
+                linea_id:        item.linea_id,
+                nombre_linea:    item.nombre_linea,
+                numero:          item.numero,
+                campo,
+                valor_anterior:  null,
+                valor_nuevo:     vn,
+              });
+            }
+          }
+        } else {
+          // Existente — registrar solo los campos que cambiaron
+          for (const campo of todosLosCampos) {
+            const va = prev[campo] !== undefined ? Number(prev[campo] ?? null) : null;
+            const vn = item[campo] !== undefined ? Number(item[campo] ?? null) : null;
+            // Ambos null → sin cambio. Diferencia > 0.01 para numéricos, o fechas distintas
+            const sinCambio = (va === null && vn === null) ||
+              (va !== null && vn !== null && Math.abs(va - vn) < 0.01);
+            if (!sinCambio) {
+              historialEntradas.push({
+                asociado_codigo: item.asociado_codigo,
+                linea_id:        item.linea_id,
+                nombre_linea:    item.nombre_linea,
+                numero:          item.numero,
+                campo,
+                valor_anterior:  va,
+                valor_nuevo:     vn,
+              });
+            }
+          }
+        }
+
+        actualesMap.delete(k); // lo que quede al final son los que desaparecieron del CSV
+      }
+
+      // Desaparecidos — obligaciones que ya no están en el CSV (vencidas, pagadas)
+      for (const [, prev] of actualesMap) {
+        if (!prev.is_active) continue; // ya estaba inactivo, no duplicar
+        historialEntradas.push({
+          asociado_codigo: prev.asociado_codigo,
+          linea_id:        prev.linea_id,
+          nombre_linea:    prev.nombre_linea,
+          numero:          prev.numero,
+          campo:           'is_active',
+          valor_anterior:  1,
+          valor_nuevo:     0,
+        });
+      }
+
+      // Upsert de descuentos con borrado lógico para desaparecidos
       for (let i = 0; i < descuentosItems.length; i += 200) {
         const lote = descuentosItems.slice(i, i + 200);
-        const vals = lote.map((_, j) => `($${j*11+1},$${j*11+2},$${j*11+3},$${j*11+4},$${j*11+5},$${j*11+6},$${j*11+7},$${j*11+8},$${j*11+9},$${j*11+10},$${j*11+11})`).join(',');
+        const vals = lote.map((_, j) => {
+          const b = j * 12;
+          return `($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6},$${b+7},$${b+8},$${b+9},$${b+10},$${b+11},$${b+12})`;
+        }).join(',');
         const params = lote.flatMap((d) => [
           d.asociado_codigo, d.linea_id, d.nombre_linea, d.valor, d.numero,
-          d.valor_obligacion, d.saldo_credito, d.num_cuotas, d.fecha_vencimiento, d.tasa_interes,
-          d.fecha_pri_descuento,
+          d.valor_obligacion, d.saldo_credito, d.num_cuotas, d.fecha_vencimiento,
+          d.tasa_interes, d.fecha_pri_descuento, ahora,
         ]);
         await client.query(
           `INSERT INTO asociado_descuentos
              (asociado_codigo, linea_id, nombre_linea, valor, numero,
-              valor_obligacion, saldo_credito, num_cuotas, fecha_vencimiento, tasa_interes,
-              fecha_pri_descuento)
+              valor_obligacion, saldo_credito, num_cuotas, fecha_vencimiento,
+              tasa_interes, fecha_pri_descuento, ultima_vez_en_csv)
            VALUES ${vals}
            ON CONFLICT (asociado_codigo, numero) DO UPDATE
              SET linea_id            = EXCLUDED.linea_id,
@@ -927,11 +1013,32 @@ export const importarCSV = async (req, res, next) => {
                  fecha_vencimiento   = EXCLUDED.fecha_vencimiento,
                  tasa_interes        = EXCLUDED.tasa_interes,
                  fecha_pri_descuento = EXCLUDED.fecha_pri_descuento,
+                 ultima_vez_en_csv   = EXCLUDED.ultima_vez_en_csv,
+                 is_active           = true,
                  updated_at          = NOW()
            WHERE asociado_descuentos.numero IS NOT NULL`,
           params
         );
       }
+
+      // Marcar como inactivos los que desaparecieron del CSV (borrado lógico)
+      const keysEnCSV = new Set(descuentosItems.map((d) =>
+        d.numero ? `${d.asociado_codigo}:${d.numero}` : `${d.asociado_codigo}:${d.linea_id}:${d.valor}`
+      ));
+      const idsDesaparecidos = actuales
+        .filter((a) => {
+          const k = a.numero ? `${a.asociado_codigo}:${a.numero}` : `${a.asociado_codigo}:${a.linea_id}:${a.valor}`;
+          return !keysEnCSV.has(k) && a.is_active;
+        })
+        .map((a) => a.id);
+
+      if (idsDesaparecidos.length > 0) {
+        await client.query(
+          `UPDATE asociado_descuentos SET is_active = false, updated_at = NOW() WHERE id = ANY($1)`,
+          [idsDesaparecidos]
+        );
+      }
+
     }
 
     // Auditoría
@@ -954,6 +1061,30 @@ export const importarCSV = async (req, res, next) => {
       [req.user.id, req.file.originalname, registrosFiltrados.length, nuevos, actualizados, retirados,
        errores.length, boletosLiberados, JSON.stringify(detalle)]
     );
+
+    // Insertar historial de descuentos con sync_id ya disponible
+    if (historialEntradas.length > 0) {
+      const ahoraHist = new Date();
+      for (let i = 0; i < historialEntradas.length; i += 200) {
+        const lote = historialEntradas.slice(i, i + 200);
+        const vals = lote.map((_, j) => {
+          const b = j * 9;
+          return `($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6},$${b+7},$${b+8},$${b+9})`;
+        }).join(',');
+        const params = lote.flatMap((h) => [
+          h.asociado_codigo, h.linea_id, h.nombre_linea, h.numero ?? null,
+          h.campo, h.valor_anterior ?? null, h.valor_nuevo ?? null,
+          sincId, ahoraHist,
+        ]);
+        await client.query(
+          `INSERT INTO asociado_descuentos_historial
+             (asociado_codigo, linea_id, nombre_linea, numero,
+              campo, valor_anterior, valor_nuevo, sync_id, changed_at)
+           VALUES ${vals}`,
+          params
+        );
+      }
+    }
 
     await client.query('COMMIT');
 
@@ -1547,6 +1678,21 @@ export const aceptarTerminos = async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+};
+
+export const historialDescuentos = async (req, res, next) => {
+  try {
+    const { codigo } = req.params;
+    const { rows } = await pool.query(
+      `SELECT linea_id, nombre_linea, numero, campo, valor_anterior, valor_nuevo, changed_at, sync_id
+       FROM asociado_descuentos_historial
+       WHERE asociado_codigo = $1
+       ORDER BY changed_at DESC
+       LIMIT 500`,
+      [codigo]
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
 };
 
 export const historialAporte = async (req, res, next) => {

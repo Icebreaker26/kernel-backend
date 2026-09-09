@@ -312,7 +312,7 @@ describe('Facturas — flujo completo', () => {
     expect(Number(rows[0].monto)).toBe(350000);
   });
 
-  test('Factura queda en estado pagada con días calculados', async () => {
+  test('Factura queda en estado pagada con días calculados y pago_referencia', async () => {
     const ag = agentTsr(); await loginTsr(ag);
     const res = await ag.get(`/api/tesoreria/facturas/${facturaId}`);
     expect(res.body.estado).toBe('pagada');
@@ -321,6 +321,8 @@ describe('Facturas — flujo completo', () => {
     expect(typeof res.body.dias_control_interno).toBe('number');
     expect(typeof res.body.dias_tesoreria).toBe('number');
     expect(res.body.dias_tesoreria).toBeGreaterThanOrEqual(0);
+    // pago_referencia viene del movimiento vinculado
+    expect(res.body.pago_referencia).toBe('TRF-001');
   });
 
   test('PUT /tesoreria/facturas/:id/pagar ya pagada → 400', async () => {
@@ -502,5 +504,72 @@ describe('Facturas — flujo de rechazo', () => {
     expect(rechRes.status).toBe(200);
     expect(rechRes.body.estado).toBe('rechazada');
     expect(rechRes.body.rechazo_motivo).toBe('Factura duplicada');
+  });
+});
+
+// ── Retenciones — egreso usa monto_neto ───────────────────────────────────────
+describe('Facturas — retenciones en pago', () => {
+  let facturaRetId, cuentaRetId;
+
+  beforeAll(async () => {
+    const { rows: [c] } = await pool.query(
+      `INSERT INTO tesoreria_cuentas (nombre, tipo, saldo_inicial) VALUES ('Cuenta Ret Test', 'banco', 2000000) RETURNING id`
+    );
+    cuentaRetId = c.id;
+  });
+
+  afterAll(async () => {
+    if (facturaRetId) {
+      await pool.query(`UPDATE tesoreria_facturas SET movimiento_id = NULL WHERE id = $1`, [facturaRetId]);
+      await pool.query(`DELETE FROM tesoreria_movimientos WHERE descripcion LIKE '%Ret Fuente Test%'`);
+      await pool.query(`DELETE FROM tesoreria_facturas WHERE id = $1`, [facturaRetId]);
+    }
+    if (cuentaRetId) await pool.query(`DELETE FROM tesoreria_cuentas WHERE id = $1`, [cuentaRetId]);
+  });
+
+  test('Factura con retenciones: monto_neto calculado correctamente', async () => {
+    const agTsr = agentTsr(); await loginTsr(agTsr);
+    const res = await agTsr.post('/api/tesoreria/facturas').send({
+      proveedor_id:      proveedorRecId,
+      monto:             1000000,
+      retencion_fuente:  35000,    // 3.5%
+      retencion_ica:     11600,    // 1.16%
+      fecha_recibida:    '2026-09-01',
+      fecha_vencimiento: '2026-09-30',
+      descripcion:       'Ret Fuente Test',
+    });
+    expect(res.status).toBe(201);
+    expect(Number(res.body.monto_neto)).toBe(953400);
+    facturaRetId = res.body.id;
+  });
+
+  test('Al pagar, el movimiento de egreso se crea por monto_neto', async () => {
+    // CI aprueba
+    const agCi = agentCi(); await loginCi(agCi);
+    await agCi.put(`/api/control_interno/facturas/${facturaRetId}/aprobar`);
+
+    // Tesorería paga
+    const agTsr = agentTsr(); await loginTsr(agTsr);
+    const res = await agTsr.put(`/api/tesoreria/facturas/${facturaRetId}/pagar`).send({
+      cuenta_pago_id: cuentaRetId,
+      fecha_pago:     '2026-09-15',
+      referencia:     'TRF-RET-001',
+    });
+    expect(res.status).toBe(200);
+
+    // Verificar monto del movimiento = monto_neto (953400), no monto bruto (1000000)
+    const { rows } = await pool.query(
+      `SELECT monto FROM tesoreria_movimientos WHERE id = $1`, [res.body.movimiento_id]
+    );
+    expect(Number(rows[0].monto)).toBe(953400);
+  });
+
+  test('GET factura pagada con retenciones → pago_referencia presente', async () => {
+    const agTsr = agentTsr(); await loginTsr(agTsr);
+    const res = await agTsr.get(`/api/tesoreria/facturas/${facturaRetId}`);
+    expect(res.status).toBe(200);
+    expect(res.body.pago_referencia).toBe('TRF-RET-001');
+    expect(Number(res.body.monto_neto)).toBe(953400);
+    expect(Number(res.body.monto)).toBe(1000000);
   });
 });

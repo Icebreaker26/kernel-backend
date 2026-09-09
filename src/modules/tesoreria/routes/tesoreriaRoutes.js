@@ -26,8 +26,9 @@ router.post('/periodos',          checkPermission('tesoreria', 'WRITE'),  ctrl.c
 router.put('/periodos/:id/cerrar', checkPermission('tesoreria', 'WRITE'), ctrl.cerrarPeriodo);
 
 // ── Movimientos ────────────────────────────────────────────────────────────────
-router.get('/movimientos',   checkPermission('tesoreria', 'READ'),   ctrl.listarMovimientos);
-router.post('/movimientos',  checkPermission('tesoreria', 'WRITE'),  ctrl.crearMovimiento);
+router.get('/movimientos/export', checkPermission('tesoreria', 'READ'),  ctrl.exportarMovimientos);
+router.get('/movimientos',        checkPermission('tesoreria', 'READ'),  ctrl.listarMovimientos);
+router.post('/movimientos',       checkPermission('tesoreria', 'WRITE'), ctrl.crearMovimiento);
 
 // ── Proveedores ────────────────────────────────────────────────────────────────
 router.get('/proveedores',      checkPermission('tesoreria', 'READ'),   ctrl.listarProveedores);
@@ -35,9 +36,15 @@ router.post('/proveedores',     checkPermission('tesoreria', 'WRITE'),  ctrl.cre
 router.put('/proveedores/:id',  checkPermission('tesoreria', 'WRITE'),  ctrl.actualizarProveedor);
 
 // ── Facturas ───────────────────────────────────────────────────────────────────
-router.get('/facturas',              checkPermission('tesoreria', 'READ'),   ctrl.listarFacturas);
-router.get('/facturas/:id',          checkPermission('tesoreria', 'READ'),   ctrl.getFactura);
-router.post('/facturas',             checkPermission('tesoreria', 'WRITE'),  ctrl.crearFactura);
-router.put('/facturas/:id/pagar',    checkPermission('tesoreria', 'WRITE'),  ctrl.pagarFactura);
+router.get('/facturas',                        checkPermission('tesoreria', 'READ'),   ctrl.listarFacturas);
+router.get('/facturas/:id',                    checkPermission('tesoreria', 'READ'),   ctrl.getFactura);
+router.post('/facturas',                       checkPermission('tesoreria', 'WRITE'),  ctrl.crearFactura);
+router.put('/facturas/:id/pagar',              checkPermission('tesoreria', 'WRITE'),  ctrl.pagarFactura);
+router.put('/facturas/:id/aprobar-gerencia',   checkPermission('tesoreria', 'WRITE'),  ctrl.aprobarGerencia);
+
+// ── Config — Umbrales ──────────────────────────────────────────────────────────
+router.get('/config/umbrales',     checkPermission('tesoreria', 'READ'),   ctrl.listarUmbrales);
+router.post('/config/umbrales',    checkPermission('tesoreria', 'WRITE'),  ctrl.crearUmbral);
+router.put('/config/umbrales/:id', checkPermission('tesoreria', 'WRITE'),  ctrl.actualizarUmbral);
 
 export default router;

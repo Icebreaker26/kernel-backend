@@ -5,7 +5,7 @@ import jwt from 'jsonwebtoken';
 import { createApp } from './createApp.js';
 import { env } from './config/env.js';
 import { initNotificationService } from './services/notificationService.js';
-import { startScheduler } from './services/scheduler.js';
+import { startScheduler, startSchedulerTesoreria } from './services/scheduler.js';
 import { startDispatcher } from './services/mailingDispatcher.js';
 import logger from './config/logger.js';
 
@@ -45,6 +45,7 @@ io.on('connection', (socket) => {
 
 initNotificationService(io);
 startScheduler();
+startSchedulerTesoreria();
 startDispatcher();
 
 httpServer.listen(env.PORT, () => {

@@ -101,6 +101,21 @@ export const rechazarFacturaSchema = z.object({
   motivo: z.string().min(1),
 });
 
+// ── Umbrales de aprobación ─────────────────────────────────────────────────────
+
+export const crearUmbralSchema = z.object({
+  tipo_operacion:   z.string().min(1),
+  monto_umbral:     z.preprocess((v) => Number(v), z.number().positive()),
+  descripcion:      z.string().optional().or(z.literal('')),
+  dias_vencimiento: z.preprocess((v) => Number(v), z.number().int().min(1)).default(7),
+});
+
+export const actualizarUmbralSchema = z.object({
+  monto_umbral:     z.preprocess((v) => Number(v), z.number().positive()).optional(),
+  descripcion:      z.string().optional().or(z.literal('')),
+  dias_vencimiento: z.preprocess((v) => Number(v), z.number().int().min(1)).optional(),
+}).strict();
+
 export const crearMovimientoSchema = z.object({
   tipo:                  z.enum(['ingreso', 'egreso', 'traslado']),
   monto:                 z.preprocess((v) => Number(v), z.number().positive()),

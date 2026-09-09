@@ -1,4 +1,5 @@
 import pool from '../../../db/database.js';
+import ExcelJS from 'exceljs';
 import {
   crearCuentaSchema, actualizarCuentaSchema,
   crearCategoriaSchema, actualizarCategoriaSchema,
@@ -6,6 +7,7 @@ import {
   crearMovimientoSchema,
   crearProveedorSchema, actualizarProveedorSchema,
   crearFacturaSchema, pagarFacturaSchema, rechazarFacturaSchema,
+  crearUmbralSchema, actualizarUmbralSchema,
 } from '../schemas/tesoreriaSchema.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -212,6 +214,81 @@ export const listarMovimientos = async (req, res, next) => {
     );
 
     res.json({ movimientos: rows, total: Number(total) });
+  } catch (err) { next(err); }
+};
+
+export const exportarMovimientos = async (req, res, next) => {
+  try {
+    const { cuenta_id, periodo_id, tipo, categoria_id, desde, hasta } = req.query;
+    const conds = [];
+    const vals  = [];
+    let i = 1;
+    if (cuenta_id)    { conds.push(`(m.cuenta_id = $${i} OR m.cuenta_destino_id = $${i})`); vals.push(cuenta_id); i++; }
+    if (periodo_id)   { conds.push(`m.periodo_id = $${i++}`);   vals.push(periodo_id); }
+    if (tipo)         { conds.push(`m.tipo = $${i++}`);          vals.push(tipo); }
+    if (categoria_id) { conds.push(`m.categoria_id = $${i++}`);  vals.push(categoria_id); }
+    if (desde)        { conds.push(`m.fecha >= $${i++}`);        vals.push(desde); }
+    if (hasta)        { conds.push(`m.fecha <= $${i++}`);        vals.push(hasta); }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+    const { rows } = await pool.query(`
+      SELECT m.fecha, m.tipo, m.monto, m.descripcion, m.referencia,
+             c.nombre AS cuenta, cd.nombre AS cuenta_destino,
+             cat.nombre AS categoria, p.nombre AS periodo,
+             u.nombre AS registrado_por
+        FROM tesoreria_movimientos m
+        LEFT JOIN tesoreria_cuentas    c   ON c.id   = m.cuenta_id
+        LEFT JOIN tesoreria_cuentas    cd  ON cd.id  = m.cuenta_destino_id
+        LEFT JOIN tesoreria_categorias cat ON cat.id = m.categoria_id
+        LEFT JOIN tesoreria_periodos   p   ON p.id   = m.periodo_id
+        LEFT JOIN global_usuarios      u   ON u.id   = m.registrado_por
+       ${where}
+       ORDER BY m.fecha DESC, m.created_at DESC
+    `, vals);
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'Kernel — Tesorería';
+    const ws = wb.addWorksheet('Movimientos');
+
+    ws.columns = [
+      { header: 'Fecha',          key: 'fecha',          width: 14 },
+      { header: 'Tipo',           key: 'tipo',           width: 12 },
+      { header: 'Monto (COP)',    key: 'monto',          width: 18 },
+      { header: 'Descripción',    key: 'descripcion',    width: 35 },
+      { header: 'Referencia',     key: 'referencia',     width: 20 },
+      { header: 'Cuenta',         key: 'cuenta',         width: 22 },
+      { header: 'Cuenta Destino', key: 'cuenta_destino', width: 22 },
+      { header: 'Categoría',      key: 'categoria',      width: 18 },
+      { header: 'Período',        key: 'periodo',        width: 18 },
+      { header: 'Registrado Por', key: 'registrado_por', width: 22 },
+    ];
+
+    ws.getRow(1).font = { bold: true };
+    ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F1B2E' } };
+    ws.getRow(1).font = { bold: true, color: { argb: 'FF34D399' } };
+
+    for (const r of rows) {
+      ws.addRow({
+        fecha:          r.fecha?.slice(0, 10) || '',
+        tipo:           r.tipo,
+        monto:          Number(r.monto),
+        descripcion:    r.descripcion || '',
+        referencia:     r.referencia || '',
+        cuenta:         r.cuenta || '',
+        cuenta_destino: r.cuenta_destino || '',
+        categoria:      r.categoria || '',
+        periodo:        r.periodo || '',
+        registrado_por: r.registrado_por || '',
+      });
+    }
+
+    const montoCol = ws.getColumn('monto');
+    montoCol.numFmt = '#,##0';
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="movimientos_${new Date().toISOString().slice(0,10)}.xlsx"`);
+    await wb.xlsx.write(res);
+    res.end();
   } catch (err) { next(err); }
 };
 
@@ -520,12 +597,18 @@ export const getFactura = async (req, res, next) => {
 export const crearFactura = async (req, res, next) => {
   try {
     const data = crearFacturaSchema.parse(req.body);
+
+    const { rows: [umbral] } = await pool.query(
+      `SELECT monto_umbral FROM tesoreria_config_umbrales WHERE tipo_operacion = 'egreso_proveedor' LIMIT 1`
+    );
+    const requiereGerencia = umbral && data.monto > Number(umbral.monto_umbral);
+
     const { rows } = await pool.query(`
       INSERT INTO tesoreria_facturas
         (proveedor_id, monto, fecha_emision, fecha_recibida, fecha_vencimiento,
          area_responsable, fecha_entrega_area, descripcion, numero_factura,
-         cuenta_pago_id, registrado_por)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *
+         cuenta_pago_id, registrado_por, requiere_aprobacion_gerencia)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *
     `, [
       data.proveedor_id, data.monto,
       data.fecha_emision     || null,
@@ -537,6 +620,7 @@ export const crearFactura = async (req, res, next) => {
       data.numero_factura    || null,
       data.cuenta_pago_id    || null,
       req.user.id,
+      requiereGerencia,
     ]);
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -551,6 +635,10 @@ export const pagarFactura = async (req, res, next) => {
     );
     if (!factura) return res.status(404).json({ error: 'Factura no encontrada' });
     if (factura.estado !== 'aprobada') return res.status(400).json({ error: 'La factura debe estar aprobada para pagarse' });
+    if (factura.requiere_aprobacion_gerencia && !factura.aprobado_gerencia_at)
+      return res.status(400).json({ error: 'Esta factura requiere aprobación de Gerencia antes de pagarse' });
+    if (factura.aprobacion_vence_at && new Date(factura.aprobacion_vence_at) < new Date())
+      return res.status(400).json({ error: 'La aprobación de Control Interno ha vencido — debe ser re-aprobada' });
 
     const client = await pool.connect();
     try {
@@ -601,9 +689,36 @@ export const aprobarFactura = async (req, res, next) => {
     );
     if (!f) return res.status(404).json({ error: 'Factura no encontrada' });
     if (f.estado !== 'pendiente_aprobacion') return res.status(400).json({ error: `Estado actual: ${f.estado}` });
+
+    const { rows: [umbral] } = await pool.query(
+      `SELECT dias_vencimiento FROM tesoreria_config_umbrales WHERE tipo_operacion = 'egreso_proveedor' LIMIT 1`
+    );
+    const dias = umbral?.dias_vencimiento ?? 7;
+
     const { rows } = await pool.query(`
       UPDATE tesoreria_facturas
-         SET estado = 'aprobada', aprobado_por = $1, aprobado_at = NOW(), updated_at = NOW()
+         SET estado = 'aprobada', aprobado_por = $1, aprobado_at = NOW(),
+             aprobacion_vence_at = NOW() + ($2 || ' days')::interval,
+             updated_at = NOW()
+       WHERE id = $3 RETURNING *
+    `, [req.user.id, dias, req.params.id]);
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+};
+
+export const aprobarGerencia = async (req, res, next) => {
+  try {
+    const { rows: [f] } = await pool.query(
+      `SELECT estado, requiere_aprobacion_gerencia, aprobado_gerencia_at FROM tesoreria_facturas WHERE id = $1`,
+      [req.params.id]
+    );
+    if (!f) return res.status(404).json({ error: 'Factura no encontrada' });
+    if (!f.requiere_aprobacion_gerencia) return res.status(400).json({ error: 'Esta factura no requiere aprobación de Gerencia' });
+    if (f.aprobado_gerencia_at) return res.status(400).json({ error: 'Ya fue aprobada por Gerencia' });
+    if (f.estado !== 'aprobada') return res.status(400).json({ error: 'La factura debe estar aprobada por Control Interno primero' });
+    const { rows } = await pool.query(`
+      UPDATE tesoreria_facturas
+         SET aprobado_gerencia_por = $1, aprobado_gerencia_at = NOW(), updated_at = NOW()
        WHERE id = $2 RETURNING *
     `, [req.user.id, req.params.id]);
     res.json(rows[0]);
@@ -623,6 +738,46 @@ export const rechazarFactura = async (req, res, next) => {
          SET estado = 'rechazada', rechazo_motivo = $1, aprobado_por = $2, aprobado_at = NOW(), updated_at = NOW()
        WHERE id = $3 RETURNING *
     `, [motivo, req.user.id, req.params.id]);
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+};
+
+// ── Umbrales de aprobación ─────────────────────────────────────────────────────
+
+export const listarUmbrales = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT * FROM tesoreria_config_umbrales ORDER BY tipo_operacion`);
+    res.json(rows);
+  } catch (err) { next(err); }
+};
+
+export const crearUmbral = async (req, res, next) => {
+  try {
+    const data = crearUmbralSchema.parse(req.body);
+    const { rows } = await pool.query(`
+      INSERT INTO tesoreria_config_umbrales (tipo_operacion, monto_umbral, descripcion, dias_vencimiento)
+      VALUES ($1, $2, $3, $4) RETURNING *
+    `, [data.tipo_operacion, data.monto_umbral, data.descripcion || null, data.dias_vencimiento]);
+    res.status(201).json(rows[0]);
+  } catch (err) { next(err); }
+};
+
+export const actualizarUmbral = async (req, res, next) => {
+  try {
+    const data = actualizarUmbralSchema.parse(req.body);
+    const sets = [];
+    const vals = [];
+    let i = 1;
+    if (data.monto_umbral     !== undefined) { sets.push(`monto_umbral = $${i++}`);     vals.push(data.monto_umbral); }
+    if (data.descripcion      !== undefined) { sets.push(`descripcion = $${i++}`);      vals.push(data.descripcion || null); }
+    if (data.dias_vencimiento !== undefined) { sets.push(`dias_vencimiento = $${i++}`); vals.push(data.dias_vencimiento); }
+    if (!sets.length) return res.status(400).json({ error: 'Sin campos a actualizar' });
+    sets.push(`updated_at = NOW()`);
+    vals.push(req.params.id);
+    const { rows } = await pool.query(
+      `UPDATE tesoreria_config_umbrales SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`, vals
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Umbral no encontrado' });
     res.json(rows[0]);
   } catch (err) { next(err); }
 };

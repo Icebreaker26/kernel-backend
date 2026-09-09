@@ -201,21 +201,37 @@ describe('Facturas — Validación Zod', () => {
     });
     expect(res.status).toBe(400);
   });
+  test('POST fecha_emision con formato inválido → 400', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.post('/api/tesoreria/facturas').send({
+      proveedor_id: proveedorRecId, monto: 100000,
+      fecha_emision: '01-09-2026',
+      fecha_recibida: '2026-09-01', fecha_vencimiento: '2026-09-30',
+    });
+    expect(res.status).toBe(400);
+  });
 });
 
 describe('Facturas — flujo completo', () => {
-  test('POST /tesoreria/facturas → 201, estado pendiente_aprobacion', async () => {
+  test('POST /tesoreria/facturas con campos completos → 201', async () => {
     const ag = agentTsr(); await loginTsr(ag);
     const res = await ag.post('/api/tesoreria/facturas').send({
-      proveedor_id: proveedorRecId,
-      monto: 350000,
-      fecha_recibida: '2026-09-01',
-      fecha_vencimiento: '2026-09-20',
-      descripcion: 'Factura sept 2026',
-      soporte: 'FAC-2026-001',
+      proveedor_id:       proveedorRecId,
+      monto:              350000,
+      fecha_emision:      '2026-08-28',
+      fecha_recibida:     '2026-09-01',
+      fecha_vencimiento:  '2026-09-20',
+      area_responsable:   'Administración',
+      fecha_entrega_area: '2026-09-02',
+      descripcion:        'Factura sept 2026',
+      numero_factura:     'FAC-2026-001',
     });
     expect(res.status).toBe(201);
     expect(res.body.estado).toBe('pendiente_aprobacion');
+    expect(res.body.numero_factura).toBe('FAC-2026-001');
+    expect(res.body.area_responsable).toBe('Administración');
+    expect(res.body.fecha_emision).toMatch(/^2026-08-28/);
+    expect(res.body.fecha_entrega_area).toMatch(/^2026-09-02/);
     facturaId = res.body.id;
   });
 
@@ -227,11 +243,19 @@ describe('Facturas — flujo completo', () => {
     expect(res.body.some(f => f.id === facturaId)).toBe(true);
   });
 
-  test('GET /tesoreria/facturas/:id → 200 con proveedor_nombre', async () => {
+  test('GET /tesoreria/facturas/:id → campos enriquecidos correctos', async () => {
     const ag = agentTsr(); await loginTsr(ag);
     const res = await ag.get(`/api/tesoreria/facturas/${facturaId}`);
     expect(res.status).toBe(200);
     expect(res.body.proveedor_nombre).toBe('Proveedor Recurrente Test');
+    expect(res.body.proveedor_nit).toBe('800.000.001-1');
+    expect(res.body.numero_factura).toBe('FAC-2026-001');
+    expect(res.body.area_responsable).toBe('Administración');
+    // dias_area_contable: created_at - fecha_entrega_area (≈ 0 días en test)
+    expect(res.body.dias_area_contable).toBeGreaterThanOrEqual(0);
+    // antes de aprobar: dias_control_interno aún null
+    expect(res.body.dias_control_interno).toBeNull();
+    expect(res.body.fecha_pago).toBeNull();
   });
 
   test('PUT /tesoreria/facturas/:id/pagar en estado pendiente → 400', async () => {
@@ -288,11 +312,15 @@ describe('Facturas — flujo completo', () => {
     expect(Number(rows[0].monto)).toBe(350000);
   });
 
-  test('Factura queda en estado pagada', async () => {
+  test('Factura queda en estado pagada con días calculados', async () => {
     const ag = agentTsr(); await loginTsr(ag);
     const res = await ag.get(`/api/tesoreria/facturas/${facturaId}`);
     expect(res.body.estado).toBe('pagada');
     expect(res.body.movimiento_id).not.toBeNull();
+    expect(res.body.fecha_pago).toMatch(/^2026-09-10/);
+    expect(typeof res.body.dias_control_interno).toBe('number');
+    expect(typeof res.body.dias_tesoreria).toBe('number');
+    expect(res.body.dias_tesoreria).toBeGreaterThanOrEqual(0);
   });
 
   test('PUT /tesoreria/facturas/:id/pagar ya pagada → 400', async () => {

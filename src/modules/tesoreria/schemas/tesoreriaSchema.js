@@ -42,6 +42,8 @@ export const crearPeriodoSchema = z.object({
 
 // ── Movimientos ────────────────────────────────────────────────────────────────
 
+const uuidOpcional = z.string().uuid().nullable().optional().or(z.literal(''));
+
 export const crearMovimientoSchema = z.object({
   tipo:                  z.enum(['ingreso', 'egreso', 'traslado']),
   monto:                 z.preprocess((v) => Number(v), z.number().positive()),
@@ -49,15 +51,15 @@ export const crearMovimientoSchema = z.object({
   descripcion:           z.string().optional().or(z.literal('')),
   referencia:            z.string().optional().or(z.literal('')),
   cuenta_id:             z.string().uuid(),
-  cuenta_destino_id:     z.string().uuid().nullable().optional(),
-  categoria_id:          z.string().uuid().nullable().optional(),
-  periodo_id:            z.string().uuid().nullable().optional(),
-  corrige_movimiento_id: z.string().uuid().nullable().optional(),
+  cuenta_destino_id:     uuidOpcional,
+  categoria_id:          uuidOpcional,
+  periodo_id:            uuidOpcional,
+  corrige_movimiento_id: uuidOpcional,
 }).superRefine((data, ctx) => {
-  if (data.tipo === 'traslado' && !data.cuenta_destino_id) {
+  if (data.tipo === 'traslado' && (!data.cuenta_destino_id || data.cuenta_destino_id === '')) {
     ctx.addIssue({ code: 'custom', path: ['cuenta_destino_id'], message: 'Requerido para traslados' });
   }
-  if (data.tipo === 'traslado' && data.cuenta_id === data.cuenta_destino_id) {
+  if (data.tipo === 'traslado' && data.cuenta_destino_id && data.cuenta_id === data.cuenta_destino_id) {
     ctx.addIssue({ code: 'custom', path: ['cuenta_destino_id'], message: 'Origen y destino deben ser distintos' });
   }
 });

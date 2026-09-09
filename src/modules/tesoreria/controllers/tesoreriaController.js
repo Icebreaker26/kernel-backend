@@ -232,7 +232,7 @@ export const exportarMovimientos = async (req, res, next) => {
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
     const { rows } = await pool.query(`
-      SELECT m.fecha, m.tipo, m.monto, m.descripcion, m.referencia,
+      SELECT m.fecha, m.tipo, m.monto, m.descripcion, m.referencia, m.tercero_nombre,
              c.nombre AS cuenta, cd.nombre AS cuenta_destino,
              cat.nombre AS categoria, p.nombre AS periodo,
              u.nombre AS registrado_por
@@ -251,16 +251,17 @@ export const exportarMovimientos = async (req, res, next) => {
     const ws = wb.addWorksheet('Movimientos');
 
     ws.columns = [
-      { header: 'Fecha',          key: 'fecha',          width: 14 },
-      { header: 'Tipo',           key: 'tipo',           width: 12 },
-      { header: 'Monto (COP)',    key: 'monto',          width: 18 },
-      { header: 'Descripción',    key: 'descripcion',    width: 35 },
-      { header: 'Referencia',     key: 'referencia',     width: 20 },
-      { header: 'Cuenta',         key: 'cuenta',         width: 22 },
-      { header: 'Cuenta Destino', key: 'cuenta_destino', width: 22 },
-      { header: 'Categoría',      key: 'categoria',      width: 18 },
-      { header: 'Período',        key: 'periodo',        width: 18 },
-      { header: 'Registrado Por', key: 'registrado_por', width: 22 },
+      { header: 'Fecha',          key: 'fecha',           width: 14 },
+      { header: 'Tipo',           key: 'tipo',            width: 12 },
+      { header: 'Monto (COP)',    key: 'monto',           width: 18 },
+      { header: 'Tercero',        key: 'tercero_nombre',  width: 28 },
+      { header: 'Descripción',    key: 'descripcion',     width: 35 },
+      { header: 'Referencia',     key: 'referencia',      width: 20 },
+      { header: 'Cuenta',         key: 'cuenta',          width: 22 },
+      { header: 'Cuenta Destino', key: 'cuenta_destino',  width: 22 },
+      { header: 'Categoría',      key: 'categoria',       width: 18 },
+      { header: 'Período',        key: 'periodo',         width: 18 },
+      { header: 'Registrado Por', key: 'registrado_por',  width: 22 },
     ];
 
     ws.getRow(1).font = { bold: true };
@@ -272,6 +273,7 @@ export const exportarMovimientos = async (req, res, next) => {
         fecha:          r.fecha?.slice(0, 10) || '',
         tipo:           r.tipo,
         monto:          Number(r.monto),
+        tercero_nombre: r.tercero_nombre || '',
         descripcion:    r.descripcion || '',
         referencia:     r.referencia || '',
         cuenta:         r.cuenta || '',
@@ -307,13 +309,14 @@ export const crearMovimiento = async (req, res, next) => {
 
     const { rows } = await pool.query(`
       INSERT INTO tesoreria_movimientos
-        (tipo, monto, fecha, descripcion, referencia, cuenta_id, cuenta_destino_id,
+        (tipo, monto, fecha, descripcion, referencia, tercero_nombre, cuenta_id, cuenta_destino_id,
          categoria_id, periodo_id, registrado_por, corrige_movimiento_id)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
       RETURNING *
     `, [
       data.tipo, data.monto, data.fecha,
       data.descripcion || null, data.referencia || null,
+      data.tercero_nombre || null,
       data.cuenta_id, data.cuenta_destino_id || null,
       data.categoria_id || null, data.periodo_id || null,
       req.user.id, data.corrige_movimiento_id || null,

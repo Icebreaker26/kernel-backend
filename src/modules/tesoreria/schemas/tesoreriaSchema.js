@@ -122,6 +122,7 @@ export const crearMovimientoSchema = z.object({
   fecha:                 z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   descripcion:           z.string().optional().or(z.literal('')),
   referencia:            z.string().optional().or(z.literal('')),
+  tercero_nombre:        z.string().max(200).optional().or(z.literal('')),
   cuenta_id:             z.string().uuid(),
   cuenta_destino_id:     uuidOpcional,
   categoria_id:          uuidOpcional,

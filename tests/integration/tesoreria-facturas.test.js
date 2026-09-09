@@ -339,6 +339,143 @@ describe('Facturas — flujo completo', () => {
   });
 });
 
+// ── Export Excel ──────────────────────────────────────────────────────────────
+describe('Movimientos — Export Excel', () => {
+  test('GET /tesoreria/movimientos/export → 200 con content-type xlsx', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.get('/api/tesoreria/movimientos/export');
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/spreadsheetml/);
+    expect(res.headers['content-disposition']).toMatch(/attachment/);
+  });
+
+  test('GET sin token → 401', async () => {
+    expect((await request(app).get('/api/tesoreria/movimientos/export')).status).toBe(401);
+  });
+});
+
+// ── Umbrales de aprobación ────────────────────────────────────────────────────
+describe('Config — Umbrales', () => {
+  let umbralId;
+
+  test('GET /config/umbrales → lista con al menos el umbral semilla', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.get('/api/tesoreria/config/umbrales');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    const u = res.body.find(u => u.tipo_operacion === 'egreso_proveedor');
+    expect(u).toBeDefined();
+    expect(Number(u.monto_umbral)).toBe(5000000);
+    expect(u.dias_vencimiento).toBe(7);
+    umbralId = u.id;
+  });
+
+  test('PUT /config/umbrales/:id → 200 actualiza dias_vencimiento', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.put(`/api/tesoreria/config/umbrales/${umbralId}`).send({
+      dias_vencimiento: 10,
+      descripcion: 'Umbral actualizado en test',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.dias_vencimiento).toBe(10);
+    expect(res.body.descripcion).toBe('Umbral actualizado en test');
+    // Restaurar para no afectar otros tests
+    await ag.put(`/api/tesoreria/config/umbrales/${umbralId}`).send({ dias_vencimiento: 7, descripcion: 'Pagos a proveedores que requieren aprobación de Gerencia' });
+  });
+
+  test('PUT campo no permitido (strict) → 400', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.put(`/api/tesoreria/config/umbrales/${umbralId}`).send({ tipo_operacion: 'hacked' });
+    expect(res.status).toBe(400);
+  });
+});
+
+// ── Flujo con aprobación de Gerencia ─────────────────────────────────────────
+describe('Facturas — flujo umbral Gerencia', () => {
+  let facturaGrandeId;
+  let cuentaGrandeId;
+
+  beforeAll(async () => {
+    const { rows: [c] } = await pool.query(
+      `INSERT INTO tesoreria_cuentas (nombre, tipo, saldo_inicial) VALUES ('Cuenta Grande Test', 'banco', 20000000) RETURNING id`
+    );
+    cuentaGrandeId = c.id;
+  });
+
+  afterAll(async () => {
+    if (facturaGrandeId) {
+      await pool.query(`UPDATE tesoreria_facturas SET movimiento_id = NULL WHERE id = $1`, [facturaGrandeId]);
+      await pool.query(`DELETE FROM tesoreria_movimientos WHERE descripcion LIKE '%Proveedor Recurrente Test%' AND monto = 6000000`);
+      await pool.query(`DELETE FROM tesoreria_facturas WHERE id = $1`, [facturaGrandeId]);
+    }
+    if (cuentaGrandeId) await pool.query(`DELETE FROM tesoreria_cuentas WHERE id = $1`, [cuentaGrandeId]);
+  });
+
+  test('POST factura > umbral ($6M) → requiere_aprobacion_gerencia = true', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.post('/api/tesoreria/facturas').send({
+      proveedor_id:      proveedorRecId,
+      monto:             6000000,
+      fecha_recibida:    '2026-09-01',
+      fecha_vencimiento: '2026-09-30',
+      descripcion:       'Factura grande test gerencia',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.requiere_aprobacion_gerencia).toBe(true);
+    facturaGrandeId = res.body.id;
+  });
+
+  test('POST factura < umbral ($350K) → requiere_aprobacion_gerencia = false', async () => {
+    // verificado indirectamente — la factura del flujo completo tiene monto 350000
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.get(`/api/tesoreria/facturas/${facturaId}`);
+    expect(res.body.requiere_aprobacion_gerencia).toBe(false);
+  });
+
+  test('CI aprueba factura grande → aprobacion_vence_at queda en el futuro', async () => {
+    const ag = agentCi(); await loginCi(ag);
+    const res = await ag.put(`/api/control_interno/facturas/${facturaGrandeId}/aprobar`);
+    expect(res.status).toBe(200);
+    expect(res.body.estado).toBe('aprobada');
+    expect(res.body.aprobacion_vence_at).not.toBeNull();
+    expect(new Date(res.body.aprobacion_vence_at).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  test('Intentar pagar sin aprobación gerencia → 400', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.put(`/api/tesoreria/facturas/${facturaGrandeId}/pagar`).send({
+      cuenta_pago_id: cuentaGrandeId,
+      fecha_pago: '2026-09-15',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/gerencia/i);
+  });
+
+  test('aprobar-gerencia → 200, sets aprobado_gerencia_at', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.put(`/api/tesoreria/facturas/${facturaGrandeId}/aprobar-gerencia`);
+    expect(res.status).toBe(200);
+    expect(res.body.aprobado_gerencia_por).toBe(uuidTsr);
+    expect(res.body.aprobado_gerencia_at).not.toBeNull();
+  });
+
+  test('aprobar-gerencia dos veces → 400', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.put(`/api/tesoreria/facturas/${facturaGrandeId}/aprobar-gerencia`);
+    expect(res.status).toBe(400);
+  });
+
+  test('Pagar factura grande con ambas aprobaciones → 200', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.put(`/api/tesoreria/facturas/${facturaGrandeId}/pagar`).send({
+      cuenta_pago_id: cuentaGrandeId,
+      fecha_pago: '2026-09-15',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('movimiento_id');
+  });
+});
+
 // ── Flujo rechazo ─────────────────────────────────────────────────────────────
 describe('Facturas — flujo de rechazo', () => {
   let facturaRechazadaId;

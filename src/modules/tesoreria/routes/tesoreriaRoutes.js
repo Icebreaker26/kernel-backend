@@ -48,9 +48,10 @@ router.get('/movimientos',        checkPermission('tesoreria', 'READ'),  ctrl.li
 router.post('/movimientos',       checkPermission('tesoreria', 'WRITE'), ctrl.crearMovimiento);
 
 // ── Proveedores ────────────────────────────────────────────────────────────────
-router.get('/proveedores',      checkPermission('tesoreria', 'READ'),   ctrl.listarProveedores);
-router.post('/proveedores',     checkPermission('tesoreria', 'WRITE'),  ctrl.crearProveedor);
-router.put('/proveedores/:id',  checkPermission('tesoreria', 'WRITE'),  ctrl.actualizarProveedor);
+router.get('/proveedores',           checkPermission('tesoreria', 'READ'),   ctrl.listarProveedores);
+router.get('/proveedores/:id/perfil',checkPermission('tesoreria', 'READ'),   ctrl.perfilProveedor);
+router.post('/proveedores',          checkPermission('tesoreria', 'WRITE'),  ctrl.crearProveedor);
+router.put('/proveedores/:id',       checkPermission('tesoreria', 'WRITE'),  ctrl.actualizarProveedor);
 
 // ── Facturas ───────────────────────────────────────────────────────────────────
 router.get('/facturas/mis-pendientes',         checkPermission('tesoreria', 'READ'),   ctrl.misFacturasPendientes);

@@ -3,7 +3,7 @@ import { verifyToken }     from '../../../middlewares/auth.js';
 import { checkPermission } from '../../../middlewares/checkPermission.js';
 import {
   listarFacturas, getFactura, crearFactura, reenviarFactura,
-  listarProveedores, crearProveedor, actualizarProveedor,
+  listarProveedores, crearProveedor, actualizarProveedor, perfilProveedor,
 } from '../../tesoreria/controllers/tesoreriaController.js';
 
 const router = Router();
@@ -16,8 +16,9 @@ router.post('/facturas',               checkPermission('contable', 'WRITE'), cre
 router.put('/facturas/:id/reenviar',   checkPermission('contable', 'WRITE'), reenviarFactura);
 
 // ── Proveedores (lectura + gestión desde Contable) ─────────────────────────────
-router.get('/proveedores',     checkPermission('contable', 'READ'),  listarProveedores);
-router.post('/proveedores',    checkPermission('contable', 'WRITE'), crearProveedor);
-router.put('/proveedores/:id', checkPermission('contable', 'WRITE'), actualizarProveedor);
+router.get('/proveedores',            checkPermission('contable', 'READ'),  listarProveedores);
+router.get('/proveedores/:id/perfil', checkPermission('contable', 'READ'),  perfilProveedor);
+router.post('/proveedores',           checkPermission('contable', 'WRITE'), crearProveedor);
+router.put('/proveedores/:id',        checkPermission('contable', 'WRITE'), actualizarProveedor);
 
 export default router;

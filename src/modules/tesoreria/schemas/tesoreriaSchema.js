@@ -69,15 +69,23 @@ export const crearProveedorSchema = z.object({
 });
 
 export const actualizarProveedorSchema = z.object({
-  nombre:    z.string().min(1).optional(),
-  nit:       z.string().optional().or(z.literal('')),
-  email:     z.string().email().optional().or(z.literal('')),
-  telefono:  z.string().optional().or(z.literal('')),
+  nombre:     z.string().min(1).optional(),
+  nit:        z.string().optional().or(z.literal('')),
+  email:      z.string().email().optional().or(z.literal('')),
+  telefono:   z.string().optional().or(z.literal('')),
+  tipo_pago:  z.enum(['recurrente', 'unico']).optional(),
   frecuencia: z.enum(['mensual', 'bimestral', 'trimestral', 'semestral', 'anual']).optional().or(z.literal('')),
-  categoria: z.string().optional().or(z.literal('')),
-  notas:     z.string().optional().or(z.literal('')),
-  is_active: z.boolean().optional(),
-}).strict();
+  categoria:  z.string().optional().or(z.literal('')),
+  notas:      z.string().optional().or(z.literal('')),
+  is_active:  z.boolean().optional(),
+}).strict().superRefine((data, ctx) => {
+  if (data.tipo_pago === 'recurrente' && data.frecuencia !== undefined && (!data.frecuencia || data.frecuencia === '')) {
+    ctx.addIssue({ code: 'custom', path: ['frecuencia'], message: 'Requerida para proveedores recurrentes' });
+  }
+  if (data.tipo_pago === 'unico' && data.frecuencia && data.frecuencia !== '') {
+    ctx.addIssue({ code: 'custom', path: ['frecuencia'], message: 'No aplica para pagos únicos' });
+  }
+});
 
 // ── Facturas ───────────────────────────────────────────────────────────────────
 

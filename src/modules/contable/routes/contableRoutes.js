@@ -7,7 +7,10 @@ import {
   listarCategorias, crearCategoria, actualizarCategoria,
   listarPeriodos, crearPeriodo, cerrarPeriodo,
 } from '../../tesoreria/controllers/tesoreriaController.js';
-import { getEstado, solicitarCambio } from '../../control_interno/controllers/datosBancariosController.js';
+import {
+  getEstado, solicitarCambio,
+  solicitarCertificadoUpload, confirmarCertificadoUpload,
+} from '../../control_interno/controllers/datosBancariosController.js';
 import {
   solicitarUpload, confirmarUpload, descargarAdjunto, listarAdjuntos,
   descargarArchivo, eliminarAdjunto, eliminarArchivoEspecifico,
@@ -25,8 +28,10 @@ router.put('/facturas/:id/reenviar',   checkPermission('contable', 'WRITE'), ree
 // ── Proveedores (lectura + gestión desde Contable) ─────────────────────────────
 router.get('/proveedores',                        checkPermission('contable', 'READ'),  listarProveedores);
 router.get('/proveedores/:id/perfil',             checkPermission('contable', 'READ'),  perfilProveedor);
-router.get('/proveedores/:id/datos-bancarios',    checkPermission('contable', 'READ'),  getEstado);
-router.post('/proveedores/:id/datos-bancarios',   checkPermission('contable', 'WRITE'), solicitarCambio);
+router.get('/proveedores/:id/datos-bancarios',                          checkPermission('contable', 'READ'),  getEstado);
+router.post('/proveedores/:id/datos-bancarios',                         checkPermission('contable', 'WRITE'), solicitarCambio);
+router.post('/proveedores/:id/datos-bancarios/:solicitudId/certificado', checkPermission('contable', 'WRITE'), solicitarCertificadoUpload);
+router.patch('/proveedores/:id/datos-bancarios/:solicitudId/certificado', checkPermission('contable', 'WRITE'), confirmarCertificadoUpload);
 router.post('/proveedores',                       checkPermission('contable', 'WRITE'), crearProveedor);
 router.put('/proveedores/:id',                    checkPermission('contable', 'WRITE'), actualizarProveedor);
 

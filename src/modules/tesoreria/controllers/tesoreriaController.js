@@ -569,7 +569,8 @@ export const actualizarProveedor = async (req, res, next) => {
     const vals = [];
     let i = 1;
     const map = { nombre: 'nombre', nit: 'nit', email: 'email', telefono: 'telefono',
-                  frecuencia: 'frecuencia', categoria: 'categoria', notas: 'notas', is_active: 'is_active' };
+                  tipo_pago: 'tipo_pago', frecuencia: 'frecuencia', categoria: 'categoria',
+                  notas: 'notas', is_active: 'is_active' };
     for (const [k, col] of Object.entries(map)) {
       if (data[k] !== undefined) {
         sets.push(`${col} = $${i++}`);

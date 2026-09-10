@@ -8,8 +8,6 @@ const facturaBase = `
          p.telefono    AS proveedor_telefono,
          p.tipo_pago   AS proveedor_tipo,
          p.categoria   AS proveedor_categoria,
-         p.banco       AS proveedor_banco,
-         p.cuenta_bancaria AS proveedor_cuenta,
          ur.nombre     AS registrado_por_nombre,
          ua.nombre     AS aprobado_por_nombre,
          CASE WHEN f.fecha_vencimiento < CURRENT_DATE THEN true ELSE false END AS vencida

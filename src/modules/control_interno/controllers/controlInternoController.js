@@ -1,13 +1,13 @@
 import pool from '../../../db/database.js';
 import { aprobarFactura, rechazarFactura } from '../../tesoreria/controllers/tesoreriaController.js';
 
-// Re-exporta las acciones de aprobación — la lógica vive en tesorería
+// Re-exporta las acciones de CI — la lógica vive en tesorería
 export { aprobarFactura, rechazarFactura };
 
-// Vista de facturas pendientes enriquecida para Control Interno
+// Vista de facturas listas para verificar (aprobadas por el área responsable)
 export const listarPendientes = async (req, res, next) => {
   try {
-    const { estado = 'pendiente_aprobacion', proveedor_id, vence_antes } = req.query;
+    const { estado = 'aprobada', proveedor_id, vence_antes } = req.query;
     const conds = [`f.estado = $1`];
     const vals  = [estado];
     let i = 2;
@@ -22,11 +22,13 @@ export const listarPendientes = async (req, res, next) => {
              p.categoria   AS proveedor_categoria,
              ur.nombre     AS registrado_por_nombre,
              ua.nombre     AS aprobado_por_nombre,
+             uresp.nombre  AS responsable_nombre,
              CASE WHEN f.fecha_vencimiento < CURRENT_DATE THEN true ELSE false END AS vencida
         FROM tesoreria_facturas f
-        JOIN tesoreria_proveedores p  ON p.id = f.proveedor_id
-        LEFT JOIN global_usuarios ur  ON ur.id = f.registrado_por
-        LEFT JOIN global_usuarios ua  ON ua.id = f.aprobado_por
+        JOIN tesoreria_proveedores p    ON p.id    = f.proveedor_id
+        LEFT JOIN global_usuarios ur    ON ur.id   = f.registrado_por
+        LEFT JOIN global_usuarios ua    ON ua.id   = f.aprobado_por
+        LEFT JOIN global_usuarios uresp ON uresp.id = f.responsable_id
        WHERE ${conds.join(' AND ')}
        ORDER BY f.fecha_vencimiento ASC
     `, vals);

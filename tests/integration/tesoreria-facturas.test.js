@@ -6,18 +6,21 @@ import bcrypt from 'bcrypt';
 let app;
 
 // ── Usuarios de test ─────────────────────────────────────────────────────────
-const EMAIL_TSR = 'tesoreria-fact-test@kernel.test';
-const EMAIL_CI  = 'control-interno-test@kernel.test';
-const PASS      = 'testpass123';
-let uuidTsr, uuidCi;
+const EMAIL_TSR  = 'tesoreria-fact-test@kernel.test';
+const EMAIL_CI   = 'control-interno-test@kernel.test';
+const EMAIL_RESP = 'responsable-area-test@kernel.test';
+const PASS       = 'testpass123';
+let uuidTsr, uuidCi, uuidResp;
 
 // IDs creados en tests
 let proveedorRecId, proveedorUnicoId, facturaId, cuentaId;
 
-const agentTsr = () => request.agent(app);
-const agentCi  = () => request.agent(app);
-const loginTsr = (ag) => ag.post('/api/auth/login').send({ email: EMAIL_TSR, password: PASS });
-const loginCi  = (ag) => ag.post('/api/auth/login').send({ email: EMAIL_CI,  password: PASS });
+const agentTsr  = () => request.agent(app);
+const agentCi   = () => request.agent(app);
+const agentResp = () => request.agent(app);
+const loginTsr  = (ag) => ag.post('/api/auth/login').send({ email: EMAIL_TSR,  password: PASS });
+const loginCi   = (ag) => ag.post('/api/auth/login').send({ email: EMAIL_CI,   password: PASS });
+const loginResp = (ag) => ag.post('/api/auth/login').send({ email: EMAIL_RESP, password: PASS });
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 beforeAll(async () => {
@@ -54,6 +57,21 @@ beforeAll(async () => {
      ON CONFLICT DO NOTHING`, [uuidCi]
   );
 
+  // Usuario Responsable de Área (aprueba facturas asignadas)
+  const { rows: [resp] } = await pool.query(
+    `INSERT INTO global_usuarios (nombre, email, password_hash, rol, is_active, is_approved)
+     VALUES ('Responsable Area Test', $1, $2, 'tesorera', true, true)
+     ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, is_approved = true
+     RETURNING id`,
+    [EMAIL_RESP, hash]
+  );
+  uuidResp = resp.id;
+  await pool.query(
+    `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id)
+     SELECT $1, m.id, a.id FROM modulos m, acciones a WHERE m.nombre = 'tesoreria'
+     ON CONFLICT DO NOTHING`, [uuidResp]
+  );
+
   // Cuenta bancaria para los tests de pago
   const { rows: [c] } = await pool.query(
     `INSERT INTO tesoreria_cuentas (nombre, tipo, saldo_inicial) VALUES ('Bancolombia Test Facturas', 'banco', 5000000) RETURNING id`
@@ -73,8 +91,8 @@ afterAll(async () => {
   if (proveedorRecId)   await pool.query(`DELETE FROM tesoreria_proveedores WHERE id = $1`, [proveedorRecId]);
   if (proveedorUnicoId) await pool.query(`DELETE FROM tesoreria_proveedores WHERE id = $1`, [proveedorUnicoId]);
   if (cuentaId)         await pool.query(`DELETE FROM tesoreria_cuentas WHERE id = $1`, [cuentaId]);
-  await pool.query(`DELETE FROM permisos        WHERE usuario_uuid IN ($1, $2)`, [uuidTsr, uuidCi]);
-  await pool.query(`DELETE FROM global_usuarios WHERE id IN ($1, $2)`, [uuidTsr, uuidCi]);
+  await pool.query(`DELETE FROM permisos        WHERE usuario_uuid IN ($1, $2, $3)`, [uuidTsr, uuidCi, uuidResp]);
+  await pool.query(`DELETE FROM global_usuarios WHERE id IN ($1, $2, $3)`, [uuidTsr, uuidCi, uuidResp]);
   await pool.end();
 });
 
@@ -260,7 +278,7 @@ describe('Facturas — flujo completo', () => {
     const ag = agentTsr(); await loginTsr(ag);
     const res = await ag.put(`/api/tesoreria/facturas/${facturaId}/autorizar`).send({});
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/aprobada/i);
+    expect(res.body.error).toMatch(/verificada/i);
   });
 
   test('PUT /tesoreria/facturas/:id/pagar → 404 (endpoint eliminado)', async () => {
@@ -271,7 +289,22 @@ describe('Facturas — flujo completo', () => {
     expect(res.status).toBe(404);
   });
 
-  test('GET /control_interno/facturas → incluye factura pendiente', async () => {
+  // Paso 1: área responsable aprueba
+  test('PUT /tesoreria/facturas/:id/aprobar-area → 200, estado aprobada', async () => {
+    const ag = agentResp(); await loginResp(ag);
+    const res = await ag.put(`/api/tesoreria/facturas/${facturaId}/aprobar-area`).send({});
+    expect(res.status).toBe(200);
+    expect(res.body.estado).toBe('aprobada');
+    expect(res.body.aprobado_por).toBe(uuidResp);
+  });
+
+  test('PUT /tesoreria/facturas/:id/aprobar-area ya aprobada → 400', async () => {
+    const ag = agentResp(); await loginResp(ag);
+    expect((await ag.put(`/api/tesoreria/facturas/${facturaId}/aprobar-area`).send({})).status).toBe(400);
+  });
+
+  // Paso 2: CI verifica (aprobada → verificada)
+  test('GET /control_interno/facturas → incluye factura aprobada por área', async () => {
     const ag = agentCi(); await loginCi(ag);
     const res = await ag.get('/api/control_interno/facturas');
     expect(res.status).toBe(200);
@@ -284,25 +317,26 @@ describe('Facturas — flujo completo', () => {
     expect(res.status).toBe(400);
   });
 
-  test('PUT /control_interno/facturas/:id/aprobar → 200, estado aprobada', async () => {
+  test('PUT /control_interno/facturas/:id/verificar → 200, estado verificada', async () => {
     const ag = agentCi(); await loginCi(ag);
-    const res = await ag.put(`/api/control_interno/facturas/${facturaId}/aprobar`);
+    const res = await ag.put(`/api/control_interno/facturas/${facturaId}/verificar`);
     expect(res.status).toBe(200);
-    expect(res.body.estado).toBe('aprobada');
-    expect(res.body.aprobado_por).toBe(uuidCi);
+    expect(res.body.estado).toBe('verificada');
+    expect(res.body.verificada_por).toBe(uuidCi);
+    expect(res.body.verificada_at).not.toBeNull();
   });
 
-  test('PUT /control_interno/facturas/:id/aprobar ya aprobada → 400', async () => {
+  test('PUT /control_interno/facturas/:id/verificar ya verificada → 400', async () => {
     const ag = agentCi(); await loginCi(ag);
-    expect((await ag.put(`/api/control_interno/facturas/${facturaId}/aprobar`)).status).toBe(400);
+    expect((await ag.put(`/api/control_interno/facturas/${facturaId}/verificar`)).status).toBe(400);
   });
 
+  // Paso 3: Tesorería autoriza (verificada → autorizada)
   test('PUT /tesoreria/facturas/:id/autorizar → 200, estado=autorizada, sin movimiento', async () => {
     const ag = agentTsr(); await loginTsr(ag);
     const res = await ag.put(`/api/tesoreria/facturas/${facturaId}/autorizar`).send({});
     expect(res.status).toBe(200);
     expect(res.body.estado).toBe('autorizada');
-    // En Option B, el movimiento se crea al confirmar el extracto bancario, no al autorizar
     expect(res.body.movimiento_id).toBeNull();
   });
 
@@ -313,7 +347,6 @@ describe('Facturas — flujo completo', () => {
     expect(res.body.movimiento_id).toBeNull();
     expect(res.body.fecha_pago).toBeNull();
     expect(typeof res.body.dias_control_interno).toBe('number');
-    // dias_tesoreria es null hasta confirmar el extracto bancario
     expect(res.body.dias_tesoreria).toBeNull();
   });
 
@@ -323,7 +356,7 @@ describe('Facturas — flujo completo', () => {
     expect(res.status).toBe(400);
   });
 
-  test('GET /control_interno/facturas?estado=aprobada → vacío (ya se autorizó)', async () => {
+  test('GET /control_interno/facturas?estado=aprobada → vacío (ya se verificó)', async () => {
     const ag = agentCi(); await loginCi(ag);
     const res = await ag.get('/api/control_interno/facturas?estado=aprobada');
     expect(res.status).toBe(200);
@@ -420,11 +453,18 @@ describe('Facturas — flujo umbral Gerencia', () => {
     expect(res.body.requiere_aprobacion_gerencia).toBe(false);
   });
 
-  test('CI aprueba factura grande → aprobacion_vence_at queda en el futuro', async () => {
-    const ag = agentCi(); await loginCi(ag);
-    const res = await ag.put(`/api/control_interno/facturas/${facturaGrandeId}/aprobar`);
+  test('Área aprueba factura grande → estado aprobada', async () => {
+    const ag = agentResp(); await loginResp(ag);
+    const res = await ag.put(`/api/tesoreria/facturas/${facturaGrandeId}/aprobar-area`).send({});
     expect(res.status).toBe(200);
     expect(res.body.estado).toBe('aprobada');
+  });
+
+  test('CI verifica factura grande → aprobacion_vence_at queda en el futuro', async () => {
+    const ag = agentCi(); await loginCi(ag);
+    const res = await ag.put(`/api/control_interno/facturas/${facturaGrandeId}/verificar`);
+    expect(res.status).toBe(200);
+    expect(res.body.estado).toBe('verificada');
     expect(res.body.aprobacion_vence_at).not.toBeNull();
     expect(new Date(res.body.aprobacion_vence_at).getTime()).toBeGreaterThan(Date.now());
   });
@@ -466,7 +506,7 @@ describe('Facturas — flujo de rechazo', () => {
     if (facturaRechazadaId) await pool.query(`DELETE FROM tesoreria_facturas WHERE id = $1`, [facturaRechazadaId]);
   });
 
-  test('Registrar, rechazar y verificar estado', async () => {
+  test('Registrar, área aprueba, CI rechaza y verificar estado', async () => {
     const agTsr = agentTsr(); await loginTsr(agTsr);
     const { body: f } = await agTsr.post('/api/tesoreria/facturas').send({
       proveedor_id: proveedorUnicoId,
@@ -477,6 +517,11 @@ describe('Facturas — flujo de rechazo', () => {
     });
     facturaRechazadaId = f.id;
 
+    // Área aprueba primero
+    const agResp = agentResp(); await loginResp(agResp);
+    await agResp.put(`/api/tesoreria/facturas/${f.id}/aprobar-area`).send({});
+
+    // CI rechaza desde 'aprobada'
     const agCi = agentCi(); await loginCi(agCi);
     const rechRes = await agCi.put(`/api/control_interno/facturas/${f.id}/rechazar`).send({
       motivo: 'Factura duplicada',
@@ -520,9 +565,13 @@ describe('Facturas — retenciones en pago', () => {
   });
 
   test('Al autorizar, factura queda en autorizada sin movimiento creado', async () => {
-    // CI aprueba
+    // Área aprueba
+    const agResp = agentResp(); await loginResp(agResp);
+    await agResp.put(`/api/tesoreria/facturas/${facturaRetId}/aprobar-area`).send({});
+
+    // CI verifica
     const agCi = agentCi(); await loginCi(agCi);
-    await agCi.put(`/api/control_interno/facturas/${facturaRetId}/aprobar`);
+    await agCi.put(`/api/control_interno/facturas/${facturaRetId}/verificar`);
 
     // Tesorería autoriza (en Option B el movimiento se crea al confirmar el extracto bancario)
     const agTsr = agentTsr(); await loginTsr(agTsr);

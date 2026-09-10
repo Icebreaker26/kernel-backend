@@ -151,6 +151,132 @@ describe('Cuentas — CRUD', () => {
     const res = await ag.put(`/api/tesoreria/cuentas/${cuentaId}`).send({ tipo: 'caja' });
     expect(res.status).toBe(400);
   });
+
+  test('PUT /cuentas/:id no acepta is_active (strict) → 400', async () => {
+    const ag = agent(); await login(ag);
+    const res = await ag.put(`/api/tesoreria/cuentas/${cuentaId}`).send({ is_active: false });
+    expect(res.status).toBe(400);
+  });
+});
+
+// ── Desactivación protegida de cuentas ───────────────────────────────────────
+describe('Cuentas — Desactivación protegida', () => {
+  const ADMIN_EMAIL = 'admin-desact-test@kernel.test';
+  const ADMIN_PASS  = 'adminpass123';
+  let adminUuid;
+  let cuentaSinMovId;
+  let cuentaConMovId;
+  let movimientoDesactId;
+
+  const agAdmin    = () => request.agent(app);
+  const loginAdmin = (ag) => ag.post('/api/auth/login').send({ email: ADMIN_EMAIL, password: ADMIN_PASS });
+
+  beforeAll(async () => {
+    const hash = await bcrypt.hash(ADMIN_PASS, 4);
+    const { rows: [u] } = await pool.query(
+      `INSERT INTO global_usuarios (nombre, email, password_hash, rol, is_active, is_approved)
+       VALUES ('Admin Desact Test', $1, $2, 'admin', true, true)
+       ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, is_approved = true
+       RETURNING id`,
+      [ADMIN_EMAIL, hash]
+    );
+    adminUuid = u.id;
+
+    await pool.query(
+      `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id)
+       SELECT $1, m.id, a.id FROM modulos m, acciones a
+       WHERE m.nombre = 'tesoreria'
+       ON CONFLICT DO NOTHING`,
+      [adminUuid]
+    );
+
+    const { rows: [c1] } = await pool.query(
+      `INSERT INTO tesoreria_cuentas (nombre, tipo, saldo_inicial)
+       VALUES ('Cuenta Sin Movimientos', 'caja', 0) RETURNING id`
+    );
+    cuentaSinMovId = c1.id;
+
+    const { rows: [c2] } = await pool.query(
+      `INSERT INTO tesoreria_cuentas (nombre, tipo, saldo_inicial)
+       VALUES ('Cuenta Con Movimientos', 'banco', 1000000) RETURNING id`
+    );
+    cuentaConMovId = c2.id;
+
+    const { rows: [m] } = await pool.query(
+      `INSERT INTO tesoreria_movimientos (tipo, monto, fecha, descripcion, cuenta_id, origen)
+       VALUES ('ingreso', 500000, NOW(), 'Movimiento de prueba para desactivación', $1, 'manual')
+       RETURNING id`,
+      [cuentaConMovId]
+    );
+    movimientoDesactId = m.id;
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM tesoreria_movimientos WHERE id = $1',        [movimientoDesactId]);
+    await pool.query('DELETE FROM tesoreria_cuentas     WHERE id = $1',        [cuentaConMovId]);
+    await pool.query('DELETE FROM tesoreria_cuentas     WHERE id = $1',        [cuentaSinMovId]);
+    await pool.query('DELETE FROM permisos              WHERE usuario_uuid = $1', [adminUuid]);
+    await pool.query('DELETE FROM global_usuarios       WHERE id = $1',           [adminUuid]);
+  });
+
+  test('DELETE /cuentas/:id sin token → 401', async () => {
+    const res = await request(app).delete(`/api/tesoreria/cuentas/${cuentaSinMovId}`);
+    expect(res.status).toBe(401);
+  });
+
+  test('DELETE /cuentas/:id con tesorera (no admin) → 403', async () => {
+    const ag = agent(); await login(ag);
+    const res = await ag.delete(`/api/tesoreria/cuentas/${cuentaSinMovId}`)
+      .send({ confirmar: true, motivo: 'Motivo de prueba suficientemente largo' });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/administrador/i);
+  });
+
+  test('DELETE /cuentas/:id sin confirmar → 400', async () => {
+    const ag = agAdmin(); await loginAdmin(ag);
+    const res = await ag.delete(`/api/tesoreria/cuentas/${cuentaSinMovId}`)
+      .send({ motivo: 'Motivo válido largo suficiente' });
+    expect(res.status).toBe(400);
+  });
+
+  test('DELETE /cuentas/:id sin motivo mínimo → 400', async () => {
+    const ag = agAdmin(); await loginAdmin(ag);
+    const res = await ag.delete(`/api/tesoreria/cuentas/${cuentaSinMovId}`)
+      .send({ confirmar: true, motivo: 'corto' });
+    expect(res.status).toBe(400);
+  });
+
+  test('DELETE /cuentas/:id con cuenta con movimientos → 409', async () => {
+    const ag = agAdmin(); await loginAdmin(ag);
+    const res = await ag.delete(`/api/tesoreria/cuentas/${cuentaConMovId}`)
+      .send({ confirmar: true, motivo: 'Intentando borrar cuenta con movimientos para prueba' });
+    expect(res.status).toBe(409);
+    expect(res.body.movimientos).toBeGreaterThan(0);
+  });
+
+  test('DELETE /cuentas/:id sin movimientos → 200 borrado lógico', async () => {
+    const ag = agAdmin(); await loginAdmin(ag);
+    const res = await ag.delete(`/api/tesoreria/cuentas/${cuentaSinMovId}`)
+      .send({ confirmar: true, motivo: 'Cuenta de prueba sin movimientos, puede desactivarse' });
+    expect(res.status).toBe(200);
+    expect(res.body.is_active).toBe(false);
+  });
+
+  test('Cuenta desactivada sigue en BD (borrado lógico)', async () => {
+    const { rows } = await pool.query(
+      `SELECT id, is_active FROM tesoreria_cuentas WHERE id = $1`, [cuentaSinMovId]
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].is_active).toBe(false);
+  });
+
+  test('DELETE /cuentas/:id ya inactiva → 409', async () => {
+    const ag = agAdmin(); await loginAdmin(ag);
+    const res = await ag.delete(`/api/tesoreria/cuentas/${cuentaSinMovId}`)
+      .send({ confirmar: true, motivo: 'Intentar desactivar la misma cuenta dos veces' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/ya está inactiva/i);
+  });
 });
 
 // ── Categorías ───────────────────────────────────────────────────────────────

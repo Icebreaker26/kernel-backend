@@ -65,8 +65,6 @@ beforeAll(async () => {
 afterAll(async () => {
   // Limpiar en orden de FKs
   if (facturaId) {
-    await pool.query(`UPDATE tesoreria_facturas SET movimiento_id = NULL WHERE id = $1`, [facturaId]);
-    await pool.query(`DELETE FROM tesoreria_movimientos WHERE descripcion LIKE '%Proveedor Recurrente Test%'`);
     await pool.query(`DELETE FROM tesoreria_facturas WHERE id = $1`, [facturaId]);
   }
   await pool.query(`DELETE FROM tesoreria_facturas WHERE proveedor_id IN (
@@ -258,13 +256,19 @@ describe('Facturas — flujo completo', () => {
     expect(res.body.fecha_pago).toBeNull();
   });
 
-  test('PUT /tesoreria/facturas/:id/pagar en estado pendiente → 400', async () => {
+  test('PUT /tesoreria/facturas/:id/autorizar en estado pendiente → 400', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.put(`/api/tesoreria/facturas/${facturaId}/autorizar`).send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/aprobada/i);
+  });
+
+  test('PUT /tesoreria/facturas/:id/pagar → 404 (endpoint eliminado)', async () => {
     const ag = agentTsr(); await loginTsr(ag);
     const res = await ag.put(`/api/tesoreria/facturas/${facturaId}/pagar`).send({
       cuenta_pago_id: cuentaId, fecha_pago: '2026-09-10',
     });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/aprobada/i);
+    expect(res.status).toBe(404);
   });
 
   test('GET /control_interno/facturas → incluye factura pendiente', async () => {
@@ -293,47 +297,33 @@ describe('Facturas — flujo completo', () => {
     expect((await ag.put(`/api/control_interno/facturas/${facturaId}/aprobar`)).status).toBe(400);
   });
 
-  test('PUT /tesoreria/facturas/:id/pagar → 200, crea movimiento de egreso', async () => {
+  test('PUT /tesoreria/facturas/:id/autorizar → 200, estado=autorizada, sin movimiento', async () => {
     const ag = agentTsr(); await loginTsr(ag);
-    const res = await ag.put(`/api/tesoreria/facturas/${facturaId}/pagar`).send({
-      cuenta_pago_id: cuentaId,
-      fecha_pago: '2026-09-10',
-      referencia: 'TRF-001',
-    });
+    const res = await ag.put(`/api/tesoreria/facturas/${facturaId}/autorizar`).send({});
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty('movimiento_id');
-
-    // Verificar que el movimiento existe en tesoreria_movimientos
-    const { rows } = await pool.query(
-      `SELECT * FROM tesoreria_movimientos WHERE id = $1`, [res.body.movimiento_id]
-    );
-    expect(rows.length).toBe(1);
-    expect(rows[0].tipo).toBe('egreso');
-    expect(Number(rows[0].monto)).toBe(350000);
+    expect(res.body.estado).toBe('autorizada');
+    // En Option B, el movimiento se crea al confirmar el extracto bancario, no al autorizar
+    expect(res.body.movimiento_id).toBeNull();
   });
 
-  test('Factura queda en estado pagada con días calculados y pago_referencia', async () => {
+  test('Factura queda en estado autorizada (sin fecha_pago aún)', async () => {
     const ag = agentTsr(); await loginTsr(ag);
     const res = await ag.get(`/api/tesoreria/facturas/${facturaId}`);
-    expect(res.body.estado).toBe('pagada');
-    expect(res.body.movimiento_id).not.toBeNull();
-    expect(res.body.fecha_pago).toMatch(/^2026-09-10/);
+    expect(res.body.estado).toBe('autorizada');
+    expect(res.body.movimiento_id).toBeNull();
+    expect(res.body.fecha_pago).toBeNull();
     expect(typeof res.body.dias_control_interno).toBe('number');
-    expect(typeof res.body.dias_tesoreria).toBe('number');
-    expect(res.body.dias_tesoreria).toBeGreaterThanOrEqual(0);
-    // pago_referencia viene del movimiento vinculado
-    expect(res.body.pago_referencia).toBe('TRF-001');
+    // dias_tesoreria es null hasta confirmar el extracto bancario
+    expect(res.body.dias_tesoreria).toBeNull();
   });
 
-  test('PUT /tesoreria/facturas/:id/pagar ya pagada → 400', async () => {
+  test('PUT /tesoreria/facturas/:id/autorizar ya autorizada → 400', async () => {
     const ag = agentTsr(); await loginTsr(ag);
-    const res = await ag.put(`/api/tesoreria/facturas/${facturaId}/pagar`).send({
-      cuenta_pago_id: cuentaId, fecha_pago: '2026-09-11',
-    });
+    const res = await ag.put(`/api/tesoreria/facturas/${facturaId}/autorizar`).send({});
     expect(res.status).toBe(400);
   });
 
-  test('GET /control_interno/facturas?estado=aprobada → vacío (ya se pagó)', async () => {
+  test('GET /control_interno/facturas?estado=aprobada → vacío (ya se autorizó)', async () => {
     const ag = agentCi(); await loginCi(ag);
     const res = await ag.get('/api/control_interno/facturas?estado=aprobada');
     expect(res.status).toBe(200);
@@ -405,12 +395,8 @@ describe('Facturas — flujo umbral Gerencia', () => {
   });
 
   afterAll(async () => {
-    if (facturaGrandeId) {
-      await pool.query(`UPDATE tesoreria_facturas SET movimiento_id = NULL WHERE id = $1`, [facturaGrandeId]);
-      await pool.query(`DELETE FROM tesoreria_movimientos WHERE descripcion LIKE '%Proveedor Recurrente Test%' AND monto = 6000000`);
-      await pool.query(`DELETE FROM tesoreria_facturas WHERE id = $1`, [facturaGrandeId]);
-    }
-    if (cuentaGrandeId) await pool.query(`DELETE FROM tesoreria_cuentas WHERE id = $1`, [cuentaGrandeId]);
+    if (facturaGrandeId) await pool.query(`DELETE FROM tesoreria_facturas WHERE id = $1`, [facturaGrandeId]);
+    if (cuentaGrandeId)  await pool.query(`DELETE FROM tesoreria_cuentas WHERE id = $1`, [cuentaGrandeId]);
   });
 
   test('POST factura > umbral ($6M) → requiere_aprobacion_gerencia = true', async () => {
@@ -443,12 +429,9 @@ describe('Facturas — flujo umbral Gerencia', () => {
     expect(new Date(res.body.aprobacion_vence_at).getTime()).toBeGreaterThan(Date.now());
   });
 
-  test('Intentar pagar sin aprobación gerencia → 400', async () => {
+  test('Intentar autorizar sin aprobación gerencia → 400', async () => {
     const ag = agentTsr(); await loginTsr(ag);
-    const res = await ag.put(`/api/tesoreria/facturas/${facturaGrandeId}/pagar`).send({
-      cuenta_pago_id: cuentaGrandeId,
-      fecha_pago: '2026-09-15',
-    });
+    const res = await ag.put(`/api/tesoreria/facturas/${facturaGrandeId}/autorizar`).send({});
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/gerencia/i);
   });
@@ -467,14 +450,11 @@ describe('Facturas — flujo umbral Gerencia', () => {
     expect(res.status).toBe(400);
   });
 
-  test('Pagar factura grande con ambas aprobaciones → 200', async () => {
+  test('Autorizar factura grande con ambas aprobaciones → 200, estado=autorizada', async () => {
     const ag = agentTsr(); await loginTsr(ag);
-    const res = await ag.put(`/api/tesoreria/facturas/${facturaGrandeId}/pagar`).send({
-      cuenta_pago_id: cuentaGrandeId,
-      fecha_pago: '2026-09-15',
-    });
+    const res = await ag.put(`/api/tesoreria/facturas/${facturaGrandeId}/autorizar`).send({});
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty('movimiento_id');
+    expect(res.body.estado).toBe('autorizada');
   });
 });
 
@@ -519,12 +499,8 @@ describe('Facturas — retenciones en pago', () => {
   });
 
   afterAll(async () => {
-    if (facturaRetId) {
-      await pool.query(`UPDATE tesoreria_facturas SET movimiento_id = NULL WHERE id = $1`, [facturaRetId]);
-      await pool.query(`DELETE FROM tesoreria_movimientos WHERE descripcion LIKE '%Ret Fuente Test%'`);
-      await pool.query(`DELETE FROM tesoreria_facturas WHERE id = $1`, [facturaRetId]);
-    }
-    if (cuentaRetId) await pool.query(`DELETE FROM tesoreria_cuentas WHERE id = $1`, [cuentaRetId]);
+    if (facturaRetId) await pool.query(`DELETE FROM tesoreria_facturas WHERE id = $1`, [facturaRetId]);
+    if (cuentaRetId)  await pool.query(`DELETE FROM tesoreria_cuentas WHERE id = $1`, [cuentaRetId]);
   });
 
   test('Factura con retenciones: monto_neto calculado correctamente', async () => {
@@ -543,33 +519,32 @@ describe('Facturas — retenciones en pago', () => {
     facturaRetId = res.body.id;
   });
 
-  test('Al pagar, el movimiento de egreso se crea por monto_neto', async () => {
+  test('Al autorizar, factura queda en autorizada sin movimiento creado', async () => {
     // CI aprueba
     const agCi = agentCi(); await loginCi(agCi);
     await agCi.put(`/api/control_interno/facturas/${facturaRetId}/aprobar`);
 
-    // Tesorería paga
+    // Tesorería autoriza (en Option B el movimiento se crea al confirmar el extracto bancario)
     const agTsr = agentTsr(); await loginTsr(agTsr);
-    const res = await agTsr.put(`/api/tesoreria/facturas/${facturaRetId}/pagar`).send({
-      cuenta_pago_id: cuentaRetId,
-      fecha_pago:     '2026-09-15',
-      referencia:     'TRF-RET-001',
-    });
+    const res = await agTsr.put(`/api/tesoreria/facturas/${facturaRetId}/autorizar`).send({});
     expect(res.status).toBe(200);
+    expect(res.body.estado).toBe('autorizada');
 
-    // Verificar monto del movimiento = monto_neto (953400), no monto bruto (1000000)
+    // Verificar que NO se creó un movimiento (el extracto bancario será quien lo confirme)
     const { rows } = await pool.query(
-      `SELECT monto FROM tesoreria_movimientos WHERE id = $1`, [res.body.movimiento_id]
+      `SELECT movimiento_id FROM tesoreria_facturas WHERE id = $1`, [facturaRetId]
     );
-    expect(Number(rows[0].monto)).toBe(953400);
+    expect(rows[0].movimiento_id).toBeNull();
   });
 
-  test('GET factura pagada con retenciones → pago_referencia presente', async () => {
+  test('GET factura autorizada con retenciones → monto_neto correcto, sin pago_referencia aún', async () => {
     const agTsr = agentTsr(); await loginTsr(agTsr);
     const res = await agTsr.get(`/api/tesoreria/facturas/${facturaRetId}`);
     expect(res.status).toBe(200);
-    expect(res.body.pago_referencia).toBe('TRF-RET-001');
+    expect(res.body.estado).toBe('autorizada');
     expect(Number(res.body.monto_neto)).toBe(953400);
     expect(Number(res.body.monto)).toBe(1000000);
+    // pago_referencia viene del movimiento, que aún no existe (se crea al confirmar extracto)
+    expect(res.body.pago_referencia).toBeNull();
   });
 });

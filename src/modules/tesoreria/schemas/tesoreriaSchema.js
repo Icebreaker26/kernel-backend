@@ -12,10 +12,14 @@ export const crearCuentaSchema = z.object({
 });
 
 export const actualizarCuentaSchema = z.object({
-  nombre:    z.string().min(1).optional(),
-  entidad:   z.string().optional().or(z.literal('')),
-  numero:    z.string().optional().or(z.literal('')),
-  is_active: z.boolean().optional(),
+  nombre:  z.string().min(1).optional(),
+  entidad: z.string().optional().or(z.literal('')),
+  numero:  z.string().optional().or(z.literal('')),
+}).strict();
+
+export const desactivarCuentaSchema = z.object({
+  confirmar: z.literal(true, { errorMap: () => ({ message: 'Debe confirmar explícitamente con confirmar: true' }) }),
+  motivo:    z.string().min(10, 'El motivo debe tener al menos 10 caracteres'),
 }).strict();
 
 // ── Categorías ─────────────────────────────────────────────────────────────────
@@ -98,11 +102,16 @@ export const crearFacturaSchema = z.object({
   }
 });
 
-export const pagarFacturaSchema = z.object({
-  cuenta_pago_id: z.string().uuid(),
-  fecha_pago:     z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  referencia:     z.string().optional().or(z.literal('')),
-  periodo_id:     uuidOpcional,
+// Autorizar pago: marca la factura lista para pagar, sin reservar cuenta ni fecha.
+// El vínculo con la transacción bancaria ocurre al subir el extracto XLS.
+export const autorizarPagoSchema = z.object({}).strict();
+
+// Conciliación manual: vincula movimientos ya importados con facturas pendientes
+export const conciliarSchema = z.object({
+  vinculos: z.array(z.object({
+    factura_id:    z.string().uuid(),
+    movimiento_id: z.string().uuid(),
+  })).min(1, 'Debe incluir al menos un vínculo'),
 });
 
 export const rechazarFacturaSchema = z.object({
@@ -123,6 +132,22 @@ export const actualizarUmbralSchema = z.object({
   descripcion:      z.string().optional().or(z.literal('')),
   dias_vencimiento: z.preprocess((v) => Number(v), z.number().int().min(1)).optional(),
 }).strict();
+
+// ── Ingesta de extracto bancario ───────────────────────────────────────────────
+
+export const confirmarExtractoSchema = z.object({
+  cuenta_id:    z.string().uuid(),
+  periodo_id:   z.string().uuid().nullable().optional().or(z.literal('')),
+  categoria_id: z.string().uuid().nullable().optional().or(z.literal('')),
+  referencias:  z.array(z.string().min(1)).min(1, 'Debe seleccionar al menos una transacción'),
+  // Vínculos factura ↔ transacción: [{referencia_bancaria, factura_id}]
+  vinculos:     z.array(z.object({
+    referencia_bancaria: z.string().min(1),
+    factura_id:          z.string().uuid(),
+  })).optional().default([]),
+});
+
+// ── Movimientos ────────────────────────────────────────────────────────────────
 
 export const crearMovimientoSchema = z.object({
   tipo:                  z.enum(['ingreso', 'egreso', 'traslado']),

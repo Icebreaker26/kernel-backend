@@ -1,14 +1,17 @@
 import pool from '../../../db/database.js';
 import ExcelJS from 'exceljs';
+import iconv from 'iconv-lite';
 import {
-  crearCuentaSchema, actualizarCuentaSchema,
+  crearCuentaSchema, actualizarCuentaSchema, desactivarCuentaSchema,
   crearCategoriaSchema, actualizarCategoriaSchema,
   crearPeriodoSchema,
   crearMovimientoSchema,
   crearProveedorSchema, actualizarProveedorSchema,
-  crearFacturaSchema, pagarFacturaSchema, rechazarFacturaSchema,
+  crearFacturaSchema, autorizarPagoSchema, rechazarFacturaSchema,
   crearUmbralSchema, actualizarUmbralSchema,
+  confirmarExtractoSchema, conciliarSchema,
 } from '../schemas/tesoreriaSchema.js';
+import { parseBancolombiaPwxl } from '../services/bancolombiaPwxlParser.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -68,10 +71,9 @@ export const actualizarCuenta = async (req, res, next) => {
     const sets = [];
     const vals = [];
     let i = 1;
-    if (data.nombre    !== undefined) { sets.push(`nombre = $${i++}`);    vals.push(data.nombre); }
-    if (data.entidad   !== undefined) { sets.push(`entidad = $${i++}`);   vals.push(data.entidad || null); }
-    if (data.numero    !== undefined) { sets.push(`numero = $${i++}`);    vals.push(data.numero || null); }
-    if (data.is_active !== undefined) { sets.push(`is_active = $${i++}`); vals.push(data.is_active); }
+    if (data.nombre  !== undefined) { sets.push(`nombre = $${i++}`);  vals.push(data.nombre); }
+    if (data.entidad !== undefined) { sets.push(`entidad = $${i++}`); vals.push(data.entidad || null); }
+    if (data.numero  !== undefined) { sets.push(`numero = $${i++}`);  vals.push(data.numero || null); }
     if (!sets.length) return res.status(400).json({ error: 'Sin campos a actualizar' });
     sets.push(`updated_at = NOW()`);
     vals.push(req.params.id);
@@ -81,6 +83,39 @@ export const actualizarCuenta = async (req, res, next) => {
     );
     if (!rows[0]) return res.status(404).json({ error: 'Cuenta no encontrada' });
     res.json(rows[0]);
+  } catch (err) { next(err); }
+};
+
+export const desactivarCuenta = async (req, res, next) => {
+  try {
+    if (req.user?.rol !== 'admin') {
+      return res.status(403).json({ error: 'Solo el administrador puede desactivar cuentas bancarias' });
+    }
+    desactivarCuentaSchema.parse(req.body);
+    const { id } = req.params;
+
+    const { rows: [cuenta] } = await pool.query(
+      `SELECT id, nombre, is_active FROM tesoreria_cuentas WHERE id = $1`, [id]
+    );
+    if (!cuenta) return res.status(404).json({ error: 'Cuenta no encontrada' });
+    if (!cuenta.is_active) return res.status(409).json({ error: 'La cuenta ya está inactiva' });
+
+    const { rows: [{ total }] } = await pool.query(
+      `SELECT COUNT(*) AS total FROM tesoreria_movimientos WHERE cuenta_id = $1 OR cuenta_destino_id = $1`,
+      [id]
+    );
+    if (Number(total) > 0) {
+      return res.status(409).json({
+        error: `No es posible desactivar la cuenta "${cuenta.nombre}" porque tiene ${total} movimiento(s) registrado(s). Las cuentas con historial no pueden desactivarse.`,
+        movimientos: Number(total),
+      });
+    }
+
+    const { rows: [updated] } = await pool.query(
+      `UPDATE tesoreria_cuentas SET is_active = false, updated_at = NOW() WHERE id = $1 RETURNING *`,
+      [id]
+    );
+    res.json(updated);
   } catch (err) { next(err); }
 };
 
@@ -415,7 +450,18 @@ const dashboardFacturas = async () => {
      ORDER BY monto_total DESC
   `);
 
-  return { por_estado: porEstado, alertas, eficiencia, top_proveedores: topProveedores, tendencia, por_area: porArea };
+  // Conciliación pendiente: facturas autorizadas sin movimiento + movimientos sin factura
+  const { rows: [conciliacion] } = await pool.query(`
+    SELECT
+      (SELECT COUNT(*)::int   FROM tesoreria_facturas     WHERE estado = 'autorizada' AND movimiento_id IS NULL)      AS facturas_pendientes,
+      (SELECT COALESCE(SUM(monto - retencion_fuente - retencion_ica - retencion_iva), 0)
+                               FROM tesoreria_facturas     WHERE estado = 'autorizada' AND movimiento_id IS NULL)      AS monto_facturas_pendientes,
+      (SELECT COUNT(*)::int   FROM tesoreria_movimientos  WHERE tipo = 'egreso' AND factura_id IS NULL AND origen = 'extracto') AS movimientos_sin_vincular,
+      (SELECT COALESCE(SUM(monto), 0)
+                               FROM tesoreria_movimientos  WHERE tipo = 'egreso' AND factura_id IS NULL AND origen = 'extracto') AS monto_sin_vincular
+  `);
+
+  return { por_estado: porEstado, alertas, eficiencia, top_proveedores: topProveedores, tendencia, por_area: porArea, conciliacion };
 };
 
 export const dashboard = async (req, res, next) => {
@@ -554,7 +600,7 @@ const facturaBase = `
          c.nombre     AS cuenta_pago_nombre,
          u.nombre     AS registrado_por_nombre,
          ua.nombre    AS aprobado_por_nombre,
-         mov.fecha    AS fecha_pago,
+         mov.fecha      AS fecha_movimiento,
          mov.referencia AS pago_referencia,
          CASE WHEN f.fecha_entrega_area IS NOT NULL
               THEN EXTRACT(DAY FROM (f.created_at - f.fecha_entrega_area::timestamptz))::int
@@ -634,57 +680,35 @@ export const crearFactura = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-export const pagarFactura = async (req, res, next) => {
+/**
+ * PUT /facturas/:id/autorizar
+ * Marca la factura como lista para pagar. Sin reservar cuenta ni fecha —
+ * el vínculo con la transacción bancaria ocurre al confirmar el extracto XLS.
+ */
+export const autorizarPago = async (req, res, next) => {
   try {
-    const data = pagarFacturaSchema.parse(req.body);
+    autorizarPagoSchema.parse(req.body);
     const { rows: [factura] } = await pool.query(
-      `SELECT f.*, p.nombre AS proveedor_nombre FROM tesoreria_facturas f JOIN tesoreria_proveedores p ON p.id = f.proveedor_id WHERE f.id = $1`,
+      `SELECT f.* FROM tesoreria_facturas f WHERE f.id = $1`,
       [req.params.id]
     );
     if (!factura) return res.status(404).json({ error: 'Factura no encontrada' });
-    if (factura.estado !== 'aprobada') return res.status(400).json({ error: 'La factura debe estar aprobada para pagarse' });
+    if (factura.estado !== 'aprobada')
+      return res.status(400).json({ error: 'La factura debe estar aprobada para autorizar el pago' });
     if (factura.requiere_aprobacion_gerencia && !factura.aprobado_gerencia_at)
-      return res.status(400).json({ error: 'Esta factura requiere aprobación de Gerencia antes de pagarse' });
+      return res.status(400).json({ error: 'Esta factura requiere aprobación de Gerencia antes de autorizar el pago' });
     if (factura.aprobacion_vence_at && new Date(factura.aprobacion_vence_at) < new Date())
       return res.status(400).json({ error: 'La aprobación de Control Interno ha vencido — debe ser re-aprobada' });
 
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
+    const { rows: [updated] } = await pool.query(`
+      UPDATE tesoreria_facturas
+         SET estado     = 'autorizada',
+             updated_at = NOW()
+       WHERE id = $1
+      RETURNING *
+    `, [req.params.id]);
 
-      // Crear el movimiento de egreso
-      const { rows: [mov] } = await client.query(`
-        INSERT INTO tesoreria_movimientos
-          (tipo, monto, fecha, descripcion, referencia, cuenta_id, categoria_id, periodo_id, registrado_por)
-        SELECT 'egreso', $1, $2, $3, $4, $5,
-               (SELECT id FROM tesoreria_categorias WHERE nombre = 'Pago a proveedor' LIMIT 1),
-               $6, $7
-        RETURNING *
-      `, [
-        factura.monto_neto,
-        data.fecha_pago,
-        `Pago factura — ${factura.proveedor_nombre}${factura.descripcion ? ': ' + factura.descripcion : ''}`,
-        data.referencia || null,
-        data.cuenta_pago_id,
-        data.periodo_id || null,
-        req.user.id,
-      ]);
-
-      // Marcar factura como pagada y vincular el movimiento
-      await client.query(`
-        UPDATE tesoreria_facturas
-           SET estado = 'pagada', movimiento_id = $1, cuenta_pago_id = $2, updated_at = NOW()
-         WHERE id = $3
-      `, [mov.id, data.cuenta_pago_id, req.params.id]);
-
-      await client.query('COMMIT');
-      res.json({ ok: true, movimiento_id: mov.id });
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
+    res.json(updated);
   } catch (err) { next(err); }
 };
 
@@ -820,5 +844,310 @@ export const actualizarUmbral = async (req, res, next) => {
     );
     if (!rows[0]) return res.status(404).json({ error: 'Umbral no encontrado' });
     res.json(rows[0]);
+  } catch (err) { next(err); }
+};
+
+// ── Ingesta de extracto bancario ───────────────────────────────────────────────
+
+/**
+ * GET /tesoreria/coincidencias
+ * Cruza movimientos de egreso sin factura_id contra facturas pendientes de pago.
+ * Devuelve pares {factura, movimiento} listos para que la tesorera confirme el vínculo.
+ */
+export const buscarCoincidencias = async (req, res, next) => {
+  try {
+    const { rows: facturas } = await pool.query(`
+      SELECT f.id, f.numero_factura, f.fecha_vencimiento, f.estado,
+             (f.monto - f.retencion_fuente - f.retencion_ica - f.retencion_iva) AS monto_neto,
+             p.nombre AS proveedor_nombre
+        FROM tesoreria_facturas f
+        JOIN tesoreria_proveedores p ON p.id = f.proveedor_id
+       WHERE f.estado IN ('aprobada', 'autorizada')
+         AND f.movimiento_id IS NULL
+       ORDER BY f.fecha_vencimiento
+    `);
+
+    const { rows: movimientos } = await pool.query(`
+      SELECT m.id, m.monto, m.fecha, m.descripcion, m.referencia_bancaria,
+             c.nombre AS cuenta_nombre
+        FROM tesoreria_movimientos m
+        JOIN tesoreria_cuentas c ON c.id = m.cuenta_id
+       WHERE m.tipo = 'egreso'
+         AND m.factura_id IS NULL
+         AND m.origen = 'extracto'
+       ORDER BY m.fecha DESC
+    `);
+
+    const coincidencias = [];
+    const usados = new Set();
+
+    for (const f of facturas) {
+      const match = movimientos.find(m => {
+        if (usados.has(m.id)) return false;
+        const montoOk = Math.abs(Number(m.monto) - Number(f.monto_neto)) < 1;
+        const diasDif = Math.abs((new Date(m.fecha) - new Date(f.fecha_vencimiento)) / 86400000);
+        return montoOk && diasDif <= 30;
+      });
+      if (match) {
+        usados.add(match.id);
+        coincidencias.push({ factura: f, movimiento: match });
+      }
+    }
+
+    res.json({ coincidencias, total: coincidencias.length });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /tesoreria/conciliar
+ * Confirma vínculos manuales entre movimientos ya importados y facturas pendientes.
+ * Marca la factura como pagada y asigna factura_id al movimiento.
+ */
+export const conciliarManual = async (req, res, next) => {
+  try {
+    const data = conciliarSchema.parse(req.body);
+    const resultados = [];
+
+    for (const { factura_id, movimiento_id } of data.vinculos) {
+      const { rows: [mov] } = await pool.query(
+        `SELECT id, fecha FROM tesoreria_movimientos WHERE id = $1 AND factura_id IS NULL`,
+        [movimiento_id]
+      );
+      if (!mov) {
+        resultados.push({ factura_id, movimiento_id, ok: false, error: 'Movimiento no encontrado o ya vinculado' });
+        continue;
+      }
+
+      await pool.query(
+        `UPDATE tesoreria_movimientos SET factura_id = $1 WHERE id = $2`,
+        [factura_id, movimiento_id]
+      );
+
+      const { rows: [f] } = await pool.query(`
+        UPDATE tesoreria_facturas
+           SET estado        = 'pagada',
+               movimiento_id = $1,
+               fecha_pago    = $2,
+               updated_at    = NOW()
+         WHERE id = $3
+           AND estado IN ('aprobada', 'autorizada')
+           AND movimiento_id IS NULL
+        RETURNING id
+      `, [movimiento_id, mov.fecha, factura_id]);
+
+      resultados.push({ factura_id, movimiento_id, ok: !!f });
+    }
+
+    const exitosos = resultados.filter(r => r.ok).length;
+    res.json({ resultados, exitosos, total: resultados.length });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /api/tesoreria/extracto/preview
+ * Recibe el XLS de Bancolombia (multipart), lo parsea y devuelve el preview
+ * marcando cada transacción como 'nuevo' o 'ya_registrado'.
+ */
+export const previewExtracto = async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No se recibió ningún archivo' });
+    const { cuenta_id } = req.query;
+    if (!cuenta_id) return res.status(400).json({ error: 'cuenta_id es requerido' });
+
+    const { rows: [cuenta] } = await pool.query(
+      `SELECT id, nombre FROM tesoreria_cuentas WHERE id = $1 AND is_active = true`,
+      [cuenta_id]
+    );
+    if (!cuenta) return res.status(404).json({ error: 'Cuenta no encontrada' });
+
+    const raw = iconv.decode(req.file.buffer, 'latin1');
+    const { transacciones, saldos } = parseBancolombiaPwxl(raw);
+
+    if (!transacciones.length) {
+      return res.status(422).json({ error: 'El archivo no contiene transacciones válidas' });
+    }
+
+    // Buscar duplicados usando la clave compuesta (referencia + fecha + monto)
+    // porque el banco puede reutilizar el mismo código de referencia en distintas
+    // operaciones con diferente fecha o monto.
+    const referencias = transacciones.map(t => t.referencia_bancaria).filter(Boolean);
+
+    let yaRegistradas = new Set();
+    if (referencias.length) {
+      const { rows } = await pool.query(
+        `SELECT referencia_bancaria || '|' || fecha::text || '|' || monto::text AS clave
+           FROM tesoreria_movimientos
+          WHERE cuenta_id = $1 AND referencia_bancaria = ANY($2)`,
+        [cuenta_id, referencias]
+      );
+      yaRegistradas = new Set(rows.map(r => r.clave));
+    }
+
+    // PostgreSQL retorna NUMERIC(14,2) como '126000.00'; el parser devuelve 126000 (JS number).
+    // Normalizamos a 2 decimales en ambos lados para que las claves coincidan.
+    const claveDedup = (t) => `${t.referencia_bancaria}|${t.fecha}|${Number(t.monto).toFixed(2)}`;
+
+    // Buscar facturas pendientes de pago (aprobada o autorizada) para sugerir vinculación.
+    // No filtramos por cuenta porque el vínculo cuenta↔factura se cierra al confirmar el extracto.
+    const { rows: facturasPendientes } = await pool.query(`
+      SELECT f.id,
+             f.fecha_vencimiento,
+             f.numero_factura,
+             (f.monto - f.retencion_fuente - f.retencion_ica - f.retencion_iva) AS monto_neto,
+             p.nombre AS proveedor_nombre
+        FROM tesoreria_facturas f
+        JOIN tesoreria_proveedores p ON p.id = f.proveedor_id
+       WHERE f.estado IN ('aprobada', 'autorizada')
+    `);
+
+    const preview = transacciones.map(t => {
+      const yaReg = yaRegistradas.has(claveDedup(t));
+      let sugerencia_factura = null;
+
+      if (!yaReg && t.tipo_movimiento === 'egreso' && facturasPendientes.length) {
+        const match = facturasPendientes.find(f => {
+          const montoOk = Math.abs(Number(f.monto_neto) - t.monto) < 1;
+          // La transacción debería ocurrir cerca de la fecha de vencimiento (±30 días)
+          const diasDif = (new Date(t.fecha) - new Date(f.fecha_vencimiento)) / 86400000;
+          return montoOk && diasDif >= -30 && diasDif <= 30;
+        });
+        if (match) {
+          sugerencia_factura = {
+            id:               match.id,
+            proveedor_nombre: match.proveedor_nombre,
+            monto_neto:       Number(match.monto_neto),
+            numero_factura:   match.numero_factura,
+            fecha_vencimiento: match.fecha_vencimiento,
+          };
+        }
+      }
+
+      return { ...t, estado: yaReg ? 'ya_registrado' : 'nuevo', sugerencia_factura };
+    });
+
+    const nuevas      = preview.filter(t => t.estado === 'nuevo').length;
+    const duplicadas  = preview.filter(t => t.estado === 'ya_registrado').length;
+
+    res.json({
+      cuenta: { id: cuenta.id, nombre: cuenta.nombre },
+      resumen: { total: preview.length, nuevas, duplicadas },
+      saldos,
+      transacciones: preview,
+    });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /api/tesoreria/extracto/confirmar
+ * Importa las transacciones seleccionadas por la tesorera.
+ * Procesa una por una para que un duplicado no aborte el lote completo.
+ */
+export const confirmarExtracto = async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No se recibió ningún archivo' });
+
+    const body = {
+      ...req.body,
+      referencias: JSON.parse(req.body.referencias || '[]'),
+      vinculos:    JSON.parse(req.body.vinculos    || '[]'),
+    };
+    const data = confirmarExtractoSchema.parse(body);
+
+    const { rows: [cuenta] } = await pool.query(
+      `SELECT id FROM tesoreria_cuentas WHERE id = $1 AND is_active = true`,
+      [data.cuenta_id]
+    );
+    if (!cuenta) return res.status(404).json({ error: 'Cuenta no encontrada' });
+
+    const raw = iconv.decode(req.file.buffer, 'latin1');
+    const { transacciones } = parseBancolombiaPwxl(raw);
+
+    // Solo las que la tesorera seleccionó
+    const seleccionadas = transacciones.filter(
+      t => t.referencia_bancaria && data.referencias.includes(t.referencia_bancaria)
+    );
+
+    if (!seleccionadas.length) {
+      return res.status(400).json({ error: 'Ninguna de las referencias seleccionadas se encontró en el archivo' });
+    }
+
+    const importadas  = [];
+    const omitidas    = [];
+
+    // Mapa referencia_bancaria → factura_id para aplicar vínculos
+    const vinculoMap = Object.fromEntries(
+      data.vinculos.map(v => [v.referencia_bancaria, v.factura_id])
+    );
+
+    for (const tx of seleccionadas) {
+      try {
+        const factura_id = vinculoMap[tx.referencia_bancaria] || null;
+
+        const { rows: [mov] } = await pool.query(`
+          INSERT INTO tesoreria_movimientos
+            (tipo, monto, fecha, descripcion, referencia_bancaria,
+             tipo_bancario, oficina_bancaria, detalles_banco,
+             cuenta_id, categoria_id, periodo_id, registrado_por, origen, factura_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'extracto',$13)
+          RETURNING id
+        `, [
+          tx.tipo_movimiento,
+          tx.monto,
+          tx.fecha,
+          tx.descripcion,
+          tx.referencia_bancaria,
+          tx.tipo_bancario    || null,
+          tx.oficina_bancaria || null,
+          tx.detalles_banco   || null,
+          data.cuenta_id,
+          data.categoria_id   || null,
+          data.periodo_id     || null,
+          req.user.id,
+          factura_id,
+        ]);
+
+        // Si hay vínculo, marcar la factura como pagada
+        if (factura_id) {
+          await pool.query(`
+            UPDATE tesoreria_facturas
+               SET estado       = 'pagada',
+                   movimiento_id = $1,
+                   updated_at   = NOW()
+             WHERE id = $2 AND estado = 'autorizada'
+          `, [mov.id, factura_id]);
+        }
+
+        importadas.push({ referencia: tx.referencia_bancaria, movimiento_id: mov.id, factura_id });
+      } catch (err) {
+        if (err.code === '23505') {
+          omitidas.push({ referencia: tx.referencia_bancaria, razon: 'ya registrada' });
+        } else {
+          omitidas.push({ referencia: tx.referencia_bancaria, razon: err.message });
+        }
+      }
+    }
+
+    // Guardar log de la importación
+    const fechas = seleccionadas.map(t => t.fecha).filter(Boolean).sort();
+    await pool.query(`
+      INSERT INTO tesoreria_extractos
+        (cuenta_id, fecha_desde, fecha_hasta, total_filas, importadas, omitidas, nombre_archivo, importado_por)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    `, [
+      data.cuenta_id,
+      fechas[0]             || null,
+      fechas[fechas.length - 1] || null,
+      seleccionadas.length,
+      importadas.length,
+      omitidas.length,
+      req.file.originalname || null,
+      req.user.id,
+    ]);
+
+    res.json({
+      importadas: importadas.length,
+      omitidas:   omitidas.length,
+      detalle_omitidas: omitidas,
+    });
   } catch (err) { next(err); }
 };

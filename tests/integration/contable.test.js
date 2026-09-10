@@ -298,7 +298,7 @@ describe('Facturas — reenvío tras rechazo', () => {
     expect(res.body.error).toMatch(/rechazada/i);
   });
 
-  test('Flujo completo: registrar → rechazar → reenviar → pendiente_aprobacion', async () => {
+  test('Flujo completo: registrar → aprobar área → rechazar CI → reenviar → pendiente_aprobacion', async () => {
     // 1. Registrar factura
     const agCtb = agentCtb(); await loginCtb(agCtb);
     const { body: f } = await agCtb.post('/api/contable/facturas').send({
@@ -311,7 +311,12 @@ describe('Facturas — reenvío tras rechazo', () => {
     expect(f.estado).toBe('pendiente_aprobacion');
     const fId = f.id;
 
-    // 2. CI rechaza
+    // 2. Área responsable aprueba (responsable_id es NULL → cualquier autenticado puede aprobar)
+    const aprobarRes = await agCtb.put(`/api/aprobaciones/${fId}/aprobar`);
+    expect(aprobarRes.status).toBe(200);
+    expect(aprobarRes.body.estado).toBe('aprobada');
+
+    // 3. CI rechaza (estado requerido: 'aprobada')
     const agCi = request.agent(app);
     await agCi.post('/api/auth/login').send({ email: 'ci-contable-test@kernel.test', password: PASS });
     const rechRes = await agCi.put(`/api/control_interno/facturas/${fId}/rechazar`).send({ motivo: 'Falta soporte' });
@@ -319,14 +324,14 @@ describe('Facturas — reenvío tras rechazo', () => {
     expect(rechRes.body.estado).toBe('rechazada');
     expect(rechRes.body.rechazo_motivo).toBe('Falta soporte');
 
-    // 3. Contable reenvía
+    // 4. Contable reenvía
     const reenvioRes = await agCtb.put(`/api/contable/facturas/${fId}/reenviar`);
     expect(reenvioRes.status).toBe(200);
     expect(reenvioRes.body.estado).toBe('pendiente_aprobacion');
     expect(reenvioRes.body.rechazo_motivo).toBeNull();
     expect(reenvioRes.body.aprobado_por).toBeNull();
 
-    // 4. Segunda vez en pendiente → no se puede reenviar
+    // 5. Segunda vez en pendiente → no se puede reenviar
     const segundoRes = await agCtb.put(`/api/contable/facturas/${fId}/reenviar`);
     expect(segundoRes.status).toBe(400);
   });

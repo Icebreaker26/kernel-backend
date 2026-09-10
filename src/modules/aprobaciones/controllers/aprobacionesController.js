@@ -36,6 +36,17 @@ export const contarPendientes = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const listarUsuarios = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, nombre, rol FROM global_usuarios
+        WHERE is_active = true AND is_approved = true
+        ORDER BY nombre ASC`
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+};
+
 export const aprobar = async (req, res, next) => {
   try {
     const { id } = req.params;

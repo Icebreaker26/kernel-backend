@@ -186,6 +186,32 @@ describe('GET /aprobaciones/contar — badge del selector', () => {
   });
 });
 
+// ── GET /usuarios — selector de responsable ──────────────────────────────────
+describe('GET /aprobaciones/usuarios — selector de responsable', () => {
+  test('usuario autenticado recibe lista de usuarios activos y aprobados', async () => {
+    const ag = agentResp(); await loginResp(ag);
+    const res = await ag.get('/api/aprobaciones/usuarios');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBeGreaterThan(0);
+  });
+
+  test('cada usuario tiene id, nombre y rol', async () => {
+    const ag = agentResp(); await loginResp(ag);
+    const res = await ag.get('/api/aprobaciones/usuarios');
+    expect(res.status).toBe(200);
+    res.body.forEach(u => {
+      expect(u).toHaveProperty('id');
+      expect(u).toHaveProperty('nombre');
+      expect(u).toHaveProperty('rol');
+    });
+  });
+
+  test('sin token → 401', async () => {
+    expect((await request(app).get('/api/aprobaciones/usuarios')).status).toBe(401);
+  });
+});
+
 // ── PUT /:id/aprobar ──────────────────────────────────────────────────────────
 describe('PUT /aprobaciones/:id/aprobar', () => {
   test('usuario no responsable no puede aprobar factura ajena → 403', async () => {

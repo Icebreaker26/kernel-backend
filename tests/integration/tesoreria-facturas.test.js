@@ -2,6 +2,9 @@ import request from 'supertest';
 import { createApp } from '../../src/createApp.js';
 import pool from '../../src/db/database.js';
 import bcrypt from 'bcrypt';
+import { jest } from '@jest/globals';
+
+jest.setTimeout(30000);
 
 let app;
 
@@ -361,6 +364,100 @@ describe('Facturas — flujo completo', () => {
     const res = await ag.get('/api/control_interno/facturas?estado=aprobada');
     expect(res.status).toBe(200);
     expect(res.body.some(f => f.id === facturaId)).toBe(false);
+  });
+});
+
+// ── Usuarios disponibles ──────────────────────────────────────────────────────
+describe('Usuarios disponibles — selector de responsable', () => {
+  test('GET /tesoreria/usuarios-disponibles → 200 lista de usuarios activos', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.get('/api/tesoreria/usuarios-disponibles');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBeGreaterThan(0);
+    const u = res.body[0];
+    expect(u).toHaveProperty('id');
+    expect(u).toHaveProperty('nombre');
+    expect(u).toHaveProperty('rol');
+    expect(Object.keys(u)).not.toContain('password_hash');
+  });
+
+  test('GET /tesoreria/usuarios-disponibles sin token → 401', async () => {
+    expect((await request(app).get('/api/tesoreria/usuarios-disponibles')).status).toBe(401);
+  });
+
+  test('GET /tesoreria/usuarios-disponibles — el responsable de test aparece en la lista', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.get('/api/tesoreria/usuarios-disponibles');
+    expect(res.body.some(u => u.id === uuidResp)).toBe(true);
+  });
+});
+
+// ── Mis pendientes — vista por responsable ────────────────────────────────────
+describe('Facturas — mis-pendientes', () => {
+  let facturaAsignadaId;
+
+  afterAll(async () => {
+    if (facturaAsignadaId) await pool.query(`DELETE FROM tesoreria_facturas WHERE id = $1`, [facturaAsignadaId]);
+  });
+
+  test('POST factura con responsable_id → 201, responsable asignado', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.post('/api/tesoreria/facturas').send({
+      proveedor_id:      proveedorRecId,
+      monto:             120000,
+      fecha_recibida:    '2026-09-05',
+      fecha_vencimiento: '2026-09-28',
+      responsable_id:    uuidResp,
+      descripcion:       'Factura asignada a responsable para test mis-pendientes',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.responsable_id).toBe(uuidResp);
+    expect(res.body.estado).toBe('pendiente_aprobacion');
+    facturaAsignadaId = res.body.id;
+  });
+
+  test('GET /facturas/:id → responsable_nombre presente', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.get(`/api/tesoreria/facturas/${facturaAsignadaId}`);
+    expect(res.status).toBe(200);
+    expect(res.body.responsable_nombre).toBe('Responsable Area Test');
+  });
+
+  test('GET /facturas/mis-pendientes — responsable ve solo su factura', async () => {
+    const ag = agentResp(); await loginResp(ag);
+    const res = await ag.get('/api/tesoreria/facturas/mis-pendientes');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.some(f => f.id === facturaAsignadaId)).toBe(true);
+    // No debe ver facturas de otros
+    expect(res.body.every(f => f.responsable_id === uuidResp)).toBe(true);
+  });
+
+  test('GET /facturas/mis-pendientes — tesorería NO ve esa factura (no le pertenece)', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag.get('/api/tesoreria/facturas/mis-pendientes');
+    expect(res.status).toBe(200);
+    expect(res.body.some(f => f.id === facturaAsignadaId)).toBe(false);
+  });
+
+  test('GET /facturas/mis-pendientes sin token → 401', async () => {
+    expect((await request(app).get('/api/tesoreria/facturas/mis-pendientes')).status).toBe(401);
+  });
+
+  test('PUT aprobar-area — responsable aprueba su factura asignada', async () => {
+    const ag = agentResp(); await loginResp(ag);
+    const res = await ag.put(`/api/tesoreria/facturas/${facturaAsignadaId}/aprobar-area`).send({});
+    expect(res.status).toBe(200);
+    expect(res.body.estado).toBe('aprobada');
+    expect(res.body.aprobado_por).toBe(uuidResp);
+  });
+
+  test('GET /facturas/mis-pendientes — ya no aparece después de aprobar', async () => {
+    const ag = agentResp(); await loginResp(ag);
+    const res = await ag.get('/api/tesoreria/facturas/mis-pendientes');
+    expect(res.status).toBe(200);
+    expect(res.body.some(f => f.id === facturaAsignadaId)).toBe(false);
   });
 });
 

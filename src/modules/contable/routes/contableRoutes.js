@@ -10,6 +10,7 @@ import {
 import {
   getEstado, solicitarCambio,
   solicitarCertificadoUpload, confirmarCertificadoUpload,
+  verCertificadoDeProveedor,
 } from '../../control_interno/controllers/datosBancariosController.js';
 import {
   solicitarUpload, confirmarUpload, descargarAdjunto, listarAdjuntos,
@@ -29,6 +30,7 @@ router.put('/facturas/:id/reenviar',   checkPermission('contable', 'WRITE'), ree
 router.get('/proveedores',                        checkPermission('contable', 'READ'),  listarProveedores);
 router.get('/proveedores/:id/perfil',             checkPermission('contable', 'READ'),  perfilProveedor);
 router.get('/proveedores/:id/datos-bancarios',                          checkPermission('contable', 'READ'),  getEstado);
+router.get('/proveedores/:id/certificado',                              checkPermission('contable', 'READ'),  verCertificadoDeProveedor);
 router.post('/proveedores/:id/datos-bancarios',                         checkPermission('contable', 'WRITE'), solicitarCambio);
 router.post('/proveedores/:id/datos-bancarios/:solicitudId/certificado', checkPermission('contable', 'WRITE'), solicitarCertificadoUpload);
 router.patch('/proveedores/:id/datos-bancarios/:solicitudId/certificado', checkPermission('contable', 'WRITE'), confirmarCertificadoUpload);

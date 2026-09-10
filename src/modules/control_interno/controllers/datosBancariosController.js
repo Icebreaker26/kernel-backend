@@ -113,6 +113,27 @@ export const verCertificado = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── Contable: ver certificado bancario por proveedor (última solicitud con cert) ──
+export const verCertificadoDeProveedor = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { rows: solicitudes } = await pool.query(
+      `SELECT id FROM tesoreria_proveedores_datos_bancarios
+        WHERE proveedor_id = $1
+        ORDER BY created_at DESC`,
+      [id]
+    );
+    for (const sol of solicitudes) {
+      const archivos = await listarArchivos('certificado_bancario', sol.id);
+      if (archivos.length) {
+        const result = await generarPresignedDescarga(archivos[0].id);
+        return res.json(result);
+      }
+    }
+    return res.status(404).json({ error: 'Sin certificado adjunto' });
+  } catch (err) { next(err); }
+};
+
 // ── CI: listar todas las solicitudes pendientes ────────────────────────────
 export const listarPendientes = async (req, res, next) => {
   try {

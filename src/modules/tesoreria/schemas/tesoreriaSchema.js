@@ -88,6 +88,7 @@ export const crearFacturaSchema = z.object({
   fecha_recibida:     z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   fecha_vencimiento:  z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   area_responsable:   z.string().optional().or(z.literal('')),
+  responsable_id:     uuidOpcional,
   fecha_entrega_area: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().or(z.literal('')),
   descripcion:        z.string().optional().or(z.literal('')),
   numero_factura:     z.string().optional().or(z.literal('')),
@@ -101,6 +102,9 @@ export const crearFacturaSchema = z.object({
     ctx.addIssue({ code: 'custom', path: ['retencion_fuente'], message: 'Las retenciones no pueden superar el monto de la factura' });
   }
 });
+
+// Aprobación del área responsable: solo confirma que revisó la factura
+export const aprobarAreaSchema = z.object({}).strict();
 
 // Autorizar pago: marca la factura lista para pagar, sin reservar cuenta ni fecha.
 // El vínculo con la transacción bancaria ocurre al subir el extracto XLS.

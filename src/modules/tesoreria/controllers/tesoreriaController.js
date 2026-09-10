@@ -7,7 +7,7 @@ import {
   crearPeriodoSchema,
   crearMovimientoSchema,
   crearProveedorSchema, actualizarProveedorSchema,
-  crearFacturaSchema, autorizarPagoSchema, rechazarFacturaSchema,
+  crearFacturaSchema, aprobarAreaSchema, autorizarPagoSchema, rechazarFacturaSchema,
   crearUmbralSchema, actualizarUmbralSchema,
   confirmarExtractoSchema, conciliarSchema,
 } from '../schemas/tesoreriaSchema.js';
@@ -372,24 +372,24 @@ const dashboardFacturas = async () => {
      GROUP BY estado
   `);
 
-  // Alertas: vencidas y urgentes (pendiente o aprobada)
+  // Alertas: vencidas y urgentes (en cualquier estado previo a pagada)
   const { rows: [alertas] } = await pool.query(`
     SELECT
       COUNT(*) FILTER (
-        WHERE estado IN ('pendiente_aprobacion','aprobada')
+        WHERE estado IN ('pendiente_aprobacion','aprobada','verificada')
           AND fecha_vencimiento < CURRENT_DATE
       )::int AS vencidas,
       COALESCE(SUM(monto) FILTER (
-        WHERE estado IN ('pendiente_aprobacion','aprobada')
+        WHERE estado IN ('pendiente_aprobacion','aprobada','verificada')
           AND fecha_vencimiento < CURRENT_DATE
       ), 0)::numeric AS monto_vencido,
       COUNT(*) FILTER (
-        WHERE estado IN ('pendiente_aprobacion','aprobada')
+        WHERE estado IN ('pendiente_aprobacion','aprobada','verificada')
           AND fecha_vencimiento >= CURRENT_DATE
           AND fecha_vencimiento <= CURRENT_DATE + INTERVAL '5 days'
       )::int AS urgentes,
       COALESCE(SUM(monto) FILTER (
-        WHERE estado IN ('pendiente_aprobacion','aprobada')
+        WHERE estado IN ('pendiente_aprobacion','aprobada','verificada')
       ), 0)::numeric AS monto_pendiente
     FROM tesoreria_facturas
   `);
@@ -444,7 +444,7 @@ const dashboardFacturas = async () => {
            COUNT(*)::int               AS cantidad,
            COALESCE(SUM(monto), 0)    AS monto_total
       FROM tesoreria_facturas
-     WHERE estado IN ('pendiente_aprobacion','aprobada')
+     WHERE estado IN ('pendiente_aprobacion','aprobada','verificada')
        AND area_responsable IS NOT NULL
      GROUP BY area_responsable
      ORDER BY monto_total DESC
@@ -599,23 +599,27 @@ const facturaBase = `
          p.categoria  AS proveedor_categoria,
          c.nombre     AS cuenta_pago_nombre,
          u.nombre     AS registrado_por_nombre,
+         ur.nombre    AS responsable_nombre,
          ua.nombre    AS aprobado_por_nombre,
+         uv.nombre    AS verificada_por_nombre,
          mov.fecha      AS fecha_movimiento,
          mov.referencia AS pago_referencia,
          CASE WHEN f.fecha_entrega_area IS NOT NULL
               THEN EXTRACT(DAY FROM (f.created_at - f.fecha_entrega_area::timestamptz))::int
          END AS dias_area_contable,
-         CASE WHEN f.aprobado_at IS NOT NULL
-              THEN EXTRACT(DAY FROM (f.aprobado_at - f.created_at))::int
+         CASE WHEN f.verificada_at IS NOT NULL
+              THEN EXTRACT(DAY FROM (f.verificada_at - f.created_at))::int
          END AS dias_control_interno,
-         CASE WHEN f.aprobado_at IS NOT NULL AND mov.fecha IS NOT NULL
-              THEN (mov.fecha - f.aprobado_at::date)::int
+         CASE WHEN f.verificada_at IS NOT NULL AND mov.fecha IS NOT NULL
+              THEN (mov.fecha - f.verificada_at::date)::int
          END AS dias_tesoreria
     FROM tesoreria_facturas f
-    JOIN tesoreria_proveedores p   ON p.id  = f.proveedor_id
-    LEFT JOIN tesoreria_cuentas c  ON c.id  = f.cuenta_pago_id
-    LEFT JOIN global_usuarios u    ON u.id  = f.registrado_por
-    LEFT JOIN global_usuarios ua   ON ua.id = f.aprobado_por
+    JOIN tesoreria_proveedores p    ON p.id   = f.proveedor_id
+    LEFT JOIN tesoreria_cuentas c   ON c.id   = f.cuenta_pago_id
+    LEFT JOIN global_usuarios u     ON u.id   = f.registrado_por
+    LEFT JOIN global_usuarios ur    ON ur.id  = f.responsable_id
+    LEFT JOIN global_usuarios ua    ON ua.id  = f.aprobado_por
+    LEFT JOIN global_usuarios uv    ON uv.id  = f.verificada_por
     LEFT JOIN tesoreria_movimientos mov ON mov.id = f.movimiento_id
 `;
 
@@ -656,16 +660,17 @@ export const crearFactura = async (req, res, next) => {
     const { rows } = await pool.query(`
       INSERT INTO tesoreria_facturas
         (proveedor_id, monto, fecha_emision, fecha_recibida, fecha_vencimiento,
-         area_responsable, fecha_entrega_area, descripcion, numero_factura,
+         area_responsable, responsable_id, fecha_entrega_area, descripcion, numero_factura,
          cuenta_pago_id, registrado_por, requiere_aprobacion_gerencia,
          retencion_fuente, retencion_ica, retencion_iva)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *
     `, [
       data.proveedor_id, data.monto,
       data.fecha_emision      || null,
       data.fecha_recibida,
       data.fecha_vencimiento,
       data.area_responsable   || null,
+      data.responsable_id     || null,
       data.fecha_entrega_area || null,
       data.descripcion        || null,
       data.numero_factura     || null,
@@ -681,9 +686,39 @@ export const crearFactura = async (req, res, next) => {
 };
 
 /**
+ * PUT /facturas/:id/aprobar-area
+ * El responsable asignado aprueba la factura: pendiente_aprobacion → aprobada.
+ */
+export const aprobarArea = async (req, res, next) => {
+  try {
+    aprobarAreaSchema.parse(req.body);
+    const { rows: [factura] } = await pool.query(
+      `SELECT id, estado, responsable_id FROM tesoreria_facturas WHERE id = $1`,
+      [req.params.id]
+    );
+    if (!factura) return res.status(404).json({ error: 'Factura no encontrada' });
+    if (factura.estado !== 'pendiente_aprobacion')
+      return res.status(400).json({ error: `Estado actual: ${factura.estado}` });
+    if (factura.responsable_id && factura.responsable_id !== req.user.id)
+      return res.status(403).json({ error: 'Solo el responsable asignado puede aprobar esta factura' });
+
+    const { rows: [updated] } = await pool.query(`
+      UPDATE tesoreria_facturas
+         SET estado     = 'aprobada',
+             aprobado_por = $1,
+             aprobado_at  = NOW(),
+             updated_at   = NOW()
+       WHERE id = $2
+      RETURNING *
+    `, [req.user.id, req.params.id]);
+    res.json(updated);
+  } catch (err) { next(err); }
+};
+
+/**
  * PUT /facturas/:id/autorizar
- * Marca la factura como lista para pagar. Sin reservar cuenta ni fecha —
- * el vínculo con la transacción bancaria ocurre al confirmar el extracto XLS.
+ * Tesorería autoriza el pago. La factura debe estar verificada (CI).
+ * El vínculo con la transacción bancaria ocurre al confirmar el extracto XLS.
  */
 export const autorizarPago = async (req, res, next) => {
   try {
@@ -693,12 +728,12 @@ export const autorizarPago = async (req, res, next) => {
       [req.params.id]
     );
     if (!factura) return res.status(404).json({ error: 'Factura no encontrada' });
-    if (factura.estado !== 'aprobada')
-      return res.status(400).json({ error: 'La factura debe estar aprobada para autorizar el pago' });
+    if (factura.estado !== 'verificada')
+      return res.status(400).json({ error: 'La factura debe estar verificada por Control Interno para autorizar el pago' });
     if (factura.requiere_aprobacion_gerencia && !factura.aprobado_gerencia_at)
       return res.status(400).json({ error: 'Esta factura requiere aprobación de Gerencia antes de autorizar el pago' });
     if (factura.aprobacion_vence_at && new Date(factura.aprobacion_vence_at) < new Date())
-      return res.status(400).json({ error: 'La aprobación de Control Interno ha vencido — debe ser re-aprobada' });
+      return res.status(400).json({ error: 'La verificación de Control Interno ha vencido — debe ser re-verificada' });
 
     const { rows: [updated] } = await pool.query(`
       UPDATE tesoreria_facturas
@@ -736,6 +771,8 @@ export const reenviarFactura = async (req, res, next) => {
              aprobacion_vence_at         = NULL,
              aprobado_gerencia_por       = NULL,
              aprobado_gerencia_at        = NULL,
+             verificada_por              = NULL,
+             verificada_at               = NULL,
              requiere_aprobacion_gerencia = $1,
              updated_at                  = NOW()
        WHERE id = $2
@@ -745,7 +782,7 @@ export const reenviarFactura = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ── Control Interno — aprobación (también usado desde control_interno module) ──
+// ── Control Interno — verificación ────────────────────────────────────────────
 
 export const aprobarFactura = async (req, res, next) => {
   try {
@@ -753,7 +790,7 @@ export const aprobarFactura = async (req, res, next) => {
       `SELECT estado FROM tesoreria_facturas WHERE id = $1`, [req.params.id]
     );
     if (!f) return res.status(404).json({ error: 'Factura no encontrada' });
-    if (f.estado !== 'pendiente_aprobacion') return res.status(400).json({ error: `Estado actual: ${f.estado}` });
+    if (f.estado !== 'aprobada') return res.status(400).json({ error: `Estado actual: ${f.estado}` });
 
     const { rows: [umbral] } = await pool.query(
       `SELECT dias_vencimiento FROM tesoreria_config_umbrales WHERE tipo_operacion = 'egreso_proveedor' LIMIT 1`
@@ -762,7 +799,8 @@ export const aprobarFactura = async (req, res, next) => {
 
     const { rows } = await pool.query(`
       UPDATE tesoreria_facturas
-         SET estado = 'aprobada', aprobado_por = $1, aprobado_at = NOW(),
+         SET estado = 'verificada',
+             verificada_por = $1, verificada_at = NOW(),
              aprobacion_vence_at = NOW() + ($2 || ' days')::interval,
              updated_at = NOW()
        WHERE id = $3 RETURNING *
@@ -780,7 +818,7 @@ export const aprobarGerencia = async (req, res, next) => {
     if (!f) return res.status(404).json({ error: 'Factura no encontrada' });
     if (!f.requiere_aprobacion_gerencia) return res.status(400).json({ error: 'Esta factura no requiere aprobación de Gerencia' });
     if (f.aprobado_gerencia_at) return res.status(400).json({ error: 'Ya fue aprobada por Gerencia' });
-    if (f.estado !== 'aprobada') return res.status(400).json({ error: 'La factura debe estar aprobada por Control Interno primero' });
+    if (f.estado !== 'verificada') return res.status(400).json({ error: 'La factura debe estar verificada por Control Interno primero' });
     const { rows } = await pool.query(`
       UPDATE tesoreria_facturas
          SET aprobado_gerencia_por = $1, aprobado_gerencia_at = NOW(), updated_at = NOW()
@@ -797,13 +835,41 @@ export const rechazarFactura = async (req, res, next) => {
       `SELECT estado FROM tesoreria_facturas WHERE id = $1`, [req.params.id]
     );
     if (!f) return res.status(404).json({ error: 'Factura no encontrada' });
-    if (f.estado !== 'pendiente_aprobacion') return res.status(400).json({ error: `Estado actual: ${f.estado}` });
+    // CI puede rechazar desde 'aprobada' (área aprobó, pero CI observa problema)
+    if (f.estado !== 'aprobada') return res.status(400).json({ error: `Estado actual: ${f.estado}` });
     const { rows } = await pool.query(`
       UPDATE tesoreria_facturas
-         SET estado = 'rechazada', rechazo_motivo = $1, aprobado_por = $2, aprobado_at = NOW(), updated_at = NOW()
+         SET estado = 'rechazada', rechazo_motivo = $1, verificada_por = $2, verificada_at = NOW(), updated_at = NOW()
        WHERE id = $3 RETURNING *
     `, [motivo, req.user.id, req.params.id]);
     res.json(rows[0]);
+  } catch (err) { next(err); }
+};
+
+// ── Usuarios disponibles (selector de responsable) ────────────────────────────
+
+export const listarUsuariosDisponibles = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT id, nombre, rol FROM global_usuarios
+       WHERE is_active = true AND is_approved = true
+       ORDER BY nombre
+    `);
+    res.json(rows);
+  } catch (err) { next(err); }
+};
+
+// ── Mis facturas pendientes de aprobación ──────────────────────────────────────
+
+export const misFacturasPendientes = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`
+      ${facturaBase}
+       WHERE f.responsable_id = $1
+         AND f.estado = 'pendiente_aprobacion'
+       ORDER BY f.fecha_vencimiento ASC
+    `, [req.user.id]);
+    res.json(rows);
   } catch (err) { next(err); }
 };
 
@@ -862,7 +928,7 @@ export const buscarCoincidencias = async (req, res, next) => {
              p.nombre AS proveedor_nombre
         FROM tesoreria_facturas f
         JOIN tesoreria_proveedores p ON p.id = f.proveedor_id
-       WHERE f.estado IN ('aprobada', 'autorizada')
+       WHERE f.estado IN ('aprobada', 'verificada', 'autorizada')
          AND f.movimiento_id IS NULL
        ORDER BY f.fecha_vencimiento
     `);
@@ -930,7 +996,7 @@ export const conciliarManual = async (req, res, next) => {
                fecha_pago    = $2,
                updated_at    = NOW()
          WHERE id = $3
-           AND estado IN ('aprobada', 'autorizada')
+           AND estado IN ('aprobada', 'verificada', 'autorizada')
            AND movimiento_id IS NULL
         RETURNING id
       `, [movimiento_id, mov.fecha, factura_id]);
@@ -997,7 +1063,7 @@ export const previewExtracto = async (req, res, next) => {
              p.nombre AS proveedor_nombre
         FROM tesoreria_facturas f
         JOIN tesoreria_proveedores p ON p.id = f.proveedor_id
-       WHERE f.estado IN ('aprobada', 'autorizada')
+       WHERE f.estado IN ('aprobada', 'verificada', 'autorizada')
     `);
 
     const preview = transacciones.map(t => {

@@ -53,11 +53,16 @@ router.post('/proveedores',     checkPermission('tesoreria', 'WRITE'),  ctrl.cre
 router.put('/proveedores/:id',  checkPermission('tesoreria', 'WRITE'),  ctrl.actualizarProveedor);
 
 // ── Facturas ───────────────────────────────────────────────────────────────────
+router.get('/facturas/mis-pendientes',         checkPermission('tesoreria', 'READ'),   ctrl.misFacturasPendientes);
 router.get('/facturas',                        checkPermission('tesoreria', 'READ'),   ctrl.listarFacturas);
 router.get('/facturas/:id',                    checkPermission('tesoreria', 'READ'),   ctrl.getFactura);
 router.post('/facturas',                       checkPermission('tesoreria', 'WRITE'),  ctrl.crearFactura);
+router.put('/facturas/:id/aprobar-area',       checkPermission('tesoreria', 'WRITE'),  ctrl.aprobarArea);
 router.put('/facturas/:id/autorizar',          checkPermission('tesoreria', 'WRITE'),  ctrl.autorizarPago);
 router.put('/facturas/:id/aprobar-gerencia',   checkPermission('tesoreria', 'WRITE'),  ctrl.aprobarGerencia);
+
+// ── Usuarios disponibles (selector de responsable) ─────────────────────────────
+router.get('/usuarios-disponibles', checkPermission('tesoreria', 'READ'), ctrl.listarUsuariosDisponibles);
 
 // ── Config — Umbrales ──────────────────────────────────────────────────────────
 router.get('/config/umbrales',     checkPermission('tesoreria', 'READ'),   ctrl.listarUmbrales);

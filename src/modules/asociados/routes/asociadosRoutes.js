@@ -73,6 +73,10 @@ router.get('/:codigo/historial-aporte',
   verifyToken, checkPermission('asociados', 'READ'),
   ctrl.historialAporte
 );
+router.get('/:codigo/historial-descuentos',
+  verifyToken, checkPermission('asociados', 'READ'),
+  ctrl.historialDescuentos
+);
 router.get('/:codigo/discrepancias',
   verifyToken, checkPermission('asociados', 'READ'),
   ctrl.discrepanciasCodigo

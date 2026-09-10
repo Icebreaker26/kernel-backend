@@ -1186,13 +1186,16 @@ describe('Asociados — descuentos portal (GET /descuentos)', () => {
     expect(Number(linea5.valor)).toBe(8000);
   });
 
-  test('Re-sync con valores distintos → upsert actualiza los montos', async () => {
+  test('Re-sync con valores distintos → filas activas reflejan los nuevos montos', async () => {
     const ag = agent();
     await loginAdmin(ag);
     await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_ACTUALIZADO), 'desc2.csv');
 
+    // Borrado lógico: filas con valor anterior quedan is_active=false; filtrar por activas
     const { rows } = await pool.query(
-      `SELECT linea_id, valor FROM asociado_descuentos WHERE asociado_codigo = $1 ORDER BY linea_id`,
+      `SELECT linea_id, valor FROM asociado_descuentos
+       WHERE asociado_codigo = $1 AND is_active = true
+       ORDER BY linea_id`,
       [codigoDesc]
     );
     const l4 = rows.find((r) => r.linea_id === 4);
@@ -1627,9 +1630,11 @@ describe('Asociados — campos extendidos: crédito y fecha_pri_descuento', () =
       const importRes = await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_REIMPORT), 'ext2.csv');
       expect(importRes.status).toBe(200);
 
+      // Borrado lógico: la fila anterior queda is_active=false; la nueva es_activa y tiene ultima_vez_en_csv más reciente
       const { rows } = await pool.query(
         `SELECT saldo_credito, fecha_pri_descuento FROM asociado_descuentos
-         WHERE asociado_codigo = $1 AND linea_id = 1004`,
+         WHERE asociado_codigo = $1 AND linea_id = 1004
+         ORDER BY ultima_vez_en_csv DESC LIMIT 1`,
         [codigoExt]
       );
       expect(Number(rows[0].saldo_credito)).toBe(1500000);
@@ -2080,5 +2085,290 @@ describe('Asociados — GET /:codigo/discrepancias', () => {
     const res = await ag.get(`/api/asociados/${COD_MAL2}/discrepancias`);
     expect(res.status).toBe(200);
     expect(res.body).toEqual([]);
+  });
+});
+
+// ── Fase 1: Historial de descuentos generado por sync ────────────────────────
+
+describe('Asociados — Fase 1: historial descuentos generado por sync CSV', () => {
+  // Usa créditos (con numero) para que el key codigo:numero sea determinístico
+  const codigoHist = '9996660001';
+
+  // V1: crédito CRED-H01 (valor=200000, saldo=8000000) + seguro línea 4 (no tiene numero)
+  const CSV_HIST_V1 = [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto,valor_obligacion,saldo,plazo,fecha_vencimiento,fecha_pri_decuento,tasa_interes,numero',
+    `1,${codigoHist},Hist,Test,1,EMP01,Empresa Test,Pereira,Calle H,3001234567,,,,,,,,,`,
+    `1006,${codigoHist},Hist,Test,1,EMP01,Empresa Test,Pereira,Calle H,3001234567,200.000,,10000000,8000000,60,31/12/2027,01/01/2023,18,CRED-H01`,
+  ].join('\n');
+
+  // V2: mismo crédito CRED-H01 sin cambios → no debe generar historial
+  const CSV_HIST_V2 = [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto,valor_obligacion,saldo,plazo,fecha_vencimiento,fecha_pri_decuento,tasa_interes,numero',
+    `1,${codigoHist},Hist,Test,1,EMP01,Empresa Test,Pereira,Calle H,3001234567,,,,,,,,,`,
+    `1006,${codigoHist},Hist,Test,1,EMP01,Empresa Test,Pereira,Calle H,3001234567,200.000,,10000000,8000000,60,31/12/2027,01/01/2023,18,CRED-H01`,
+  ].join('\n');
+
+  // V3: saldo_credito cambia 8000000 → 6000000
+  const CSV_HIST_V3 = [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto,valor_obligacion,saldo,plazo,fecha_vencimiento,fecha_pri_decuento,tasa_interes,numero',
+    `1,${codigoHist},Hist,Test,1,EMP01,Empresa Test,Pereira,Calle H,3001234567,,,,,,,,,`,
+    `1006,${codigoHist},Hist,Test,1,EMP01,Empresa Test,Pereira,Calle H,3001234567,200.000,,10000000,6000000,60,31/12/2027,01/01/2023,18,CRED-H01`,
+  ].join('\n');
+
+  // V4: CRED-H01 desaparece del CSV pero hay otra línea de descuento (línea 4)
+  // para que el bloque descuentos se ejecute y aplique el borrado lógico
+  const CSV_HIST_V4 = [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto,valor_obligacion,saldo,plazo,fecha_vencimiento,fecha_pri_decuento,tasa_interes,numero',
+    `1,${codigoHist},Hist,Test,1,EMP01,Empresa Test,Pereira,Calle H,3001234567,,,,,,,,,`,
+    `4,${codigoHist},Hist,Test,1,EMP01,Empresa Test,Pereira,Calle H,3001234567,15.000,,,,,,,,`,
+  ].join('\n');
+
+  let syncId1, syncId2, syncId3, syncId4;
+
+  beforeAll(async () => {
+    await pool.query('DELETE FROM asociado_descuentos_historial WHERE asociado_codigo = $1', [codigoHist]);
+    await pool.query('DELETE FROM asociado_descuentos            WHERE asociado_codigo = $1', [codigoHist]);
+    await pool.query('DELETE FROM asociados                      WHERE codigo = $1',           [codigoHist]);
+
+    const ag = agent();
+    await loginAdmin(ag);
+
+    const r1 = await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_HIST_V1), 'histv1.csv');
+    syncId1 = r1.body.sync_id;
+
+    const r2 = await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_HIST_V2), 'histv2.csv');
+    syncId2 = r2.body.sync_id;
+
+    const r3 = await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_HIST_V3), 'histv3.csv');
+    syncId3 = r3.body.sync_id;
+
+    const r4 = await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_HIST_V4), 'histv4.csv');
+    syncId4 = r4.body.sync_id;
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM asociado_descuentos_historial WHERE asociado_codigo = $1', [codigoHist]);
+    await pool.query('DELETE FROM asociado_descuentos            WHERE asociado_codigo = $1', [codigoHist]);
+    await pool.query('DELETE FROM sincronizaciones               WHERE usuario_uuid = $1',    [adminUuid]);
+    await pool.query('DELETE FROM asociados                      WHERE codigo = $1',           [codigoHist]);
+  });
+
+  test('Primera sync — registra aparición de CRED-H01 con valor_anterior=null', async () => {
+    const { rows } = await pool.query(
+      `SELECT campo, valor_anterior, valor_nuevo, sync_id
+       FROM asociado_descuentos_historial
+       WHERE asociado_codigo = $1 AND linea_id = 1006 AND numero = 'CRED-H01' AND sync_id = $2
+       ORDER BY campo`,
+      [codigoHist, syncId1]
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    const entradaValor = rows.find((r) => r.campo === 'valor');
+    expect(entradaValor).toBeDefined();
+    expect(entradaValor.valor_anterior).toBeNull();
+    expect(Number(entradaValor.valor_nuevo)).toBe(200000);
+  });
+
+  test('Primera sync — registra saldo_credito inicial con valor_anterior=null', async () => {
+    const { rows } = await pool.query(
+      `SELECT campo, valor_anterior, valor_nuevo
+       FROM asociado_descuentos_historial
+       WHERE asociado_codigo = $1 AND linea_id = 1006 AND numero = 'CRED-H01' AND sync_id = $2`,
+      [codigoHist, syncId1]
+    );
+    const entradaSaldo = rows.find((r) => r.campo === 'saldo_credito');
+    expect(entradaSaldo).toBeDefined();
+    expect(entradaSaldo.valor_anterior).toBeNull();
+    expect(Number(entradaSaldo.valor_nuevo)).toBe(8000000);
+  });
+
+  test('Primera sync — sync_id en historial coincide con el sync retornado', async () => {
+    const { rows } = await pool.query(
+      `SELECT sync_id FROM asociado_descuentos_historial
+       WHERE asociado_codigo = $1 AND sync_id = $2
+       LIMIT 1`,
+      [codigoHist, syncId1]
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].sync_id).toBe(syncId1);
+  });
+
+  test('Segunda sync sin cambios — no genera entradas de historial para CRED-H01', async () => {
+    const { rows } = await pool.query(
+      `SELECT id FROM asociado_descuentos_historial
+       WHERE asociado_codigo = $1 AND linea_id = 1006 AND numero = 'CRED-H01' AND sync_id = $2`,
+      [codigoHist, syncId2]
+    );
+    expect(rows.length).toBe(0);
+  });
+
+  test('Tercera sync — registra cambio de saldo_credito 8000000→6000000', async () => {
+    const { rows } = await pool.query(
+      `SELECT campo, valor_anterior, valor_nuevo
+       FROM asociado_descuentos_historial
+       WHERE asociado_codigo = $1 AND linea_id = 1006 AND numero = 'CRED-H01' AND sync_id = $2`,
+      [codigoHist, syncId3]
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    const entradaSaldo = rows.find((r) => r.campo === 'saldo_credito');
+    expect(entradaSaldo).toBeDefined();
+    expect(Number(entradaSaldo.valor_anterior)).toBe(8000000);
+    expect(Number(entradaSaldo.valor_nuevo)).toBe(6000000);
+  });
+
+  test('Tercera sync — campos sin cambio no generan entradas (valor sigue en 200000)', async () => {
+    const { rows } = await pool.query(
+      `SELECT campo FROM asociado_descuentos_historial
+       WHERE asociado_codigo = $1 AND linea_id = 1006 AND numero = 'CRED-H01' AND sync_id = $2`,
+      [codigoHist, syncId3]
+    );
+    const camposRegistrados = rows.map((r) => r.campo);
+    expect(camposRegistrados).not.toContain('valor'); // valor no cambió
+    expect(camposRegistrados).not.toContain('tasa_interes'); // tampoco
+  });
+
+  test('Cuarta sync — CRED-H01 desaparece → historial registra is_active 1→0', async () => {
+    const { rows } = await pool.query(
+      `SELECT campo, valor_anterior, valor_nuevo
+       FROM asociado_descuentos_historial
+       WHERE asociado_codigo = $1 AND linea_id = 1006 AND sync_id = $2`,
+      [codigoHist, syncId4]
+    );
+    const entradaActiva = rows.find((r) => r.campo === 'is_active');
+    expect(entradaActiva).toBeDefined();
+    expect(Number(entradaActiva.valor_anterior)).toBe(1);
+    expect(Number(entradaActiva.valor_nuevo)).toBe(0);
+  });
+
+  test('Borrado lógico — is_active=false en asociado_descuentos tras desaparición', async () => {
+    const { rows } = await pool.query(
+      `SELECT is_active FROM asociado_descuentos
+       WHERE asociado_codigo = $1 AND linea_id = 1006 AND numero = 'CRED-H01'`,
+      [codigoHist]
+    );
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+    // Al menos una fila debe estar inactiva (la desaparecida)
+    expect(rows.some((r) => r.is_active === false)).toBe(true);
+  });
+
+  test('Historial enlaza a distintos sync_id a lo largo de las 4 sincronizaciones', async () => {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT sync_id FROM asociado_descuentos_historial
+       WHERE asociado_codigo = $1`,
+      [codigoHist]
+    );
+    const ids = rows.map((r) => r.sync_id);
+    // sync1 y sync3 generaron entradas; sync2 no (sin cambios); sync4 generó is_active
+    expect(ids).toContain(syncId1);
+    expect(ids).toContain(syncId3);
+    expect(ids).toContain(syncId4);
+    expect(ids).not.toContain(syncId2);
+  });
+});
+
+// ── Fase 2: GET /:codigo/historial-descuentos ─────────────────────────────────
+
+describe('Asociados — Fase 2: GET /:codigo/historial-descuentos', () => {
+  const codigoHist2 = '9996660002';
+
+  const CSV_HIST2 = [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto,valor_obligacion,saldo,plazo,fecha_vencimiento,fecha_pri_decuento,tasa_interes,numero',
+    `1,${codigoHist2},Hist2,Test,1,EMP01,Empresa Test,Pereira,Calle H2,3001234568,,,,,,,,,`,
+    `1006,${codigoHist2},Hist2,Test,1,EMP01,Empresa Test,Pereira,Calle H2,3001234568,150.000,,5000000,3000000,36,30/06/2026,01/06/2024,16,CRED-H02`,
+  ].join('\n');
+
+  beforeAll(async () => {
+    await pool.query('DELETE FROM asociado_descuentos_historial WHERE asociado_codigo = $1', [codigoHist2]);
+    await pool.query('DELETE FROM asociado_descuentos            WHERE asociado_codigo = $1', [codigoHist2]);
+    await pool.query('DELETE FROM asociados                      WHERE codigo = $1',           [codigoHist2]);
+
+    const ag = agent();
+    await loginAdmin(ag);
+    await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(CSV_HIST2), 'hist2_ep.csv');
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM asociado_descuentos_historial WHERE asociado_codigo = $1', [codigoHist2]);
+    await pool.query('DELETE FROM asociado_descuentos            WHERE asociado_codigo = $1', [codigoHist2]);
+    await pool.query('DELETE FROM sincronizaciones               WHERE usuario_uuid = $1',    [adminUuid]);
+    await pool.query('DELETE FROM asociados                      WHERE codigo = $1',           [codigoHist2]);
+  });
+
+  test('GET sin token → 401', async () => {
+    const res = await request(app).get(`/api/asociados/${codigoHist2}/historial-descuentos`);
+    expect(res.status).toBe(401);
+  });
+
+  test('GET autenticado → 200 array con entradas', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.get(`/api/asociados/${codigoHist2}/historial-descuentos`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBeGreaterThan(0);
+  });
+
+  test('Cada entrada tiene la estructura correcta', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag.get(`/api/asociados/${codigoHist2}/historial-descuentos`);
+    expect(body.length).toBeGreaterThan(0);
+    const entry = body[0];
+    expect(entry).toHaveProperty('linea_id');
+    expect(entry).toHaveProperty('nombre_linea');
+    expect(entry).toHaveProperty('numero');
+    expect(entry).toHaveProperty('campo');
+    expect(entry).toHaveProperty('valor_anterior');
+    expect(entry).toHaveProperty('valor_nuevo');
+    expect(entry).toHaveProperty('changed_at');
+    expect(entry).toHaveProperty('sync_id');
+  });
+
+  test('Línea 1006/CRED-H02 aparece con nombre_linea y valor_anterior=null', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag.get(`/api/asociados/${codigoHist2}/historial-descuentos`);
+    const entrada = body.find((h) => h.linea_id === 1006 && h.numero === 'CRED-H02' && h.campo === 'valor');
+    expect(entrada).toBeDefined();
+    expect(entrada.nombre_linea).toBeTruthy();
+    expect(entrada.valor_anterior).toBeNull();
+    expect(Number(entrada.valor_nuevo)).toBe(150000);
+  });
+
+  test('sync_id es UUID válido', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag.get(`/api/asociados/${codigoHist2}/historial-descuentos`);
+    const entry = body[0];
+    expect(entry.sync_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
+  });
+
+  test('Resultados ordenados por changed_at DESC', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const { body } = await ag.get(`/api/asociados/${codigoHist2}/historial-descuentos`);
+    if (body.length > 1) {
+      for (let i = 0; i < body.length - 1; i++) {
+        expect(new Date(body[i].changed_at).getTime()).toBeGreaterThanOrEqual(
+          new Date(body[i + 1].changed_at).getTime()
+        );
+      }
+    }
+  });
+
+  test('Asociado sin historial → 200 array vacío', async () => {
+    await pool.query(
+      `INSERT INTO asociados (codigo, apellido, nombre, clase_cuota)
+       VALUES ('0000000099', 'Sin', 'Historial', '1')
+       ON CONFLICT (codigo) DO NOTHING`
+    );
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.get('/api/asociados/0000000099/historial-descuentos');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBe(0);
+    await pool.query(`DELETE FROM asociados WHERE codigo = '0000000099'`);
   });
 });

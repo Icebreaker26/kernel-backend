@@ -3,6 +3,7 @@ import logger from '../config/logger.js';
 import { notificarAdmins } from './notificationService.js';
 
 let _timer = null;
+let _dailyTimer = null;
 
 export const ejecutarPendientes = async () => {
   // Cierres vencidos
@@ -90,3 +91,52 @@ export const startScheduler = async () => {
 
 // Llamar esto desde el controller cada vez que se crea o elimina una programación
 export const reprogramar = () => programarSiguiente().catch((err) => logger.error(`Scheduler reprogramar: ${err.message}`));
+
+// ── Vencimiento de aprobaciones tesorería ──────────────────────────────────────
+
+const verificarVencimientosTesoreria = async () => {
+  try {
+    const { rows: vencidas } = await pool.query(`
+      UPDATE tesoreria_facturas
+         SET estado = 'pendiente_aprobacion',
+             aprobado_por = NULL, aprobado_at = NULL,
+             aprobacion_vence_at = NULL,
+             updated_at = NOW()
+       WHERE estado = 'aprobada'
+         AND aprobacion_vence_at IS NOT NULL
+         AND aprobacion_vence_at < NOW()
+      RETURNING id
+    `);
+    if (vencidas.length > 0) {
+      logger.info(`Scheduler tesorería: ${vencidas.length} aprobación(es) vencida(s) revertidas`);
+      notificarAdmins({
+        tipo: 'aprobacion_vencida',
+        mensaje: `${vencidas.length} factura(s) con aprobación vencida han vuelto a pendiente`,
+        modulo: 'tesoreria',
+      }).catch(() => {});
+    }
+  } catch (err) {
+    logger.error(`Scheduler tesorería vencimientos: ${err.message}`);
+  }
+};
+
+const msHastaMedioNoche = () => {
+  const ahora = new Date();
+  const medioNoche = new Date(ahora);
+  medioNoche.setHours(24, 0, 0, 0);
+  return medioNoche.getTime() - ahora.getTime();
+};
+
+const startDiarioTesoreria = () => {
+  if (_dailyTimer) clearTimeout(_dailyTimer);
+  _dailyTimer = setTimeout(async () => {
+    await verificarVencimientosTesoreria();
+    startDiarioTesoreria(); // reprogramar para el siguiente día
+  }, msHastaMedioNoche());
+  logger.info(`Scheduler tesorería: vencimientos programados en ${Math.round(msHastaMedioNoche() / 60000)} min`);
+};
+
+export const startSchedulerTesoreria = async () => {
+  await verificarVencimientosTesoreria(); // revisar al arrancar
+  startDiarioTesoreria();
+};

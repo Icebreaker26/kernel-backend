@@ -8,6 +8,7 @@ import {
   listarPeriodos, crearPeriodo, cerrarPeriodo,
 } from '../../tesoreria/controllers/tesoreriaController.js';
 import { getEstado, solicitarCambio } from '../../control_interno/controllers/datosBancariosController.js';
+import { solicitarUpload, confirmarUpload, descargarAdjunto, eliminarAdjunto } from '../controllers/adjuntoController.js';
 
 const router = Router();
 router.use(verifyToken);
@@ -25,6 +26,12 @@ router.get('/proveedores/:id/datos-bancarios',    checkPermission('contable', 'R
 router.post('/proveedores/:id/datos-bancarios',   checkPermission('contable', 'WRITE'), solicitarCambio);
 router.post('/proveedores',                       checkPermission('contable', 'WRITE'), crearProveedor);
 router.put('/proveedores/:id',                    checkPermission('contable', 'WRITE'), actualizarProveedor);
+
+// ── Adjuntos de facturas ───────────────────────────────────────────────────────
+router.post('/facturas/:id/adjunto',   checkPermission('contable', 'WRITE'), solicitarUpload);
+router.patch('/facturas/:id/adjunto',  checkPermission('contable', 'WRITE'), confirmarUpload);
+router.get('/facturas/:id/adjunto',    checkPermission('contable', 'READ'),  descargarAdjunto);
+router.delete('/facturas/:id/adjunto', checkPermission('contable', 'WRITE'), eliminarAdjunto);
 
 // ── Categorías ─────────────────────────────────────────────────────────────────
 router.get('/categorias',     checkPermission('contable', 'READ'),  listarCategorias);

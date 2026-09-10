@@ -588,6 +588,44 @@ export const actualizarProveedor = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const perfilProveedor = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { rows: [p] } = await pool.query(
+      `SELECT * FROM tesoreria_proveedores WHERE id = $1`, [id]
+    );
+    if (!p) return res.status(404).json({ error: 'Proveedor no encontrado' });
+
+    const { rows: facturas } = await pool.query(`
+      SELECT f.id, f.numero_factura, f.monto, f.monto_neto,
+             f.retencion_fuente, f.retencion_ica, f.retencion_iva,
+             f.estado, f.fecha_recibida, f.fecha_vencimiento, f.fecha_pago,
+             f.descripcion, f.area_responsable, f.rechazo_motivo, f.created_at,
+             f.aprobado_at, f.aprobado_por,
+             ur.nombre AS registrado_por_nombre,
+             CASE WHEN f.fecha_vencimiento < CURRENT_DATE THEN true ELSE false END AS vencida
+        FROM tesoreria_facturas f
+        LEFT JOIN global_usuarios ur ON ur.id = f.registrado_por
+       WHERE f.proveedor_id = $1
+       ORDER BY f.created_at DESC
+    `, [id]);
+
+    const ACTIVOS = ['pendiente_aprobacion', 'aprobada', 'verificada', 'autorizada'];
+    const stats = {
+      total_facturas:  facturas.length,
+      total_pagado:    facturas.filter(f => f.estado === 'pagada')
+                               .reduce((s, f) => s + Number(f.monto_neto ?? f.monto), 0),
+      total_en_curso:  facturas.filter(f => ACTIVOS.includes(f.estado))
+                               .reduce((s, f) => s + Number(f.monto), 0),
+      por_estado: facturas.reduce((acc, f) => {
+        acc[f.estado] = (acc[f.estado] || 0) + 1; return acc;
+      }, {}),
+    };
+
+    res.json({ proveedor: p, stats, facturas });
+  } catch (err) { next(err); }
+};
+
 // ── Facturas ───────────────────────────────────────────────────────────────────
 
 const facturaBase = `

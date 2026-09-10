@@ -3,8 +3,12 @@ import { verifyToken }     from '../../../middlewares/auth.js';
 import { checkPermission } from '../../../middlewares/checkPermission.js';
 import {
   listarFacturas, getFactura, crearFactura, reenviarFactura,
-  listarProveedores, crearProveedor, actualizarProveedor,
+  listarProveedores, crearProveedor, actualizarProveedor, perfilProveedor,
+  listarCategorias, crearCategoria, actualizarCategoria,
+  listarPeriodos, crearPeriodo, cerrarPeriodo,
 } from '../../tesoreria/controllers/tesoreriaController.js';
+import { getEstado, solicitarCambio } from '../../control_interno/controllers/datosBancariosController.js';
+import { solicitarUpload, confirmarUpload, descargarAdjunto, eliminarAdjunto } from '../controllers/adjuntoController.js';
 
 const router = Router();
 router.use(verifyToken);
@@ -16,8 +20,27 @@ router.post('/facturas',               checkPermission('contable', 'WRITE'), cre
 router.put('/facturas/:id/reenviar',   checkPermission('contable', 'WRITE'), reenviarFactura);
 
 // ── Proveedores (lectura + gestión desde Contable) ─────────────────────────────
-router.get('/proveedores',     checkPermission('contable', 'READ'),  listarProveedores);
-router.post('/proveedores',    checkPermission('contable', 'WRITE'), crearProveedor);
-router.put('/proveedores/:id', checkPermission('contable', 'WRITE'), actualizarProveedor);
+router.get('/proveedores',                        checkPermission('contable', 'READ'),  listarProveedores);
+router.get('/proveedores/:id/perfil',             checkPermission('contable', 'READ'),  perfilProveedor);
+router.get('/proveedores/:id/datos-bancarios',    checkPermission('contable', 'READ'),  getEstado);
+router.post('/proveedores/:id/datos-bancarios',   checkPermission('contable', 'WRITE'), solicitarCambio);
+router.post('/proveedores',                       checkPermission('contable', 'WRITE'), crearProveedor);
+router.put('/proveedores/:id',                    checkPermission('contable', 'WRITE'), actualizarProveedor);
+
+// ── Adjuntos de facturas ───────────────────────────────────────────────────────
+router.post('/facturas/:id/adjunto',   checkPermission('contable', 'WRITE'), solicitarUpload);
+router.patch('/facturas/:id/adjunto',  checkPermission('contable', 'WRITE'), confirmarUpload);
+router.get('/facturas/:id/adjunto',    checkPermission('contable', 'READ'),  descargarAdjunto);
+router.delete('/facturas/:id/adjunto', checkPermission('contable', 'WRITE'), eliminarAdjunto);
+
+// ── Categorías ─────────────────────────────────────────────────────────────────
+router.get('/categorias',     checkPermission('contable', 'READ'),  listarCategorias);
+router.post('/categorias',    checkPermission('contable', 'WRITE'), crearCategoria);
+router.put('/categorias/:id', checkPermission('contable', 'WRITE'), actualizarCategoria);
+
+// ── Períodos ───────────────────────────────────────────────────────────────────
+router.get('/periodos',              checkPermission('contable', 'READ'),  listarPeriodos);
+router.post('/periodos',             checkPermission('contable', 'WRITE'), crearPeriodo);
+router.put('/periodos/:id/cerrar',   checkPermission('contable', 'WRITE'), cerrarPeriodo);
 
 export default router;

@@ -650,7 +650,10 @@ const facturaBase = `
          END AS dias_control_interno,
          CASE WHEN f.verificada_at IS NOT NULL AND mov.fecha IS NOT NULL
               THEN (mov.fecha - f.verificada_at::date)::int
-         END AS dias_tesoreria
+         END AS dias_tesoreria,
+         (SELECT row_to_json(a) FROM archivos a
+          WHERE a.entidad_tipo = 'factura' AND a.entidad_id = f.id
+          ORDER BY a.created_at DESC LIMIT 1) AS adjunto
     FROM tesoreria_facturas f
     JOIN tesoreria_proveedores p    ON p.id   = f.proveedor_id
     LEFT JOIN tesoreria_cuentas c   ON c.id   = f.cuenta_pago_id

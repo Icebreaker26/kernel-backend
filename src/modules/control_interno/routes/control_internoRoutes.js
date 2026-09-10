@@ -16,9 +16,10 @@ router.put('/facturas/:id/rechazar',     checkPermission('control_interno', 'WRI
 router.put('/facturas/:id/aprobar',      checkPermission('control_interno', 'WRITE'), ctrl.aprobarFactura);
 
 // ── Datos bancarios de proveedores ─────────────────────────────────────────
-router.get('/datos-bancarios',               checkPermission('control_interno', 'READ'),  db.listarPendientes);
-router.put('/datos-bancarios/:id/verificar', checkPermission('control_interno', 'WRITE'), db.verificar);
-router.put('/datos-bancarios/:id/rechazar',  checkPermission('control_interno', 'WRITE'), db.rechazar);
+router.get('/datos-bancarios',                    checkPermission('control_interno', 'READ'),  db.listarPendientes);
+router.get('/datos-bancarios/:id/certificado',    checkPermission('control_interno', 'READ'),  db.verCertificado);
+router.put('/datos-bancarios/:id/verificar',      checkPermission('control_interno', 'WRITE'), db.verificar);
+router.put('/datos-bancarios/:id/rechazar',       checkPermission('control_interno', 'WRITE'), db.rechazar);
 
 // ── Umbrales de aprobación ─────────────────────────────────────────────────
 router.get('/config/umbrales',     checkPermission('control_interno', 'READ'),  listarUmbrales);

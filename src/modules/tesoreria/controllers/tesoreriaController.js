@@ -558,6 +558,16 @@ export const crearProveedor = async (req, res, next) => {
       data.nombre, data.nit || null, data.email || null, data.telefono || null,
       data.tipo_pago, data.frecuencia || null, data.categoria || null, data.notas || null,
     ]);
+    await pool.query(
+      `INSERT INTO tesoreria_proveedores_historial
+         (proveedor_id, tipo_cambio, campos_despues, cambiado_por)
+       VALUES ($1, 'creacion', $2, $3)`,
+      [rows[0].id, JSON.stringify({
+        nombre: rows[0].nombre, nit: rows[0].nit, email: rows[0].email,
+        telefono: rows[0].telefono, tipo_pago: rows[0].tipo_pago,
+        frecuencia: rows[0].frecuencia, categoria: rows[0].categoria, notas: rows[0].notas,
+      }), req.user.id]
+    );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
 };
@@ -569,7 +579,8 @@ export const actualizarProveedor = async (req, res, next) => {
     const vals = [];
     let i = 1;
     const map = { nombre: 'nombre', nit: 'nit', email: 'email', telefono: 'telefono',
-                  frecuencia: 'frecuencia', categoria: 'categoria', notas: 'notas', is_active: 'is_active' };
+                  tipo_pago: 'tipo_pago', frecuencia: 'frecuencia', categoria: 'categoria',
+                  notas: 'notas', is_active: 'is_active' };
     for (const [k, col] of Object.entries(map)) {
       if (data[k] !== undefined) {
         sets.push(`${col} = $${i++}`);
@@ -578,13 +589,49 @@ export const actualizarProveedor = async (req, res, next) => {
       }
     }
     if (!sets.length) return res.status(400).json({ error: 'Sin campos a actualizar' });
+
+    const { rows: [antes] } = await pool.query(
+      `SELECT nombre, nit, email, telefono, tipo_pago, frecuencia, categoria, notas, is_active
+         FROM tesoreria_proveedores WHERE id = $1`,
+      [req.params.id]
+    );
+    if (!antes) return res.status(404).json({ error: 'Proveedor no encontrado' });
+
     sets.push(`updated_at = NOW()`);
     vals.push(req.params.id);
     const { rows } = await pool.query(
       `UPDATE tesoreria_proveedores SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`, vals
     );
-    if (!rows[0]) return res.status(404).json({ error: 'Proveedor no encontrado' });
+
+    const camposCambiados = Object.keys(data).filter(k => map[k] !== undefined);
+    const camposAntes  = Object.fromEntries(camposCambiados.map(k => [k, antes[k]]));
+    const camposDespues = Object.fromEntries(camposCambiados.map(k => [k, rows[0][k]]));
+    const tipoCambio = data.is_active === false ? 'desactivacion'
+                     : !antes.is_active && data.is_active === true ? 'reactivacion'
+                     : 'actualizacion';
+    await pool.query(
+      `INSERT INTO tesoreria_proveedores_historial
+         (proveedor_id, tipo_cambio, campos_antes, campos_despues, cambiado_por)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [req.params.id, tipoCambio, JSON.stringify(camposAntes), JSON.stringify(camposDespues), req.user.id]
+    );
+
     res.json(rows[0]);
+  } catch (err) { next(err); }
+};
+
+export const historialProveedor = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { rows } = await pool.query(
+      `SELECT h.*, u.nombre AS cambiado_por_nombre
+         FROM tesoreria_proveedores_historial h
+         LEFT JOIN global_usuarios u ON u.id = h.cambiado_por
+        WHERE h.proveedor_id = $1
+        ORDER BY h.cambiado_at DESC`,
+      [id]
+    );
+    res.json(rows);
   } catch (err) { next(err); }
 };
 
@@ -650,7 +697,10 @@ const facturaBase = `
          END AS dias_control_interno,
          CASE WHEN f.verificada_at IS NOT NULL AND mov.fecha IS NOT NULL
               THEN (mov.fecha - f.verificada_at::date)::int
-         END AS dias_tesoreria
+         END AS dias_tesoreria,
+         (SELECT row_to_json(a) FROM archivos a
+          WHERE a.entidad_tipo = 'factura' AND a.entidad_id = f.id
+          ORDER BY a.created_at DESC LIMIT 1) AS adjunto
     FROM tesoreria_facturas f
     JOIN tesoreria_proveedores p    ON p.id   = f.proveedor_id
     LEFT JOIN tesoreria_cuentas c   ON c.id   = f.cuenta_pago_id

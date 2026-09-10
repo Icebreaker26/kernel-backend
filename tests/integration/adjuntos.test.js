@@ -35,6 +35,10 @@ beforeAll(async () => {
   app = await createApp();
   const hash = await bcrypt.hash(PASS, 4);
 
+  // Limpieza de datos de corridas previas que no completaron afterAll
+  await pool.query(`DELETE FROM archivos WHERE s3_key LIKE 'kernel/facturas/%' AND nombre IN ('doc.pdf', 'factura-sept-2026.pdf')`);
+  await pool.query(`DELETE FROM tesoreria_facturas WHERE proveedor_id IN (SELECT id FROM tesoreria_proveedores WHERE nombre = 'Proveedor Adjuntos Test')`);
+
   // Usuario con permiso contable
   const { rows: [ctb] } = await pool.query(
     `INSERT INTO global_usuarios (nombre, email, password_hash, rol, is_active, is_approved)
@@ -77,19 +81,24 @@ beforeAll(async () => {
   );
   facturaId = f.id;
 
-  // Factura en estado NO editable (verificada)
+  // Factura en estado NO editable (verificada) con adjunto en tabla archivos
   const { rows: [f2] } = await pool.query(
-    `INSERT INTO tesoreria_facturas (proveedor_id, monto, fecha_recibida, fecha_vencimiento, estado, registrado_por,
-       adjunto_key, adjunto_nombre, adjunto_mime, adjunto_size)
-     VALUES ($1, 200000, '2026-09-01', '2026-09-30', 'verificada', $2,
-       'kernel/facturas/test-uuid/doc.pdf', 'doc.pdf', 'application/pdf', 102400)
+    `INSERT INTO tesoreria_facturas (proveedor_id, monto, fecha_recibida, fecha_vencimiento, estado, registrado_por)
+     VALUES ($1, 200000, '2026-09-01', '2026-09-30', 'verificada', $2)
      RETURNING id`,
     [proveedorId, uuidCtb]
   );
   facturaNoEditableId = f2.id;
+  await pool.query(
+    `INSERT INTO archivos (entidad_tipo, entidad_id, s3_key, nombre, mime_type, size_bytes, subido_por)
+     VALUES ('factura', $1, 'kernel/facturas/test-uuid/doc.pdf', 'doc.pdf', 'application/pdf', 102400, $2)`,
+    [facturaNoEditableId, uuidCtb]
+  );
 });
 
 afterAll(async () => {
+  await pool.query(`DELETE FROM archivos WHERE entidad_tipo = 'factura' AND entidad_id IN
+    (SELECT id FROM tesoreria_facturas WHERE proveedor_id = $1)`, [proveedorId]);
   await pool.query('DELETE FROM tesoreria_facturas  WHERE proveedor_id = $1', [proveedorId]);
   await pool.query('DELETE FROM tesoreria_proveedores WHERE nombre = $1',     ['Proveedor Adjuntos Test']);
   await pool.query('DELETE FROM permisos WHERE usuario_uuid = $1',            [uuidCtb]);
@@ -213,15 +222,16 @@ describe('PATCH /adjunto — confirmar upload y guardar en DB', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
 
-    // Verificar que se guardó en DB
+    // Verificar que se guardó en la tabla archivos
     const { rows } = await pool.query(
-      'SELECT adjunto_key, adjunto_nombre, adjunto_mime, adjunto_size FROM tesoreria_facturas WHERE id=$1',
-      [facturaId]
+      `SELECT s3_key, nombre, mime_type, size_bytes FROM archivos
+       WHERE entidad_tipo = 'factura' AND entidad_id = $1 AND s3_key = $2`,
+      [facturaId, key]
     );
-    expect(rows[0].adjunto_key).toBe(key);
-    expect(rows[0].adjunto_nombre).toBe(nombre);
-    expect(rows[0].adjunto_mime).toBe(mime);
-    expect(rows[0].adjunto_size).toBe(size);
+    expect(rows[0].s3_key).toBe(key);
+    expect(rows[0].nombre).toBe(nombre);
+    expect(rows[0].mime_type).toBe(mime);
+    expect(rows[0].size_bytes).toBe(size);
   });
 });
 
@@ -282,11 +292,11 @@ describe('DELETE /adjunto — eliminar adjunto', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
 
-    // Verificar que las columnas quedaron NULL
+    // Verificar que el archivo fue eliminado de la tabla archivos
     const { rows } = await pool.query(
-      'SELECT adjunto_key FROM tesoreria_facturas WHERE id=$1',
+      `SELECT id FROM archivos WHERE entidad_tipo = 'factura' AND entidad_id = $1`,
       [facturaId]
     );
-    expect(rows[0].adjunto_key).toBeNull();
+    expect(rows.length).toBe(0);
   });
 });

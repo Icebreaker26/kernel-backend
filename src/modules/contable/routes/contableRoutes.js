@@ -3,12 +3,19 @@ import { verifyToken }     from '../../../middlewares/auth.js';
 import { checkPermission } from '../../../middlewares/checkPermission.js';
 import {
   listarFacturas, getFactura, crearFactura, reenviarFactura,
-  listarProveedores, crearProveedor, actualizarProveedor, perfilProveedor,
+  listarProveedores, crearProveedor, actualizarProveedor, perfilProveedor, historialProveedor,
   listarCategorias, crearCategoria, actualizarCategoria,
   listarPeriodos, crearPeriodo, cerrarPeriodo,
 } from '../../tesoreria/controllers/tesoreriaController.js';
-import { getEstado, solicitarCambio } from '../../control_interno/controllers/datosBancariosController.js';
-import { solicitarUpload, confirmarUpload, descargarAdjunto, eliminarAdjunto } from '../controllers/adjuntoController.js';
+import {
+  getEstado, solicitarCambio,
+  solicitarCertificadoUpload, confirmarCertificadoUpload,
+  verCertificadoDeProveedor,
+} from '../../control_interno/controllers/datosBancariosController.js';
+import {
+  solicitarUpload, confirmarUpload, descargarAdjunto, listarAdjuntos,
+  descargarArchivo, eliminarAdjunto, eliminarArchivoEspecifico,
+} from '../controllers/adjuntoController.js';
 
 const router = Router();
 router.use(verifyToken);
@@ -22,16 +29,23 @@ router.put('/facturas/:id/reenviar',   checkPermission('contable', 'WRITE'), ree
 // ── Proveedores (lectura + gestión desde Contable) ─────────────────────────────
 router.get('/proveedores',                        checkPermission('contable', 'READ'),  listarProveedores);
 router.get('/proveedores/:id/perfil',             checkPermission('contable', 'READ'),  perfilProveedor);
-router.get('/proveedores/:id/datos-bancarios',    checkPermission('contable', 'READ'),  getEstado);
-router.post('/proveedores/:id/datos-bancarios',   checkPermission('contable', 'WRITE'), solicitarCambio);
+router.get('/proveedores/:id/historial',          checkPermission('contable', 'READ'),  historialProveedor);
+router.get('/proveedores/:id/datos-bancarios',                          checkPermission('contable', 'READ'),  getEstado);
+router.get('/proveedores/:id/certificado',                              checkPermission('contable', 'READ'),  verCertificadoDeProveedor);
+router.post('/proveedores/:id/datos-bancarios',                         checkPermission('contable', 'WRITE'), solicitarCambio);
+router.post('/proveedores/:id/datos-bancarios/:solicitudId/certificado', checkPermission('contable', 'WRITE'), solicitarCertificadoUpload);
+router.patch('/proveedores/:id/datos-bancarios/:solicitudId/certificado', checkPermission('contable', 'WRITE'), confirmarCertificadoUpload);
 router.post('/proveedores',                       checkPermission('contable', 'WRITE'), crearProveedor);
 router.put('/proveedores/:id',                    checkPermission('contable', 'WRITE'), actualizarProveedor);
 
-// ── Adjuntos de facturas ───────────────────────────────────────────────────────
-router.post('/facturas/:id/adjunto',   checkPermission('contable', 'WRITE'), solicitarUpload);
-router.patch('/facturas/:id/adjunto',  checkPermission('contable', 'WRITE'), confirmarUpload);
-router.get('/facturas/:id/adjunto',    checkPermission('contable', 'READ'),  descargarAdjunto);
-router.delete('/facturas/:id/adjunto', checkPermission('contable', 'WRITE'), eliminarAdjunto);
+// ── Archivos de facturas ───────────────────────────────────────────────────────
+router.post('/facturas/:id/adjunto',                       checkPermission('contable', 'WRITE'), solicitarUpload);
+router.patch('/facturas/:id/adjunto',                      checkPermission('contable', 'WRITE'), confirmarUpload);
+router.get('/facturas/:id/adjunto',                        checkPermission('contable', 'READ'),  descargarAdjunto);
+router.delete('/facturas/:id/adjunto',                     checkPermission('contable', 'WRITE'), eliminarAdjunto);
+router.get('/facturas/:id/archivos',                       checkPermission('contable', 'READ'),  listarAdjuntos);
+router.get('/facturas/:id/archivos/:archivoId',            checkPermission('contable', 'READ'),  descargarArchivo);
+router.delete('/facturas/:id/archivos/:archivoId',         checkPermission('contable', 'WRITE'), eliminarArchivoEspecifico);
 
 // ── Categorías ─────────────────────────────────────────────────────────────────
 router.get('/categorias',     checkPermission('contable', 'READ'),  listarCategorias);

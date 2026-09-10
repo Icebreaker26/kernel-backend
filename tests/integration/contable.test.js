@@ -60,7 +60,9 @@ beforeAll(async () => {
 // ── Teardown ──────────────────────────────────────────────────────────────────
 afterAll(async () => {
   if (facturaId) await pool.query(`DELETE FROM tesoreria_facturas WHERE id = $1`, [facturaId]);
+  if (proveedorId) await pool.query(`DELETE FROM tesoreria_proveedores_historial WHERE proveedor_id = $1`, [proveedorId]);
   if (proveedorId) await pool.query(`DELETE FROM tesoreria_proveedores WHERE id = $1`, [proveedorId]);
+  await pool.query(`DELETE FROM tesoreria_proveedores_historial WHERE cambiado_por IN ($1, $2)`, [uuidCtb, uuidTsr]);
   await pool.query(`DELETE FROM permisos        WHERE usuario_uuid IN ($1, $2)`, [uuidCtb, uuidTsr]);
   await pool.query(`DELETE FROM global_usuarios WHERE id IN ($1, $2)`,           [uuidCtb, uuidTsr]);
   await pool.end();
@@ -139,7 +141,7 @@ describe('Proveedores — CRUD', () => {
 
   test('PUT campo no permitido (strict) → 400', async () => {
     const ag = agentCtb(); await loginCtb(ag);
-    const res = await ag.put(`/api/contable/proveedores/${proveedorId}`).send({ tipo_pago: 'recurrente' });
+    const res = await ag.put(`/api/contable/proveedores/${proveedorId}`).send({ campo_invalido: 'x' });
     expect(res.status).toBe(400);
   });
 });

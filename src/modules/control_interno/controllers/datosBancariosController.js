@@ -1,4 +1,11 @@
 import pool from '../../../db/database.js';
+import {
+  validarArchivo,
+  generarPresignedUpload,
+  guardarArchivo,
+  listarArchivos,
+  generarPresignedDescarga,
+} from '../../../services/archivoService.js';
 
 // ── Contable: ver estado actual + solicitud pendiente de un proveedor ──────
 export const getEstado = async (req, res, next) => {
@@ -60,6 +67,71 @@ export const solicitarCambio = async (req, res, next) => {
     await pool.query('ROLLBACK').catch(() => {});
     next(err);
   }
+};
+
+// ── Contable: solicitar presigned URL para certificado bancario ───────────
+export const solicitarCertificadoUpload = async (req, res, next) => {
+  try {
+    const { solicitudId } = req.params;
+    const error = validarArchivo(req.body);
+    if (error) return res.status(400).json({ error });
+
+    const { rows: [sol] } = await pool.query(
+      `SELECT id FROM tesoreria_proveedores_datos_bancarios WHERE id = $1`,
+      [solicitudId]
+    );
+    if (!sol) return res.status(404).json({ error: 'Solicitud no encontrada' });
+
+    const result = await generarPresignedUpload('certificado_bancario', solicitudId, req.body);
+    res.json(result);
+  } catch (err) { next(err); }
+};
+
+// ── Contable: confirmar upload y guardar en archivos ──────────────────────
+export const confirmarCertificadoUpload = async (req, res, next) => {
+  try {
+    const { solicitudId } = req.params;
+    const { key, nombre, mime, size } = req.body;
+
+    if (!key || !nombre) return res.status(400).json({ error: 'Faltan campos: key, nombre' });
+    if (!key.startsWith(`kernel/certificado_bancarios/${solicitudId}/`))
+      return res.status(400).json({ error: 'Key inválida para esta solicitud' });
+
+    await guardarArchivo('certificado_bancario', solicitudId, { key, nombre, mime, size }, req.user.id);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+};
+
+// ── CI: ver certificado bancario de una solicitud ─────────────────────────
+export const verCertificado = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const archivos = await listarArchivos('certificado_bancario', id);
+    if (!archivos.length) return res.status(404).json({ error: 'Sin certificado adjunto' });
+    const result = await generarPresignedDescarga(archivos[0].id);
+    res.json(result);
+  } catch (err) { next(err); }
+};
+
+// ── Contable: ver certificado bancario por proveedor (última solicitud con cert) ──
+export const verCertificadoDeProveedor = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { rows: solicitudes } = await pool.query(
+      `SELECT id FROM tesoreria_proveedores_datos_bancarios
+        WHERE proveedor_id = $1
+        ORDER BY created_at DESC`,
+      [id]
+    );
+    for (const sol of solicitudes) {
+      const archivos = await listarArchivos('certificado_bancario', sol.id);
+      if (archivos.length) {
+        const result = await generarPresignedDescarga(archivos[0].id);
+        return res.json(result);
+      }
+    }
+    return res.status(404).json({ error: 'Sin certificado adjunto' });
+  } catch (err) { next(err); }
 };
 
 // ── CI: listar todas las solicitudes pendientes ────────────────────────────

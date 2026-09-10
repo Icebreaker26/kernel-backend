@@ -1,4 +1,5 @@
 import pool from '../../../db/database.js';
+import { generarPresignedDescarga, listarArchivos } from '../../../services/archivoService.js';
 
 const facturaBase = `
   SELECT f.*,
@@ -10,7 +11,10 @@ const facturaBase = `
          p.categoria   AS proveedor_categoria,
          ur.nombre     AS registrado_por_nombre,
          ua.nombre     AS aprobado_por_nombre,
-         CASE WHEN f.fecha_vencimiento < CURRENT_DATE THEN true ELSE false END AS vencida
+         CASE WHEN f.fecha_vencimiento < CURRENT_DATE THEN true ELSE false END AS vencida,
+         (SELECT row_to_json(a) FROM archivos a
+          WHERE a.entidad_tipo = 'factura' AND a.entidad_id = f.id
+          ORDER BY a.created_at DESC LIMIT 1) AS adjunto
     FROM tesoreria_facturas f
     JOIN tesoreria_proveedores p ON p.id = f.proveedor_id
     LEFT JOIN global_usuarios ur ON ur.id = f.registrado_por
@@ -125,5 +129,14 @@ export const aprobar = async (req, res, next) => {
       [req.user.id, id]
     );
     res.json(updated[0]);
+  } catch (err) { next(err); }
+};
+
+export const verAdjunto = async (req, res, next) => {
+  try {
+    const archivos = await listarArchivos('factura', req.params.id);
+    if (!archivos.length) return res.status(404).json({ error: 'Sin adjunto' });
+    const result = await generarPresignedDescarga(archivos[0].id);
+    res.json(result);
   } catch (err) { next(err); }
 };

@@ -91,6 +91,9 @@ afterAll(async () => {
   await pool.query(`DELETE FROM tesoreria_facturas WHERE proveedor_id IN (
     SELECT id FROM tesoreria_proveedores WHERE nombre IN ('Proveedor Recurrente Test', 'Proveedor Único Test')
   )`);
+  await pool.query(`DELETE FROM tesoreria_proveedores_historial WHERE proveedor_id IN (
+    SELECT id FROM tesoreria_proveedores WHERE nombre IN ('Proveedor Recurrente Test', 'Proveedor Único Test')
+  )`);
   if (proveedorRecId)   await pool.query(`DELETE FROM tesoreria_proveedores WHERE id = $1`, [proveedorRecId]);
   if (proveedorUnicoId) await pool.query(`DELETE FROM tesoreria_proveedores WHERE id = $1`, [proveedorUnicoId]);
   if (cuentaId)         await pool.query(`DELETE FROM tesoreria_cuentas WHERE id = $1`, [cuentaId]);
@@ -186,7 +189,7 @@ describe('Proveedores — CRUD', () => {
 
   test('PUT /proveedores/:id campo extra (strict) → 400', async () => {
     const ag = agentTsr(); await loginTsr(ag);
-    const res = await ag.put(`/api/tesoreria/proveedores/${proveedorRecId}`).send({ tipo_pago: 'unico' });
+    const res = await ag.put(`/api/tesoreria/proveedores/${proveedorRecId}`).send({ campo_invalido: 'x' });
     expect(res.status).toBe(400);
   });
 

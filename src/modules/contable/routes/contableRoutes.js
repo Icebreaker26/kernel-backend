@@ -3,7 +3,7 @@ import { verifyToken }     from '../../../middlewares/auth.js';
 import { checkPermission } from '../../../middlewares/checkPermission.js';
 import {
   listarFacturas, getFactura, crearFactura, reenviarFactura,
-  listarProveedores, crearProveedor, actualizarProveedor, perfilProveedor,
+  listarProveedores, crearProveedor, actualizarProveedor, perfilProveedor, historialProveedor,
   listarCategorias, crearCategoria, actualizarCategoria,
   listarPeriodos, crearPeriodo, cerrarPeriodo,
 } from '../../tesoreria/controllers/tesoreriaController.js';
@@ -29,6 +29,7 @@ router.put('/facturas/:id/reenviar',   checkPermission('contable', 'WRITE'), ree
 // ── Proveedores (lectura + gestión desde Contable) ─────────────────────────────
 router.get('/proveedores',                        checkPermission('contable', 'READ'),  listarProveedores);
 router.get('/proveedores/:id/perfil',             checkPermission('contable', 'READ'),  perfilProveedor);
+router.get('/proveedores/:id/historial',          checkPermission('contable', 'READ'),  historialProveedor);
 router.get('/proveedores/:id/datos-bancarios',                          checkPermission('contable', 'READ'),  getEstado);
 router.get('/proveedores/:id/certificado',                              checkPermission('contable', 'READ'),  verCertificadoDeProveedor);
 router.post('/proveedores/:id/datos-bancarios',                         checkPermission('contable', 'WRITE'), solicitarCambio);

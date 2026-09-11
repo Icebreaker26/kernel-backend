@@ -229,7 +229,7 @@ export const resetearPasswordAsociado = async (req, res, next) => {
 export const listarAdminLogs = async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT al.*, u.nombre AS admin_nombre, u.email AS admin_email
+      `SELECT al.*, u.nombre AS admin_nombre, u.email AS admin_email, u.avatar_url AS admin_avatar_url
        FROM admin_logs al
        JOIN global_usuarios u ON u.id = al.usuario_uuid
        ORDER BY al.created_at DESC

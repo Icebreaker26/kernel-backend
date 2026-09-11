@@ -106,7 +106,7 @@ export const register = async (req, res, next) => {
 export const me = async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, nombre, email, rol FROM global_usuarios WHERE id = $1`,
+      `SELECT id, nombre, email, rol, avatar_url FROM global_usuarios WHERE id = $1`,
       [req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });

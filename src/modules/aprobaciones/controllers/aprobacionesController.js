@@ -10,6 +10,7 @@ const facturaBase = `
          p.tipo_pago   AS proveedor_tipo,
          p.categoria   AS proveedor_categoria,
          ur.nombre     AS registrado_por_nombre,
+         ur.avatar_url AS registrado_por_avatar_url,
          ua.nombre     AS aprobado_por_nombre,
          CASE WHEN f.fecha_vencimiento < CURRENT_DATE THEN true ELSE false END AS vencida,
          (SELECT row_to_json(a) FROM archivos a

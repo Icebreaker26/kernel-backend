@@ -166,13 +166,14 @@ describe('GET /aprobaciones — lista pendientes del usuario', () => {
     expect(res.body.some(f => f.id === facturaId)).toBe(false);
   });
 
-  test('respuesta incluye campos enriquecidos (proveedor_nombre, vencida)', async () => {
+  test('respuesta incluye campos enriquecidos (proveedor_nombre, vencida, registrado_por_avatar_url)', async () => {
     const ag = agentResp(); await loginResp(ag);
     const res = await ag.get('/api/aprobaciones');
     const f = res.body.find(f => f.id === facturaId);
     expect(f).toBeDefined();
     expect(f.proveedor_nombre).toBe('Proveedor Aprobaciones Test');
     expect(f).toHaveProperty('vencida');
+    expect(f).toHaveProperty('registrado_por_avatar_url');
   });
 });
 

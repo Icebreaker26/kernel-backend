@@ -472,3 +472,40 @@ describe('Control — toggle de permiso', () => {
     );
   });
 });
+
+// ── GET /admin/logs ───────────────────────────────────────────────────────────
+describe('Control — logs de admin', () => {
+  test('sin token → 401', async () => {
+    const res = await request(app).get('/api/admin/logs');
+    expect(res.status).toBe(401);
+  });
+
+  test('admin autenticado → 200 array', async () => {
+    const ag = agAdmin();
+    await login(ag);
+    const res = await ag.get('/api/admin/logs');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  test('cada entrada tiene admin_nombre y admin_avatar_url', async () => {
+    const ag = agAdmin();
+    await login(ag);
+    // generar al menos una entrada haciendo un toggle
+    await ag.patch(`/api/admin/usuarios/${targetUuid}/permisos/toggle`)
+      .send({ modulo: 'mailing', accion: 'READ' });
+    await pool.query(
+      `DELETE FROM permisos WHERE usuario_uuid = $1
+       AND modulo_id = (SELECT id FROM modulos WHERE nombre = 'mailing')
+       AND accion_id = (SELECT id FROM acciones WHERE nombre = 'READ')`,
+      [targetUuid]
+    );
+
+    const res = await ag.get('/api/admin/logs');
+    expect(res.status).toBe(200);
+    expect(res.body.length).toBeGreaterThan(0);
+    const log = res.body[0];
+    expect(log).toHaveProperty('admin_nombre');
+    expect(log).toHaveProperty('admin_avatar_url');
+  });
+});

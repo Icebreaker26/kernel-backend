@@ -85,7 +85,7 @@ describe('Auth — login y sesión', () => {
     expect(res.body.modulos).toEqual([]);
   });
 
-  test('GET /api/auth/me autenticado → 200 + modulos', async () => {
+  test('GET /api/auth/me autenticado → 200 + modulos + avatar_url', async () => {
     const ag  = agent();
     await ag.post('/api/auth/login').send({ email: testEmail, password: testPass });
     const res = await ag.get('/api/auth/me');
@@ -93,6 +93,7 @@ describe('Auth — login y sesión', () => {
     expect(res.body).toHaveProperty('email', testEmail);
     expect(res.body).toHaveProperty('modulos');
     expect(Array.isArray(res.body.modulos)).toBe(true);
+    expect(res.body).toHaveProperty('avatar_url');
   });
 
   test('POST /api/auth/logout → 200', async () => {

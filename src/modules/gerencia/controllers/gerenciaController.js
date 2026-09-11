@@ -443,6 +443,31 @@ export const lineaDetalle = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const facturasGerencia = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        f.id, f.monto, f.fecha_emision, f.fecha_recibida, f.fecha_vencimiento,
+        f.descripcion, f.numero_factura, f.area_responsable, f.estado,
+        f.requiere_aprobacion_gerencia, f.aprobado_gerencia_at,
+        f.verificada_at, f.aprobacion_vence_at,
+        f.retencion_fuente, f.retencion_ica, f.retencion_iva,
+        p.nombre AS proveedor_nombre, p.nit AS proveedor_nit,
+        u.nombre  AS registrado_por_nombre,
+        uv.nombre AS verificada_por_nombre
+      FROM tesoreria_facturas f
+      JOIN tesoreria_proveedores p ON p.id = f.proveedor_id
+      LEFT JOIN global_usuarios u  ON u.id = f.registrado_por
+      LEFT JOIN global_usuarios uv ON uv.id = f.verificada_por
+      WHERE f.requiere_aprobacion_gerencia = true
+        AND f.aprobado_gerencia_at IS NULL
+        AND f.estado = 'verificada'
+      ORDER BY f.fecha_vencimiento ASC
+    `);
+    res.json(rows);
+  } catch (err) { next(err); }
+};
+
 export const cobertura = async (req, res, next) => {
   try {
     const { sorteoId } = req.params;

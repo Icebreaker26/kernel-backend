@@ -211,3 +211,186 @@ export const listarModulos = async (req, res, next) => {
     next(err);
   }
 };
+
+// ── Centro de Control ─────────────────────────────────────────────────────────
+
+export const resumenUsuarios = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        u.id, u.nombre, u.email, u.rol,
+        u.is_active, u.is_approved, u.created_at, u.last_active_at,
+        COALESCE((
+          SELECT COUNT(*)::int FROM global_actividad a
+          WHERE a.usuario_id = u.id AND a.created_at >= CURRENT_DATE
+        ), 0) AS acciones_hoy,
+        COALESCE((
+          SELECT ROUND(SUM(a.duracion_ms)::numeric / 60000, 1)
+          FROM global_actividad a
+          WHERE a.usuario_id = u.id AND a.created_at >= CURRENT_DATE
+            AND a.metodo <> 'SESSION'
+        ), 0) AS minutos_hoy,
+        (
+          SELECT a.modulo FROM global_actividad a
+          WHERE a.usuario_id = u.id
+            AND a.created_at >= NOW() - INTERVAL '7 days'
+            AND a.modulo <> 'auth'
+          GROUP BY a.modulo ORDER BY COUNT(*) DESC LIMIT 1
+        ) AS modulo_principal,
+        COALESCE((
+          SELECT COUNT(*)::int FROM global_actividad a
+          WHERE a.usuario_id = u.id AND a.created_at >= NOW() - INTERVAL '7 days'
+            AND a.metodo <> 'SESSION'
+        ), 0) AS acciones_semana
+      FROM global_usuarios u
+      ORDER BY u.last_active_at DESC NULLS LAST
+    `);
+    res.json(rows);
+  } catch (err) { next(err); }
+};
+
+export const actividadUsuario = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const [heatmap, sesiones, modulos, timeline] = await Promise.all([
+      // Heatmap: 12 semanas × 7 días
+      pool.query(`
+        SELECT
+          DATE(created_at AT TIME ZONE 'America/Bogota') AS dia,
+          COUNT(*)::int AS acciones
+        FROM global_actividad
+        WHERE usuario_id = $1
+          AND created_at >= NOW() - INTERVAL '84 days'
+          AND metodo <> 'SESSION'
+        GROUP BY dia ORDER BY dia
+      `, [id]),
+
+      // Últimos 20 logins
+      pool.query(`
+        SELECT created_at, ip
+        FROM global_actividad
+        WHERE usuario_id = $1 AND metodo = 'SESSION' AND endpoint = 'login'
+        ORDER BY created_at DESC LIMIT 20
+      `, [id]),
+
+      // Módulos más usados (30 días)
+      pool.query(`
+        SELECT modulo, COUNT(*)::int AS total
+        FROM global_actividad
+        WHERE usuario_id = $1
+          AND created_at >= NOW() - INTERVAL '30 days'
+          AND modulo <> 'auth'
+          AND metodo <> 'SESSION'
+        GROUP BY modulo ORDER BY total DESC
+      `, [id]),
+
+      // Timeline últimas 50 acciones
+      pool.query(`
+        SELECT modulo, metodo, endpoint, status_code, duracion_ms, created_at
+        FROM global_actividad
+        WHERE usuario_id = $1 AND metodo <> 'SESSION'
+        ORDER BY created_at DESC LIMIT 50
+      `, [id]),
+    ]);
+
+    res.json({
+      heatmap:  heatmap.rows,
+      sesiones: sesiones.rows,
+      modulos:  modulos.rows,
+      timeline: timeline.rows,
+    });
+  } catch (err) { next(err); }
+};
+
+export const adopcionModulos = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        modulo,
+        COUNT(DISTINCT usuario_id)::int            AS usuarios_activos,
+        COUNT(*)::int                              AS acciones_semana,
+        ROUND(COUNT(*)::numeric / 7, 1)            AS promedio_diario,
+        COUNT(CASE WHEN status_code >= 400 THEN 1 END)::int AS errores,
+        MAX(created_at)                            AS ultimo_uso
+      FROM global_actividad
+      WHERE created_at >= NOW() - INTERVAL '7 days'
+        AND modulo NOT IN ('auth', 'public')
+        AND metodo <> 'SESSION'
+      GROUP BY modulo
+      ORDER BY acciones_semana DESC
+    `);
+    res.json(rows);
+  } catch (err) { next(err); }
+};
+
+export const alertasActividad = async (req, res, next) => {
+  try {
+    const [inactivos, zombies] = await Promise.all([
+      pool.query(`
+        SELECT u.id, u.nombre, u.email, u.rol, u.last_active_at,
+          CASE WHEN u.last_active_at IS NULL THEN NULL
+               ELSE ROUND(EXTRACT(EPOCH FROM (NOW() - u.last_active_at))/86400)::int
+          END AS dias_inactivo
+        FROM global_usuarios u
+        WHERE u.is_active = true
+          AND (u.last_active_at IS NULL OR u.last_active_at < NOW() - INTERVAL '15 days')
+        ORDER BY u.last_active_at ASC NULLS FIRST
+        LIMIT 20
+      `),
+      pool.query(`
+        SELECT u.id, u.nombre, u.email, m.nombre AS modulo
+        FROM permisos p
+        JOIN modulos m ON m.id = p.modulo_id
+        JOIN acciones a ON a.id = p.accion_id AND a.nombre = 'READ'
+        JOIN global_usuarios u ON u.id = p.usuario_uuid AND u.is_active = true AND u.rol <> 'admin'
+        WHERE NOT EXISTS (
+          SELECT 1 FROM global_actividad ga
+          WHERE ga.usuario_id = u.id
+            AND ga.modulo = m.nombre
+            AND ga.created_at >= NOW() - INTERVAL '60 days'
+        )
+        ORDER BY u.nombre, m.nombre
+        LIMIT 50
+      `),
+    ]);
+
+    res.json({
+      inactivos: inactivos.rows,
+      zombies:   zombies.rows,
+    });
+  } catch (err) { next(err); }
+};
+
+export const togglePermiso = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { modulo, accion } = req.body;
+    if (!modulo || !accion) return res.status(400).json({ error: 'modulo y accion son requeridos' });
+
+    const { rows: [mod] } = await pool.query(`SELECT id FROM modulos WHERE nombre = $1`, [modulo]);
+    const { rows: [acc] } = await pool.query(`SELECT id FROM acciones WHERE nombre = $1`, [accion]);
+    if (!mod || !acc) return res.status(404).json({ error: 'Módulo o acción no encontrado' });
+
+    const { rows: existing } = await pool.query(
+      `SELECT id FROM permisos WHERE usuario_uuid = $1 AND modulo_id = $2 AND accion_id = $3`,
+      [id, mod.id, acc.id]
+    );
+
+    if (existing.length) {
+      await pool.query(
+        `DELETE FROM permisos WHERE usuario_uuid = $1 AND modulo_id = $2 AND accion_id = $3`,
+        [id, mod.id, acc.id]
+      );
+      logAdmin(req.user.id, 'QUITAR_PERMISO', 'usuario', id, id, `${modulo}:${accion}`);
+      res.json({ activo: false });
+    } else {
+      await pool.query(
+        `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+        [id, mod.id, acc.id]
+      );
+      logAdmin(req.user.id, 'DAR_PERMISO', 'usuario', id, id, `${modulo}:${accion}`);
+      res.json({ activo: true });
+    }
+  } catch (err) { next(err); }
+};

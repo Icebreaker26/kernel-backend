@@ -134,19 +134,25 @@ export const verCertificadoDeProveedor = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ── CI: listar todas las solicitudes pendientes ────────────────────────────
+// ── CI: listar solicitudes de datos bancarios (filtrable por estado) ───────
 export const listarPendientes = async (req, res, next) => {
   try {
+    const ESTADOS_VALIDOS = ['pendiente_ci', 'verificado', 'rechazado'];
+    const estado = ESTADOS_VALIDOS.includes(req.query.estado) ? req.query.estado : 'pendiente_ci';
+
     const { rows } = await pool.query(
       `SELECT db.*,
               p.nombre AS proveedor_nombre,
               p.nit    AS proveedor_nit,
-              u.nombre AS solicitado_por_nombre
+              u.nombre  AS solicitado_por_nombre,
+              v.nombre  AS verificado_por_nombre
          FROM tesoreria_proveedores_datos_bancarios db
          JOIN tesoreria_proveedores p ON p.id = db.proveedor_id
          LEFT JOIN global_usuarios u ON u.id = db.solicitado_por
-        WHERE db.estado = 'pendiente_ci'
-        ORDER BY db.created_at ASC`
+         LEFT JOIN global_usuarios v ON v.id = db.verificado_por
+        WHERE db.estado = $1
+        ORDER BY db.created_at DESC`,
+      [estado]
     );
     res.json(rows);
   } catch (err) { next(err); }

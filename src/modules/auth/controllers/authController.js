@@ -51,6 +51,18 @@ export const login = async (req, res, next) => {
 
     res.cookie('token', token, cookieOpts());
 
+    // Registrar evento de sesión (fire-and-forget)
+    const ip = req.ip ?? req.socket?.remoteAddress ?? null;
+    pool.query(
+      `INSERT INTO global_actividad (usuario_id, modulo, metodo, endpoint, status_code, duracion_ms, ip)
+       VALUES ($1, 'auth', 'SESSION', 'login', 200, 0, $2)`,
+      [user.id, ip]
+    ).catch(() => {});
+    pool.query(
+      `UPDATE global_usuarios SET last_active_at = NOW() WHERE id = $1`,
+      [user.id]
+    ).catch(() => {});
+
     const modulos = await getModulos(user.id, user.rol);
     res.json({ id: user.id, nombre: user.nombre, email: user.email, rol: user.rol, modulos });
   } catch (err) {

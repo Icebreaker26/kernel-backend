@@ -9,6 +9,14 @@ router.use(verifyToken);
 router.use(checkPermission('admin', 'READ'));
 
 router.get('/metricas',                    metricas);
+
+// ── Centro de Control — deben ir ANTES de /:id ─────────────────────────────
+router.get('/usuarios/resumen',            ctrl.resumenUsuarios);
+router.get('/modulos/adopcion',            ctrl.adopcionModulos);
+router.get('/actividad/alertas',           ctrl.alertasActividad);
+router.get('/usuarios/:id/actividad',      ctrl.actividadUsuario);
+router.patch('/usuarios/:id/permisos/toggle', checkPermission('admin', 'WRITE'), ctrl.togglePermiso);
+
 router.get('/usuarios',                    ctrl.listarUsuarios);
 router.post('/usuarios',                   checkPermission('admin', 'WRITE'), ctrl.crearUsuario);
 router.get('/usuarios/:id/permisos',       ctrl.listarPermisosUsuario);

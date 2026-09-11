@@ -64,6 +64,7 @@ router.post('/facturas',                       checkPermission('tesoreria', 'WRI
 router.put('/facturas/:id/aprobar-area',       checkPermission('tesoreria', 'WRITE'),  ctrl.aprobarArea);
 router.put('/facturas/:id/autorizar',          checkPermission('tesoreria', 'WRITE'),  ctrl.autorizarPago);
 router.put('/facturas/:id/aprobar-gerencia',   checkPermission('tesoreria', 'WRITE'),  ctrl.aprobarGerencia);
+router.put('/facturas/:id/rechazar-gerencia',  checkPermission('tesoreria', 'WRITE'),  ctrl.rechazarGerencia);
 
 // ── Usuarios disponibles (selector de responsable) ─────────────────────────────
 router.get('/usuarios-disponibles', checkPermission('tesoreria', 'READ'), ctrl.listarUsuariosDisponibles);

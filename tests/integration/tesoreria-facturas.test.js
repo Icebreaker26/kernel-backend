@@ -697,3 +697,98 @@ describe('Facturas — retenciones en pago', () => {
     expect(res.body.pago_referencia).toBeNull();
   });
 });
+
+// ── rechazar-gerencia — devolución a CI ───────────────────────────────────────
+describe('Facturas — rechazar-gerencia (devolver a CI)', () => {
+  let facturaDevId;
+  let proveedorDevId;
+
+  beforeAll(async () => {
+    const { rows: [p] } = await pool.query(
+      `INSERT INTO tesoreria_proveedores (nombre, tipo_pago) VALUES ('Proveedor Dev Ger Test', 'unico') RETURNING id`
+    );
+    proveedorDevId = p.id;
+
+    // Insertar directamente en estado 'verificada' con requiere_aprobacion_gerencia=true
+    // para no caminar el pipeline completo en este describe
+    const { rows: [f] } = await pool.query(`
+      INSERT INTO tesoreria_facturas
+        (proveedor_id, monto, fecha_recibida, fecha_vencimiento,
+         estado, requiere_aprobacion_gerencia, verificada_at, verificada_por, descripcion)
+      VALUES ($1, 7000000, NOW(), NOW() + INTERVAL '30 days',
+              'verificada', true, NOW(), $2, 'Factura para rechazar-gerencia test')
+      RETURNING id
+    `, [proveedorDevId, uuidCi]);
+    facturaDevId = f.id;
+  });
+
+  afterAll(async () => {
+    if (facturaDevId)   await pool.query(`DELETE FROM tesoreria_facturas    WHERE id = $1`, [facturaDevId]);
+    if (proveedorDevId) await pool.query(`DELETE FROM tesoreria_proveedores WHERE id = $1`, [proveedorDevId]);
+  });
+
+  test('Sin token → 401', async () => {
+    const res = await request(app)
+      .put(`/api/tesoreria/facturas/${facturaDevId}/rechazar-gerencia`)
+      .send({ motivo: 'test' });
+    expect(res.status).toBe(401);
+  });
+
+  test('Sin motivo → 400', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag
+      .put(`/api/tesoreria/facturas/${facturaDevId}/rechazar-gerencia`)
+      .send({ motivo: '' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/motivo/i);
+  });
+
+  test('Factura inexistente → 404', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag
+      .put('/api/tesoreria/facturas/00000000-0000-0000-0000-000000000000/rechazar-gerencia')
+      .send({ motivo: 'Revisión pendiente' });
+    expect(res.status).toBe(404);
+  });
+
+  test('Factura sin requiere_aprobacion_gerencia → 400', async () => {
+    // facturaId (350K del flujo completo) tiene requiere_aprobacion_gerencia=false
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag
+      .put(`/api/tesoreria/facturas/${facturaId}/rechazar-gerencia`)
+      .send({ motivo: 'No corresponde' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/gerencia/i);
+  });
+
+  test('Factura en estado incorrecto (no verificada) → 400', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    await pool.query(`UPDATE tesoreria_facturas SET estado = 'aprobada' WHERE id = $1`, [facturaDevId]);
+    const res = await ag
+      .put(`/api/tesoreria/facturas/${facturaDevId}/rechazar-gerencia`)
+      .send({ motivo: 'Estado inválido' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/verificada/i);
+    await pool.query(`UPDATE tesoreria_facturas SET estado = 'verificada' WHERE id = $1`, [facturaDevId]);
+  });
+
+  test('Devolución exitosa → 200, estado=aprobada, rechazo_motivo guardado, verificada_* limpiados', async () => {
+    const ag = agentTsr(); await loginTsr(ag);
+    const res = await ag
+      .put(`/api/tesoreria/facturas/${facturaDevId}/rechazar-gerencia`)
+      .send({ motivo: 'Falta documentación de soporte' });
+    expect(res.status).toBe(200);
+    expect(res.body.estado).toBe('aprobada');
+    expect(res.body.rechazo_motivo).toBe('Falta documentación de soporte');
+    expect(res.body.verificada_por).toBeNull();
+    expect(res.body.verificada_at).toBeNull();
+    expect(res.body.aprobacion_vence_at).toBeNull();
+  });
+
+  test('CI puede re-verificar la factura devuelta → estado=verificada', async () => {
+    const ag = agentCi(); await loginCi(ag);
+    const res = await ag.put(`/api/control_interno/facturas/${facturaDevId}/verificar`);
+    expect(res.status).toBe(200);
+    expect(res.body.estado).toBe('verificada');
+  });
+});

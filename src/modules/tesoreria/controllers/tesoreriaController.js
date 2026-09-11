@@ -916,6 +916,32 @@ export const aprobarGerencia = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const rechazarGerencia = async (req, res, next) => {
+  try {
+    const { motivo } = req.body;
+    if (!motivo?.trim()) return res.status(400).json({ error: 'El motivo de devolución es obligatorio' });
+    const { rows: [f] } = await pool.query(
+      `SELECT estado, requiere_aprobacion_gerencia FROM tesoreria_facturas WHERE id = $1`,
+      [req.params.id]
+    );
+    if (!f) return res.status(404).json({ error: 'Factura no encontrada' });
+    if (!f.requiere_aprobacion_gerencia) return res.status(400).json({ error: 'Esta factura no requiere aprobación de Gerencia' });
+    if (f.estado !== 'verificada') return res.status(400).json({ error: 'La factura debe estar verificada por CI para ser devuelta por Gerencia' });
+    // Devuelve a la cola de CI para re-verificación con la observación de Gerencia
+    const { rows } = await pool.query(`
+      UPDATE tesoreria_facturas
+         SET estado              = 'aprobada',
+             rechazo_motivo      = $1,
+             verificada_por      = NULL,
+             verificada_at       = NULL,
+             aprobacion_vence_at = NULL,
+             updated_at          = NOW()
+       WHERE id = $2 RETURNING *
+    `, [motivo.trim(), req.params.id]);
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+};
+
 export const rechazarFactura = async (req, res, next) => {
   try {
     const { motivo } = rechazarFacturaSchema.parse(req.body);

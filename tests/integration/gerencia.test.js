@@ -1040,3 +1040,117 @@ describe('GET /gerencia/lineas/:lineaId', () => {
     expect(res.body.no_tienen.length).toBe(total);
   });
 });
+
+// ── GET /gerencia/facturas-pendientes ─────────────────────────────────────────
+
+describe('GET /gerencia/facturas-pendientes', () => {
+  let ag;
+  let proveedorId, facturaGerId;
+
+  beforeAll(async () => {
+    ag = agAdmin();
+    await ag.post('/api/auth/login').send({ email: adminEmail, password: adminPass });
+
+    const { rows: [p] } = await pool.query(
+      `INSERT INTO tesoreria_proveedores (nombre, tipo_pago) VALUES ('Proveedor Ger Test', 'unico') RETURNING id`
+    );
+    proveedorId = p.id;
+
+    const { rows: [f] } = await pool.query(`
+      INSERT INTO tesoreria_facturas
+        (proveedor_id, monto, fecha_recibida, fecha_vencimiento,
+         estado, requiere_aprobacion_gerencia, aprobado_gerencia_at, verificada_at, descripcion)
+      VALUES ($1, 6000000, NOW(), NOW() + INTERVAL '30 days',
+              'verificada', true, NULL, NOW(), 'Factura pendiente gerencia test')
+      RETURNING id
+    `, [proveedorId]);
+    facturaGerId = f.id;
+  });
+
+  afterAll(async () => {
+    if (facturaGerId)  await pool.query(`DELETE FROM tesoreria_facturas    WHERE id = $1`, [facturaGerId]);
+    if (proveedorId)   await pool.query(`DELETE FROM tesoreria_proveedores WHERE id = $1`, [proveedorId]);
+  });
+
+  test('Sin token → 401', async () => {
+    const res = await request(app).get('/api/gerencia/facturas-pendientes');
+    expect(res.status).toBe(401);
+  });
+
+  test('Devuelve 200 con array', async () => {
+    const res = await ag.get('/api/gerencia/facturas-pendientes');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  test('La factura seed aparece en la lista', async () => {
+    const res = await ag.get('/api/gerencia/facturas-pendientes');
+    expect(res.status).toBe(200);
+    expect(res.body.some(f => f.id === facturaGerId)).toBe(true);
+  });
+
+  test('Cada factura tiene campos requeridos', async () => {
+    const res = await ag.get('/api/gerencia/facturas-pendientes');
+    expect(res.status).toBe(200);
+    for (const f of res.body) {
+      expect(f).toHaveProperty('id');
+      expect(f).toHaveProperty('monto');
+      expect(f).toHaveProperty('estado');
+      expect(f).toHaveProperty('proveedor_nombre');
+      expect(f.estado).toBe('verificada');
+      expect(f.requiere_aprobacion_gerencia).toBe(true);
+      expect(f.aprobado_gerencia_at).toBeNull();
+    }
+  });
+
+  test('No devuelve facturas ya aprobadas por gerencia', async () => {
+    await pool.query(
+      `UPDATE tesoreria_facturas SET aprobado_gerencia_at = NOW() WHERE id = $1`,
+      [facturaGerId]
+    );
+    const res = await ag.get('/api/gerencia/facturas-pendientes');
+    expect(res.status).toBe(200);
+    expect(res.body.some(f => f.id === facturaGerId)).toBe(false);
+    await pool.query(
+      `UPDATE tesoreria_facturas SET aprobado_gerencia_at = NULL WHERE id = $1`,
+      [facturaGerId]
+    );
+  });
+
+  test('No devuelve facturas en estado diferente a verificada', async () => {
+    await pool.query(
+      `UPDATE tesoreria_facturas SET estado = 'aprobada' WHERE id = $1`,
+      [facturaGerId]
+    );
+    const res = await ag.get('/api/gerencia/facturas-pendientes');
+    expect(res.status).toBe(200);
+    expect(res.body.some(f => f.id === facturaGerId)).toBe(false);
+    await pool.query(
+      `UPDATE tesoreria_facturas SET estado = 'verificada' WHERE id = $1`,
+      [facturaGerId]
+    );
+  });
+
+  test('No devuelve facturas sin requiere_aprobacion_gerencia', async () => {
+    await pool.query(
+      `UPDATE tesoreria_facturas SET requiere_aprobacion_gerencia = false WHERE id = $1`,
+      [facturaGerId]
+    );
+    const res = await ag.get('/api/gerencia/facturas-pendientes');
+    expect(res.status).toBe(200);
+    expect(res.body.some(f => f.id === facturaGerId)).toBe(false);
+    await pool.query(
+      `UPDATE tesoreria_facturas SET requiere_aprobacion_gerencia = true WHERE id = $1`,
+      [facturaGerId]
+    );
+  });
+
+  test('Resultado ordenado por fecha_vencimiento ascendente', async () => {
+    const res = await ag.get('/api/gerencia/facturas-pendientes');
+    expect(res.status).toBe(200);
+    const venc = res.body.map(f => new Date(f.fecha_vencimiento).getTime());
+    for (let i = 1; i < venc.length; i++) {
+      expect(venc[i]).toBeGreaterThanOrEqual(venc[i - 1]);
+    }
+  });
+});

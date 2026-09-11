@@ -18,6 +18,7 @@ router.get('/usuarios/:id/actividad',      ctrl.actividadUsuario);
 router.patch('/usuarios/:id/permisos/toggle', checkPermission('admin', 'WRITE'), ctrl.togglePermiso);
 
 router.get('/usuarios',                    ctrl.listarUsuarios);
+router.patch('/usuarios/:id',              checkPermission('admin', 'WRITE'), ctrl.editarUsuario);
 router.post('/usuarios',                   checkPermission('admin', 'WRITE'), ctrl.crearUsuario);
 router.get('/usuarios/:id/permisos',       ctrl.listarPermisosUsuario);
 router.get('/modulos',                     ctrl.listarModulos);

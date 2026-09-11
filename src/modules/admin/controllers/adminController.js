@@ -27,6 +27,44 @@ export const crearUsuario = async (req, res, next) => {
   }
 };
 
+export const editarUsuario = async (req, res, next) => {
+  try {
+    const { nombre, email, rol } = req.body;
+    if (!nombre && !email && !rol) return res.status(400).json({ error: 'Nada que actualizar' });
+
+    // Verificar email duplicado si se cambia
+    if (email) {
+      const { rows: dup } = await pool.query(
+        'SELECT id FROM global_usuarios WHERE email = $1 AND id != $2',
+        [email, req.params.id]
+      );
+      if (dup.length) return res.status(409).json({ error: 'El email ya está en uso por otro usuario' });
+    }
+
+    const sets   = [];
+    const values = [];
+    let   n      = 1;
+    if (nombre) { sets.push(`nombre = $${n++}`); values.push(nombre); }
+    if (email)  { sets.push(`email  = $${n++}`); values.push(email); }
+    if (rol)    { sets.push(`rol    = $${n++}`); values.push(rol); }
+    sets.push(`updated_at = NOW()`);
+    values.push(req.params.id);
+
+    const { rows } = await pool.query(
+      `UPDATE global_usuarios SET ${sets.join(', ')} WHERE id = $${n}
+       RETURNING id, nombre, email, rol, is_active, is_approved`,
+      values
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+    logAdmin(req.user.id, 'EDITAR_USUARIO', 'usuario', rows[0].id, rows[0].nombre,
+      [nombre && `nombre:${nombre}`, email && `email:${email}`, rol && `rol:${rol}`].filter(Boolean).join(' | ')
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const listarUsuarios = async (req, res, next) => {
   try {
     const { rows } = await pool.query(
@@ -218,7 +256,7 @@ export const resumenUsuarios = async (req, res, next) => {
   try {
     const { rows } = await pool.query(`
       SELECT
-        u.id, u.nombre, u.email, u.rol,
+        u.id, u.nombre, u.email, u.rol, u.avatar_url,
         u.is_active, u.is_approved, u.created_at, u.last_active_at,
         COALESCE((
           SELECT COUNT(*)::int FROM global_actividad a

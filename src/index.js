@@ -8,6 +8,7 @@ import { initNotificationService } from './services/notificationService.js';
 import { startScheduler, startSchedulerTesoreria } from './services/scheduler.js';
 import { startDispatcher } from './services/mailingDispatcher.js';
 import logger from './config/logger.js';
+import pool from './db/database.js';
 
 const app        = await createApp();
 const httpServer = createServer(app);
@@ -47,6 +48,15 @@ initNotificationService(io);
 startScheduler();
 startSchedulerTesoreria();
 startDispatcher();
+
+// Purga semanal: elimina actividad con más de 90 días
+const purgarActividad = () => {
+  pool.query(`DELETE FROM global_actividad WHERE created_at < NOW() - INTERVAL '90 days'`)
+    .then(({ rowCount }) => { if (rowCount > 0) logger.info(`Purga actividad: ${rowCount} registros eliminados`); })
+    .catch((err) => logger.error('Error purga actividad', err));
+};
+purgarActividad();
+setInterval(purgarActividad, 7 * 24 * 60 * 60 * 1000);
 
 httpServer.listen(env.PORT, () => {
   logger.info(`Servidor corriendo en puerto ${env.PORT} [${env.NODE_ENV}]`);

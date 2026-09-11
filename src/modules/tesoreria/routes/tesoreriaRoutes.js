@@ -3,6 +3,7 @@ import multer from 'multer';
 import { verifyToken }      from '../../../middlewares/auth.js';
 import { checkPermission }  from '../../../middlewares/checkPermission.js';
 import * as ctrl from '../controllers/tesoreriaController.js';
+import { descargarAdjunto } from '../../contable/controllers/adjuntoController.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -48,14 +49,16 @@ router.get('/movimientos',        checkPermission('tesoreria', 'READ'),  ctrl.li
 router.post('/movimientos',       checkPermission('tesoreria', 'WRITE'), ctrl.crearMovimiento);
 
 // ── Proveedores ────────────────────────────────────────────────────────────────
-router.get('/proveedores',           checkPermission('tesoreria', 'READ'),   ctrl.listarProveedores);
-router.get('/proveedores/:id/perfil',checkPermission('tesoreria', 'READ'),   ctrl.perfilProveedor);
-router.post('/proveedores',          checkPermission('tesoreria', 'WRITE'),  ctrl.crearProveedor);
-router.put('/proveedores/:id',       checkPermission('tesoreria', 'WRITE'),  ctrl.actualizarProveedor);
+router.get('/proveedores',                checkPermission('tesoreria', 'READ'),   ctrl.listarProveedores);
+router.get('/proveedores/:id/perfil',     checkPermission('tesoreria', 'READ'),   ctrl.perfilProveedor);
+router.get('/proveedores/:id/historial',  checkPermission('tesoreria', 'READ'),   ctrl.historialProveedor);
+router.post('/proveedores',               checkPermission('tesoreria', 'WRITE'),  ctrl.crearProveedor);
+router.put('/proveedores/:id',            checkPermission('tesoreria', 'WRITE'),  ctrl.actualizarProveedor);
 
 // ── Facturas ───────────────────────────────────────────────────────────────────
 router.get('/facturas/mis-pendientes',         checkPermission('tesoreria', 'READ'),   ctrl.misFacturasPendientes);
 router.get('/facturas',                        checkPermission('tesoreria', 'READ'),   ctrl.listarFacturas);
+router.get('/facturas/:id/adjunto',            checkPermission('tesoreria', 'READ'),   descargarAdjunto);
 router.get('/facturas/:id',                    checkPermission('tesoreria', 'READ'),   ctrl.getFactura);
 router.post('/facturas',                       checkPermission('tesoreria', 'WRITE'),  ctrl.crearFactura);
 router.put('/facturas/:id/aprobar-area',       checkPermission('tesoreria', 'WRITE'),  ctrl.aprobarArea);

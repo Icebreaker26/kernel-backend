@@ -197,8 +197,12 @@ export const asignarDirecto = async (req, res, next) => {
         'SELECT estado FROM boletos WHERE numero = $1 AND sorteo_id = $2 FOR UPDATE',
         [numero, sorteo_id]
       );
-      if (!boleto) return res.status(404).json({ error: 'Boleto no encontrado' });
+      if (!boleto) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Boleto no encontrado' });
+      }
       if (boleto.estado !== 'libre') {
+        await client.query('ROLLBACK');
         return res.status(409).json({ error: `El número ${numero} no está disponible (estado: ${boleto.estado})` });
       }
 
@@ -206,7 +210,10 @@ export const asignarDirecto = async (req, res, next) => {
         'SELECT codigo, nombre, apellido, empresa_dsto FROM asociados WHERE codigo = $1 AND is_active = true',
         [asociado_codigo]
       );
-      if (!asoc) return res.status(404).json({ error: 'Asociado no encontrado o inactivo' });
+      if (!asoc) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Asociado no encontrado o inactivo' });
+      }
 
       // Verificar empresa habilitada
       const { rows: emp } = await client.query(
@@ -214,6 +221,7 @@ export const asignarDirecto = async (req, res, next) => {
         [sorteo_id, asoc.empresa_dsto]
       );
       if (!emp.length) {
+        await client.query('ROLLBACK');
         return res.status(409).json({ error: 'La empresa del asociado no está habilitada en este sorteo' });
       }
 
@@ -254,8 +262,12 @@ export const retirarDirecto = async (req, res, next) => {
         'SELECT estado, asociado_codigo FROM boletos WHERE numero = $1 AND sorteo_id = $2 FOR UPDATE',
         [numero, sorteo_id]
       );
-      if (!boleto) return res.status(404).json({ error: 'Boleto no encontrado' });
+      if (!boleto) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Boleto no encontrado' });
+      }
       if (!['asignado', 'pendiente_retiro'].includes(boleto.estado)) {
+        await client.query('ROLLBACK');
         return res.status(409).json({ error: `El número ${numero} no tiene un titular asignado` });
       }
 

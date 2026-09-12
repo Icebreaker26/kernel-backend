@@ -26,8 +26,9 @@ router.put('/datos-bancarios/:id/verificar',      checkPermission('control_inter
 router.put('/datos-bancarios/:id/rechazar',       checkPermission('control_interno', 'WRITE'), db.rechazar);
 
 // ── Umbrales de aprobación ─────────────────────────────────────────────────
-router.get('/config/umbrales',     checkPermission('control_interno', 'READ'),  listarUmbrales);
-router.post('/config/umbrales',    checkPermission('control_interno', 'WRITE'), crearUmbral);
-router.put('/config/umbrales/:id', checkPermission('control_interno', 'WRITE'), actualizarUmbral);
+router.get('/config/umbrales',     checkPermission('control_interno', 'READ'),         listarUmbrales);
+// A-2: CONFIG_UMBRAL separa lectura de escritura para auditoría y restricción de rol
+router.post('/config/umbrales',    checkPermission('control_interno', 'CONFIG_UMBRAL'),crearUmbral);
+router.put('/config/umbrales/:id', checkPermission('control_interno', 'CONFIG_UMBRAL'),actualizarUmbral);
 
 export default router;

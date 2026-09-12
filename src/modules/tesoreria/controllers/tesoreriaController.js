@@ -790,12 +790,15 @@ export const aprobarArea = async (req, res, next) => {
   try {
     aprobarAreaSchema.parse(req.body);
     const { rows: [factura] } = await pool.query(
-      `SELECT id, estado, responsable_id FROM tesoreria_facturas WHERE id = $1`,
+      `SELECT id, estado, responsable_id, registrado_por FROM tesoreria_facturas WHERE id = $1`,
       [req.params.id]
     );
     if (!factura) return res.status(404).json({ error: 'Factura no encontrada' });
     if (factura.estado !== 'pendiente_aprobacion')
       return res.status(400).json({ error: `Estado actual: ${factura.estado}` });
+    // C-1: quien registró la factura no puede aprobarla en su propia área
+    if (req.user.rol !== 'admin' && factura.registrado_por === req.user.id)
+      return res.status(403).json({ error: 'No puede aprobar una factura que usted mismo registró' });
     if (factura.responsable_id && factura.responsable_id !== req.user.id)
       return res.status(403).json({ error: 'Solo el responsable asignado puede aprobar esta factura' });
 
@@ -831,6 +834,9 @@ export const autorizarPago = async (req, res, next) => {
       return res.status(400).json({ error: 'Esta factura requiere aprobación de Gerencia antes de autorizar el pago' });
     if (factura.aprobacion_vence_at && new Date(factura.aprobacion_vence_at) < new Date())
       return res.status(400).json({ error: 'La verificación de Control Interno ha vencido — debe ser re-verificada' });
+    // C-1: quien registró o aprobó en área no puede autorizar el pago
+    if (req.user.rol !== 'admin' && [factura.registrado_por, factura.aprobado_por].includes(req.user.id))
+      return res.status(403).json({ error: 'No puede autorizar el pago de una factura en la que ya participó' });
 
     // A-3: registrar quién autorizó para que anomalyDetector pueda detectar
     // que la misma persona ejecutó varias etapas del flujo.
@@ -888,10 +894,13 @@ export const reenviarFactura = async (req, res, next) => {
 export const aprobarFactura = async (req, res, next) => {
   try {
     const { rows: [f] } = await pool.query(
-      `SELECT estado FROM tesoreria_facturas WHERE id = $1`, [req.params.id]
+      `SELECT estado, registrado_por, aprobado_por FROM tesoreria_facturas WHERE id = $1`, [req.params.id]
     );
     if (!f) return res.status(404).json({ error: 'Factura no encontrada' });
     if (f.estado !== 'aprobada') return res.status(400).json({ error: `Estado actual: ${f.estado}` });
+    // C-1: CI no puede verificar una factura que registró o aprobó en área
+    if (req.user.rol !== 'admin' && [f.registrado_por, f.aprobado_por].includes(req.user.id))
+      return res.status(403).json({ error: 'No puede verificar una factura en la que ya participó' });
 
     const { rows: [umbral] } = await pool.query(
       `SELECT dias_vencimiento FROM tesoreria_config_umbrales WHERE tipo_operacion = 'egreso_proveedor' LIMIT 1`
@@ -913,13 +922,16 @@ export const aprobarFactura = async (req, res, next) => {
 export const aprobarGerencia = async (req, res, next) => {
   try {
     const { rows: [f] } = await pool.query(
-      `SELECT estado, requiere_aprobacion_gerencia, aprobado_gerencia_at FROM tesoreria_facturas WHERE id = $1`,
+      `SELECT estado, requiere_aprobacion_gerencia, aprobado_gerencia_at, registrado_por, aprobado_por, verificada_por FROM tesoreria_facturas WHERE id = $1`,
       [req.params.id]
     );
     if (!f) return res.status(404).json({ error: 'Factura no encontrada' });
     if (!f.requiere_aprobacion_gerencia) return res.status(400).json({ error: 'Esta factura no requiere aprobación de Gerencia' });
     if (f.aprobado_gerencia_at) return res.status(400).json({ error: 'Ya fue aprobada por Gerencia' });
     if (f.estado !== 'verificada') return res.status(400).json({ error: 'La factura debe estar verificada por Control Interno primero' });
+    // C-1: quien participó en etapas anteriores no puede aprobar en Gerencia
+    if (req.user.rol !== 'admin' && [f.registrado_por, f.aprobado_por, f.verificada_por].includes(req.user.id))
+      return res.status(403).json({ error: 'No puede aprobar en Gerencia una factura en la que ya participó' });
     const { rows } = await pool.query(`
       UPDATE tesoreria_facturas
          SET aprobado_gerencia_por = $1, aprobado_gerencia_at = NOW(), updated_at = NOW()
@@ -1016,7 +1028,14 @@ export const crearUmbral = async (req, res, next) => {
       INSERT INTO tesoreria_config_umbrales (tipo_operacion, monto_umbral, descripcion, dias_vencimiento)
       VALUES ($1, $2, $3, $4) RETURNING *
     `, [data.tipo_operacion, data.monto_umbral, data.descripcion || null, data.dias_vencimiento]);
-    res.status(201).json(rows[0]);
+    const nuevo = rows[0];
+    // A-2: registrar creación en historial
+    await pool.query(`
+      INSERT INTO tesoreria_config_umbrales_historial
+        (umbral_id, operacion, campos_antes, campos_despues, cambiado_por)
+      VALUES ($1, 'crear', NULL, $2, $3)
+    `, [nuevo.id, JSON.stringify(nuevo), req.user.id]);
+    res.status(201).json(nuevo);
   } catch (err) { next(err); }
 };
 
@@ -1030,13 +1049,26 @@ export const actualizarUmbral = async (req, res, next) => {
     if (data.descripcion      !== undefined) { sets.push(`descripcion = $${i++}`);      vals.push(data.descripcion || null); }
     if (data.dias_vencimiento !== undefined) { sets.push(`dias_vencimiento = $${i++}`); vals.push(data.dias_vencimiento); }
     if (!sets.length) return res.status(400).json({ error: 'Sin campos a actualizar' });
+
+    // A-2: leer estado anterior antes de modificar
+    const { rows: [anterior] } = await pool.query(
+      `SELECT * FROM tesoreria_config_umbrales WHERE id = $1`, [req.params.id]
+    );
+    if (!anterior) return res.status(404).json({ error: 'Umbral no encontrado' });
+
     sets.push(`updated_at = NOW()`);
     vals.push(req.params.id);
     const { rows } = await pool.query(
       `UPDATE tesoreria_config_umbrales SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`, vals
     );
-    if (!rows[0]) return res.status(404).json({ error: 'Umbral no encontrado' });
-    res.json(rows[0]);
+    const nuevo = rows[0];
+    // A-2: registrar cambio en historial
+    await pool.query(`
+      INSERT INTO tesoreria_config_umbrales_historial
+        (umbral_id, operacion, campos_antes, campos_despues, cambiado_por)
+      VALUES ($1, 'actualizar', $2, $3, $4)
+    `, [nuevo.id, JSON.stringify(anterior), JSON.stringify(nuevo), req.user.id]);
+    res.json(nuevo);
   } catch (err) { next(err); }
 };
 

@@ -12,8 +12,10 @@ let app;
 const EMAIL_TSR  = 'tesoreria-fact-test@kernel.test';
 const EMAIL_CI   = 'control-interno-test@kernel.test';
 const EMAIL_RESP = 'responsable-area-test@kernel.test';
+// C-1: usuario contable separado para crear facturas — el mismo que registra no puede autorizar
+const EMAIL_CTBL = 'contable-fact-test@kernel.test';
 const PASS       = 'testpass123';
-let uuidTsr, uuidCi, uuidResp;
+let uuidTsr, uuidCi, uuidResp, uuidCtbl;
 
 // IDs creados en tests
 let proveedorRecId, proveedorUnicoId, facturaId, cuentaId;
@@ -21,9 +23,11 @@ let proveedorRecId, proveedorUnicoId, facturaId, cuentaId;
 const agentTsr  = () => request.agent(app);
 const agentCi   = () => request.agent(app);
 const agentResp = () => request.agent(app);
+const agentCtbl = () => request.agent(app);
 const loginTsr  = (ag) => ag.post('/api/auth/login').send({ email: EMAIL_TSR,  password: PASS });
 const loginCi   = (ag) => ag.post('/api/auth/login').send({ email: EMAIL_CI,   password: PASS });
 const loginResp = (ag) => ag.post('/api/auth/login').send({ email: EMAIL_RESP, password: PASS });
+const loginCtbl = (ag) => ag.post('/api/auth/login').send({ email: EMAIL_CTBL, password: PASS });
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 beforeAll(async () => {
@@ -75,6 +79,21 @@ beforeAll(async () => {
      ON CONFLICT DO NOTHING`, [uuidResp]
   );
 
+  // Usuario Contable — C-1: registra facturas; distinto al tesorero que las autoriza
+  const { rows: [ctbl] } = await pool.query(
+    `INSERT INTO global_usuarios (nombre, email, password_hash, rol, is_active, is_approved)
+     VALUES ('Contable Facturas Test', $1, $2, 'contable', true, true)
+     ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, is_approved = true
+     RETURNING id`,
+    [EMAIL_CTBL, hash]
+  );
+  uuidCtbl = ctbl.id;
+  await pool.query(
+    `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id)
+     SELECT $1, m.id, a.id FROM modulos m, acciones a WHERE m.nombre = 'contable'
+     ON CONFLICT DO NOTHING`, [uuidCtbl]
+  );
+
   // Cuenta bancaria para los tests de pago
   const { rows: [c] } = await pool.query(
     `INSERT INTO tesoreria_cuentas (nombre, tipo, saldo_inicial) VALUES ('Bancolombia Test Facturas', 'banco', 5000000) RETURNING id`
@@ -97,8 +116,13 @@ afterAll(async () => {
   if (proveedorRecId)   await pool.query(`DELETE FROM tesoreria_proveedores WHERE id = $1`, [proveedorRecId]);
   if (proveedorUnicoId) await pool.query(`DELETE FROM tesoreria_proveedores WHERE id = $1`, [proveedorUnicoId]);
   if (cuentaId)         await pool.query(`DELETE FROM tesoreria_cuentas WHERE id = $1`, [cuentaId]);
-  await pool.query(`DELETE FROM permisos        WHERE usuario_uuid IN ($1, $2, $3)`, [uuidTsr, uuidCi, uuidResp]);
-  await pool.query(`DELETE FROM global_usuarios WHERE id IN ($1, $2, $3)`, [uuidTsr, uuidCi, uuidResp]);
+  // A-2: el historial de umbrales referencia cambiado_por con ON DELETE RESTRICT
+  await pool.query(
+    `DELETE FROM tesoreria_config_umbrales_historial WHERE cambiado_por IN ($1, $2, $3, $4)`,
+    [uuidTsr, uuidCi, uuidResp, uuidCtbl]
+  );
+  await pool.query(`DELETE FROM permisos        WHERE usuario_uuid IN ($1, $2, $3, $4)`, [uuidTsr, uuidCi, uuidResp, uuidCtbl]);
+  await pool.query(`DELETE FROM global_usuarios WHERE id IN ($1, $2, $3, $4)`, [uuidTsr, uuidCi, uuidResp, uuidCtbl]);
   await pool.end();
 });
 
@@ -235,9 +259,10 @@ describe('Facturas — Validación Zod', () => {
 });
 
 describe('Facturas — flujo completo', () => {
-  test('POST /tesoreria/facturas con campos completos → 201', async () => {
-    const ag = agentTsr(); await loginTsr(ag);
-    const res = await ag.post('/api/tesoreria/facturas').send({
+  // C-1: factura registrada por contable (uuidCtbl), no por el tesorero que la autorizará
+  test('POST /contable/facturas con campos completos → 201', async () => {
+    const ag = agentCtbl(); await loginCtbl(ag);
+    const res = await ag.post('/api/contable/facturas').send({
       proveedor_id:       proveedorRecId,
       monto:              350000,
       fecha_emision:      '2026-08-28',
@@ -532,9 +557,10 @@ describe('Facturas — flujo umbral Gerencia', () => {
     if (cuentaGrandeId)  await pool.query(`DELETE FROM tesoreria_cuentas WHERE id = $1`, [cuentaGrandeId]);
   });
 
+  // C-1: registra contable para que tesorero pueda aprobar gerencia y autorizar sin conflicto
   test('POST factura > umbral ($6M) → requiere_aprobacion_gerencia = true', async () => {
-    const ag = agentTsr(); await loginTsr(ag);
-    const res = await ag.post('/api/tesoreria/facturas').send({
+    const ag = agentCtbl(); await loginCtbl(ag);
+    const res = await ag.post('/api/contable/facturas').send({
       proveedor_id:      proveedorRecId,
       monto:             6000000,
       fecha_recibida:    '2026-09-01',
@@ -648,9 +674,10 @@ describe('Facturas — retenciones en pago', () => {
     if (cuentaRetId)  await pool.query(`DELETE FROM tesoreria_cuentas WHERE id = $1`, [cuentaRetId]);
   });
 
+  // C-1: registra contable para que tesorero pueda autorizar sin conflicto de rol
   test('Factura con retenciones: monto_neto calculado correctamente', async () => {
-    const agTsr = agentTsr(); await loginTsr(agTsr);
-    const res = await agTsr.post('/api/tesoreria/facturas').send({
+    const agCtbl2 = agentCtbl(); await loginCtbl(agCtbl2);
+    const res = await agCtbl2.post('/api/contable/facturas').send({
       proveedor_id:      proveedorRecId,
       monto:             1000000,
       retencion_fuente:  35000,    // 3.5%

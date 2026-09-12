@@ -62,25 +62,28 @@ router.get('/facturas',                        checkPermission('tesoreria', 'REA
 router.get('/facturas/:id/adjunto',            checkPermission('tesoreria', 'READ'),   descargarAdjunto);
 router.get('/facturas/:id',                    checkPermission('tesoreria', 'READ'),   ctrl.getFactura);
 router.post('/facturas',                       checkPermission('tesoreria', 'WRITE'),  ctrl.crearFactura);
-router.put('/facturas/:id/aprobar-area',       checkPermission('tesoreria', 'WRITE'),  ctrl.aprobarArea);
-router.put('/facturas/:id/autorizar',          checkPermission('tesoreria', 'WRITE'),  ctrl.autorizarPago);
-router.put('/facturas/:id/aprobar-gerencia',   checkPermission('tesoreria', 'WRITE'),  ctrl.aprobarGerencia);
-router.put('/facturas/:id/rechazar-gerencia',  checkPermission('tesoreria', 'WRITE'),  ctrl.rechazarGerencia);
+// C-1: acción específica por etapa — impide que el mismo usuario acumule roles
+router.put('/facturas/:id/aprobar-area',       checkPermission('tesoreria', 'APROBAR_AREA'),    ctrl.aprobarArea);
+router.put('/facturas/:id/autorizar',          checkPermission('tesoreria', 'AUTORIZAR'),       ctrl.autorizarPago);
+router.put('/facturas/:id/aprobar-gerencia',   checkPermission('tesoreria', 'APROBAR_GERENCIA'),ctrl.aprobarGerencia);
+router.put('/facturas/:id/rechazar-gerencia',  checkPermission('tesoreria', 'APROBAR_GERENCIA'),ctrl.rechazarGerencia);
 
 // ── Usuarios disponibles (selector de responsable) ─────────────────────────────
 router.get('/usuarios-disponibles', checkPermission('tesoreria', 'READ'), ctrl.listarUsuariosDisponibles);
 
 // ── Config — Umbrales ──────────────────────────────────────────────────────────
-router.get('/config/umbrales',     checkPermission('tesoreria', 'READ'),   ctrl.listarUmbrales);
-router.post('/config/umbrales',    checkPermission('tesoreria', 'WRITE'),  ctrl.crearUmbral);
-router.put('/config/umbrales/:id', checkPermission('tesoreria', 'WRITE'),  ctrl.actualizarUmbral);
+router.get('/config/umbrales',     checkPermission('tesoreria', 'READ'),         ctrl.listarUmbrales);
+// A-2: modificar umbrales requiere acción específica CONFIG_UMBRAL
+router.post('/config/umbrales',    checkPermission('tesoreria', 'CONFIG_UMBRAL'),ctrl.crearUmbral);
+router.put('/config/umbrales/:id', checkPermission('tesoreria', 'CONFIG_UMBRAL'),ctrl.actualizarUmbral);
 
 // ── Conciliación manual ────────────────────────────────────────────────────────
-router.get('/coincidencias',  costlyEndpointLimiter, checkPermission('tesoreria', 'READ'),  ctrl.buscarCoincidencias);
-router.post('/conciliar',     checkPermission('tesoreria', 'WRITE'), ctrl.conciliarManual);
+router.get('/coincidencias',  costlyEndpointLimiter, checkPermission('tesoreria', 'READ'),    ctrl.buscarCoincidencias);
+// C-1: CONCILIAR es acción separada — no cualquier usuario con WRITE puede conciliar
+router.post('/conciliar',     checkPermission('tesoreria', 'CONCILIAR'), ctrl.conciliarManual);
 
 // ── Ingesta de extracto bancario ───────────────────────────────────────────────
-router.post('/extracto/preview',   checkPermission('tesoreria', 'WRITE'), upload.single('archivo'), ctrl.previewExtracto);
-router.post('/extracto/confirmar', checkPermission('tesoreria', 'WRITE'), upload.single('archivo'), ctrl.confirmarExtracto);
+router.post('/extracto/preview',   checkPermission('tesoreria', 'WRITE'),   upload.single('archivo'), ctrl.previewExtracto);
+router.post('/extracto/confirmar', checkPermission('tesoreria', 'CONCILIAR'),upload.single('archivo'), ctrl.confirmarExtracto);
 
 export default router;

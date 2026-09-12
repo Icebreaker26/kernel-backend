@@ -420,14 +420,14 @@ export const togglePermiso = async (req, res, next) => {
         `DELETE FROM permisos WHERE usuario_uuid = $1 AND modulo_id = $2 AND accion_id = $3`,
         [id, mod.id, acc.id]
       );
-      logAdmin(req.user.id, 'QUITAR_PERMISO', 'usuario', id, id, `${modulo}:${accion}`);
+      await logAdmin(req.user.id, 'QUITAR_PERMISO', 'usuario', id, id, `${modulo}:${accion}`);
       res.json({ activo: false });
     } else {
       await pool.query(
         `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
         [id, mod.id, acc.id]
       );
-      logAdmin(req.user.id, 'DAR_PERMISO', 'usuario', id, id, `${modulo}:${accion}`);
+      await logAdmin(req.user.id, 'DAR_PERMISO', 'usuario', id, id, `${modulo}:${accion}`);
       res.json({ activo: true });
     }
   } catch (err) { next(err); }

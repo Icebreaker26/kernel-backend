@@ -44,7 +44,7 @@ describe('Auth — registro', () => {
 
   test('POST /api/auth/register → 201 con is_approved=false', async () => {
     const res = await request(app).post('/api/auth/register').send({
-      nombre: 'Nuevo Usuario', email: regEmail, password: 'pass123',
+      nombre: 'Nuevo Usuario', email: regEmail, password: 'Pass1234567!',
     });
     expect(res.status).toBe(201);
     expect(res.body).toHaveProperty('id');
@@ -52,7 +52,7 @@ describe('Auth — registro', () => {
 
   test('POST /api/auth/register duplicado → 409', async () => {
     const res = await request(app).post('/api/auth/register').send({
-      nombre: 'Otro', email: regEmail, password: 'pass123',
+      nombre: 'Otro', email: regEmail, password: 'Pass1234567!',
     });
     expect(res.status).toBe(409);
   });

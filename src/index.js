@@ -18,6 +18,27 @@ const io = new Server(httpServer, {
   cors: { origin: allowedOrigins, credentials: true },
 });
 
+// F-07: rate limiting de conexiones Socket.io por IP — máx 20 conexiones/min
+const socketConnections = new Map();
+io.use((socket, next) => {
+  const ip = socket.handshake.address;
+  const now = Date.now();
+  const entry = socketConnections.get(ip) || { count: 0, resetAt: now + 60_000 };
+  if (now > entry.resetAt) { entry.count = 0; entry.resetAt = now + 60_000; }
+  entry.count++;
+  socketConnections.set(ip, entry);
+  if (entry.count > 20) return next(new Error('Demasiadas conexiones. Intenta más tarde.'));
+  next();
+});
+
+// Limpiar entradas expiradas del mapa cada 5 min
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of socketConnections) {
+    if (now > entry.resetAt) socketConnections.delete(ip);
+  }
+}, 5 * 60_000);
+
 // Autenticar socket por cookie JWT
 io.use((socket, next) => {
   try {
@@ -49,9 +70,9 @@ startScheduler();
 startSchedulerTesoreria();
 startDispatcher();
 
-// Purga semanal: elimina actividad con más de 90 días
+// F-09: retención de actividad extendida a 5 años (1825 días) para auditoría
 const purgarActividad = () => {
-  pool.query(`DELETE FROM global_actividad WHERE created_at < NOW() - INTERVAL '90 days'`)
+  pool.query(`DELETE FROM global_actividad WHERE created_at < NOW() - INTERVAL '1825 days'`)
     .then(({ rowCount }) => { if (rowCount > 0) logger.info(`Purga actividad: ${rowCount} registros eliminados`); })
     .catch((err) => logger.error('Error purga actividad', err));
 };

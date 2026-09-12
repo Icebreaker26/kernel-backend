@@ -8,10 +8,25 @@ import pool from '../db/database.js';
 const ALLOWED_MIME = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
 const MAX_SIZE     = 15 * 1024 * 1024; // 15 MB
 
+// F-08: extensión debe coincidir con el mime declarado — evita renombrar .exe como .pdf
+const EXT_TO_MIME = {
+  pdf:  'application/pdf',
+  jpg:  'image/jpeg',
+  jpeg: 'image/jpeg',
+  png:  'image/png',
+  webp: 'image/webp',
+};
+
 export const validarArchivo = ({ nombre, mime, size }) => {
-  if (!nombre || !mime || !size)      return 'Faltan campos: nombre, mime, size';
-  if (!ALLOWED_MIME.includes(mime))   return 'Tipo de archivo no permitido. Usa PDF, JPG o PNG.';
-  if (Number(size) > MAX_SIZE)        return 'El archivo excede el límite de 15 MB';
+  if (!nombre || !mime || !size) return 'Faltan campos: nombre, mime, size';
+  if (!ALLOWED_MIME.includes(mime))  return 'Tipo de archivo no permitido. Usa PDF, JPG o PNG.';
+  if (Number(size) > MAX_SIZE)       return 'El archivo excede el límite de 15 MB';
+
+  const ext = (nombre.split('.').pop() || '').toLowerCase();
+  const expectedMime = EXT_TO_MIME[ext];
+  if (!expectedMime || expectedMime !== mime)
+    return 'La extensión del archivo no coincide con el tipo declarado.';
+
   return null;
 };
 

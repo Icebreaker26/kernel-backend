@@ -20,6 +20,7 @@ const envSchema = z.object({
   AWS_ACCESS_KEY_ID:     z.string().min(16).optional(),
   AWS_SECRET_ACCESS_KEY: z.string().min(32).optional(),
   S3_BUCKET:             z.string().min(3).optional(),
+  REDIS_URL:             z.string().url().optional(),
 });
 
 const _env = envSchema.safeParse(process.env);

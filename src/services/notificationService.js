@@ -12,6 +12,13 @@ const emitir = (notif) => {
   if (notif.asociado_codigo) _io.to(`asociado:${notif.asociado_codigo}`).emit('notificacion', notif);
 };
 
+// Emite directamente a la room de admins sin persistir en la tabla de notificaciones
+// Usado para alertas de seguridad críticas que no deben acumularse en la campana
+export const emitirAlertaSeguridad = (alerta) => {
+  if (!_io) return;
+  _io.to('role:admin').emit('alerta_seguridad', alerta);
+};
+
 // Notificar a un empleado específico
 export const notificarUsuario = async (usuario_uuid, { tipo, mensaje, modulo }) => {
   const { rows: [notif] } = await pool.query(

@@ -1,9 +1,25 @@
 import pool from '../db/database.js';
 import logger from '../config/logger.js';
 import { notificarAdmins } from './notificationService.js';
+import { runAnomalyDetector } from './anomalyDetector.js';
 
 let _timer = null;
 let _dailyTimer = null;
+let _anomalyTimer = null;
+
+// Job de detección de anomalías cada 5 min (reprogramado con setTimeout para evitar solapamiento)
+const scheduleAnomaly = () => {
+  _anomalyTimer = setTimeout(async () => {
+    await runAnomalyDetector();
+    scheduleAnomaly();
+  }, 5 * 60_000);
+};
+
+export const startAnomalyDetector = async () => {
+  await runAnomalyDetector(); // ejecución inicial al arrancar
+  scheduleAnomaly();
+  logger.info('Monitor de anomalías de seguridad iniciado (cada 5 min)');
+};
 
 export const ejecutarPendientes = async () => {
   // Cierres vencidos

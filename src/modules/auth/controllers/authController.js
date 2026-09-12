@@ -41,24 +41,36 @@ export const login = async (req, res, next) => {
     );
 
     const user = rows[0];
+    const ip = req.ip ?? req.socket?.remoteAddress ?? null;
+    const ua = (req.get('user-agent') ?? '').slice(0, 255);
+
+    const registrarIntento = (exitoso, motivo) =>
+      pool.query(
+        `INSERT INTO auth_intentos (email, usuario_id, exitoso, motivo, ip, user_agent)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [email.toLowerCase(), user?.id ?? null, exitoso, motivo, ip, ua]
+      ).catch(() => {});
 
     // F-06: bloqueo por intentos fallidos — respuesta genérica para no confirmar si el email existe
     if (user?.locked_until && new Date(user.locked_until) > new Date()) {
+      registrarIntento(false, 'bloqueado');
       return res.status(429).json({ error: 'Cuenta bloqueada temporalmente. Intenta en 15 minutos.' });
     }
 
-    const valid = user && await bcrypt.compare(password, user.password_hash);
+    if (!user) {
+      registrarIntento(false, 'no_existe');
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+
+    const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) {
-      if (user) {
-        const attempts = (user.failed_attempts || 0) + 1;
-        const lock = attempts >= 5
-          ? `NOW() + INTERVAL '15 minutes'`
-          : 'NULL';
-        await pool.query(
-          `UPDATE global_usuarios SET failed_attempts = $1, locked_until = ${lock} WHERE id = $2`,
-          [attempts, user.id]
-        ).catch(() => {});
-      }
+      const attempts = (user.failed_attempts || 0) + 1;
+      const lock = attempts >= 5 ? `NOW() + INTERVAL '15 minutes'` : 'NULL';
+      pool.query(
+        `UPDATE global_usuarios SET failed_attempts = $1, locked_until = ${lock} WHERE id = $2`,
+        [attempts, user.id]
+      ).catch(() => {});
+      registrarIntento(false, 'password');
       return res.status(401).json({ error: 'Credenciales inválidas' });
     }
 
@@ -69,6 +81,7 @@ export const login = async (req, res, next) => {
         [user.id]
       ).catch(() => {});
     }
+    registrarIntento(true, 'ok');
 
     const jti = randomUUID();
     const token = jwt.sign(
@@ -80,7 +93,6 @@ export const login = async (req, res, next) => {
     res.cookie('token', token, cookieOpts());
 
     // Registrar evento de sesión (fire-and-forget)
-    const ip = req.ip ?? req.socket?.remoteAddress ?? null;
     pool.query(
       `INSERT INTO global_actividad (usuario_id, modulo, metodo, endpoint, status_code, duracion_ms, ip)
        VALUES ($1, 'auth', 'SESSION', 'login', 200, 0, $2)`,

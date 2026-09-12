@@ -9,6 +9,7 @@ import { descargarAdjunto } from '../../contable/controllers/adjuntoController.j
 const router = Router();
 router.use(verifyToken);
 
+router.get('/estadisticas',               checkPermission('control_interno', 'READ'),  ctrl.estadisticas);
 router.get('/facturas',                  checkPermission('control_interno', 'READ'),  ctrl.listarPendientes);
 router.get('/facturas/:id/adjunto',      checkPermission('control_interno', 'READ'),  descargarAdjunto);
 router.put('/facturas/:id/verificar',    checkPermission('control_interno', 'WRITE'), ctrl.aprobarFactura);

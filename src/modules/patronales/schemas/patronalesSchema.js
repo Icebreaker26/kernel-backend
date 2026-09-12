@@ -18,7 +18,8 @@ export const previewSchema = z.object({
 });
 
 export const registrarPagoSchema = z.object({
-  fecha_pago: z.string().min(1, 'La fecha es obligatoria'),
+  // A-10: validar formato para que un string inválido dé 400 en lugar de 500 desde Postgres
+  fecha_pago: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato requerido: YYYY-MM-DD'),
   monto:      z.preprocess((v) => Number(v), z.number().positive('El monto debe ser positivo')),
   referencia: z.string().optional(),
 }).strict();
@@ -50,7 +51,8 @@ export const cambiarPasswordEmpresaSchema = z.object({
 
 export const actualizarAporteSchema = z.object({
   valor_aporte:      z.preprocess((v) => Number(v), z.number().positive('El aporte debe ser positivo')),
-  fecha_desde:       z.string().min(1, 'La fecha de inicio es obligatoria'),
+  // A-10: validar formato de fecha para que un string inválido dé 400, no 500
+  fecha_desde:       z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato requerido: YYYY-MM-DD'),
   motivo:            z.string().min(1, 'El motivo es obligatorio'),
   soporte:           z.string().optional(),
 }).strict();

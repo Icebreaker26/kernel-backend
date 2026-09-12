@@ -1,6 +1,7 @@
 import pool from '../../../db/database.js';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
+import { randomInt } from 'crypto';
 import { env } from '../../../config/env.js';
 import {
   causarSchema, previewSchema, registrarPagoSchema, anularSchema,
@@ -16,9 +17,10 @@ const cookieOpts = () => ({
   maxAge: 8 * 60 * 60 * 1000,
 });
 
+// A-5: usar randomInt (CSPRNG) en lugar de Math.random (no criptográfico)
 const generarPassword = () => {
   const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#';
-  return Array.from({ length: 10 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  return Array.from({ length: 10 }, () => chars[randomInt(chars.length)]).join('');
 };
 
 // ── Lógica compartida entre preview y causar ───────────────────────────────────
@@ -371,9 +373,10 @@ export const causar = async (req, res, next) => {
   const client = await pool.connect();
   try {
     const { periodo, quincena } = causarSchema.parse(req.body);
-    const data = await consolidarPeriodo(client, periodo, quincena ?? null);
-
+    // A-11: BEGIN antes de consolidarPeriodo para que la lectura de ya_causada
+    // y los INSERT queden en la misma transacción, reduciendo la ventana de TOCTOU.
     await client.query('BEGIN');
+    const data = await consolidarPeriodo(client, periodo, quincena ?? null);
     const results = [];
 
     for (const emp of data.empresas) {
@@ -416,7 +419,7 @@ export const causar = async (req, res, next) => {
     await client.query('COMMIT');
     res.json({ periodo, quincena, results });
   } catch (err) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch {}
     next(err);
   } finally {
     client.release();
@@ -430,18 +433,20 @@ export const causarEmpresa = async (req, res, next) => {
   try {
     const { codigo } = req.params;
     const { periodo, quincena } = causarSchema.parse(req.body);
+    // A-11: BEGIN antes de consolidarPeriodo (igual que en causar)
+    await client.query('BEGIN');
     const data = await consolidarPeriodo(client, periodo, quincena ?? null, codigo);
 
     if (!data.empresas.length) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Empresa sin asociados para este período y tipo de run' });
     }
 
     const emp = data.empresas[0];
     if (emp.ya_causada) {
+      await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Ya existe una factura activa para este período' });
     }
-
-    await client.query('BEGIN');
 
     const { rows: [f] } = await client.query(
       `INSERT INTO patronales_facturas
@@ -474,7 +479,7 @@ export const causarEmpresa = async (req, res, next) => {
     await client.query('COMMIT');
     res.status(201).json({ factura_id: f.id, empresa_codigo: emp.empresa_codigo, monto_total: emp.total_empresa, tipo_cuota: emp.tipo_cuota, quincena: emp.quincena });
   } catch (err) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch {}
     next(err);
   } finally {
     client.release();
@@ -537,11 +542,10 @@ export const getFactura = async (req, res, next) => {
 
     if (!factura) return res.status(404).json({ error: 'Factura no encontrada' });
 
+    // A-7: el snapshot ya contiene los conceptos calculados al causar.
+    // El CASE que duplicaba el aporte generaba un detalle que no cuadraba con monto_total.
     const { rows: detalle } = await pool.query(
-      `SELECT *,
-              valor_aporte_snapshot * CASE WHEN clase_cuota_snapshot LIKE '1%' THEN 2 ELSE 1 END AS aporte_monto,
-              bonos_monto + valor_aporte_snapshot * CASE WHEN clase_cuota_snapshot LIKE '1%' THEN 2 ELSE 1 END AS monto_cobrado
-         FROM patronales_detalle WHERE factura_id = $1 ORDER BY nombre_snapshot`,
+      `SELECT * FROM patronales_detalle WHERE factura_id = $1 ORDER BY nombre_snapshot`,
       [id]
     );
     const { rows: pagos } = await pool.query(
@@ -572,6 +576,17 @@ export const registrarPago = async (req, res, next) => {
     if (factura.estado === 'anulada') { await client.query('ROLLBACK'); return res.status(400).json({ error: 'La factura está anulada' }); }
     if (factura.estado === 'pagada')  { await client.query('ROLLBACK'); return res.status(400).json({ error: 'La factura ya está pagada' }); }
 
+    // A-9: validar que el pago no supere el saldo pendiente
+    const { rows: [{ pagado_previo }] } = await client.query(
+      'SELECT COALESCE(SUM(monto), 0) AS pagado_previo FROM patronales_pagos WHERE factura_id = $1',
+      [id]
+    );
+    const saldo = parseFloat(factura.monto_total) - parseFloat(pagado_previo);
+    if (monto > saldo + 0.01) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `El monto ($${monto.toFixed(2)}) supera el saldo pendiente ($${saldo.toFixed(2)})` });
+    }
+
     await client.query(
       `INSERT INTO patronales_pagos (factura_id, fecha_pago, monto, referencia, registrado_por)
        VALUES ($1, $2, $3, $4, $5)`,
@@ -598,7 +613,7 @@ export const registrarPago = async (req, res, next) => {
     await client.query('COMMIT');
     res.json({ ok: true, nuevo_estado, total_pagado: parseFloat(total_pagado) });
   } catch (err) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch {}
     next(err);
   } finally {
     client.release();
@@ -634,7 +649,7 @@ export const anularFactura = async (req, res, next) => {
     await client.query('COMMIT');
     res.json({ ok: true });
   } catch (err) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch {}
     next(err);
   } finally {
     client.release();
@@ -771,7 +786,7 @@ export const activarPortalEmpresa = async (req, res, next) => {
 
     res.json({ ok: true, email, password });
   } catch (err) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch {}
     next(err);
   } finally {
     client.release();
@@ -807,7 +822,7 @@ export const actualizarAporte = async (req, res, next) => {
     await client.query('COMMIT');
     res.json({ ok: true });
   } catch (err) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch {}
     next(err);
   } finally {
     client.release();

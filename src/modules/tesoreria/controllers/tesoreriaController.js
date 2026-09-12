@@ -15,16 +15,23 @@ import { parseBancolombiaPwxl } from '../services/bancolombiaPwxlParser.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
+// C-3: UNION ALL en lugar de OR para evitar doble conteo cuando un movimiento
+// de tipo ingreso/egreso tiene cuenta_destino_id relleno indebidamente.
 const saldoActual = `
   COALESCE((
-    SELECT SUM(CASE
-      WHEN m.tipo = 'ingreso'  THEN  m.monto
-      WHEN m.tipo = 'egreso'   THEN -m.monto
-      WHEN m.tipo = 'traslado' AND m.cuenta_id          = c.id THEN -m.monto
-      WHEN m.tipo = 'traslado' AND m.cuenta_destino_id  = c.id THEN  m.monto
-    END)
-    FROM tesoreria_movimientos m
-    WHERE m.cuenta_id = c.id OR m.cuenta_destino_id = c.id
+    SELECT SUM(val) FROM (
+      SELECT CASE WHEN tipo = 'ingreso' THEN monto ELSE -monto END AS val
+        FROM tesoreria_movimientos
+       WHERE cuenta_id = c.id AND tipo IN ('ingreso', 'egreso')
+      UNION ALL
+      SELECT -monto AS val
+        FROM tesoreria_movimientos
+       WHERE cuenta_id = c.id AND tipo = 'traslado'
+      UNION ALL
+      SELECT monto AS val
+        FROM tesoreria_movimientos
+       WHERE cuenta_destino_id = c.id AND tipo = 'traslado'
+    ) _saldo
   ), 0) + c.saldo_inicial
 `;
 
@@ -743,7 +750,9 @@ export const crearFactura = async (req, res, next) => {
     const { rows: [umbral] } = await pool.query(
       `SELECT monto_umbral FROM tesoreria_config_umbrales WHERE tipo_operacion = 'egreso_proveedor' LIMIT 1`
     );
-    const requiereGerencia = umbral && data.monto > Number(umbral.monto_umbral);
+    // A-1: Boolean() evita que requiereGerencia sea undefined/null cuando no hay umbral,
+    // lo que enviaría NULL a una columna NOT NULL o haría que la factura evite Gerencia en silencio.
+    const requiereGerencia = Boolean(umbral && data.monto > Number(umbral.monto_umbral));
 
     const { rows } = await pool.query(`
       INSERT INTO tesoreria_facturas
@@ -823,13 +832,17 @@ export const autorizarPago = async (req, res, next) => {
     if (factura.aprobacion_vence_at && new Date(factura.aprobacion_vence_at) < new Date())
       return res.status(400).json({ error: 'La verificación de Control Interno ha vencido — debe ser re-verificada' });
 
+    // A-3: registrar quién autorizó para que anomalyDetector pueda detectar
+    // que la misma persona ejecutó varias etapas del flujo.
     const { rows: [updated] } = await pool.query(`
       UPDATE tesoreria_facturas
-         SET estado     = 'autorizada',
-             updated_at = NOW()
+         SET estado         = 'autorizada',
+             autorizada_por = $2,
+             autorizada_at  = NOW(),
+             updated_at     = NOW()
        WHERE id = $1
       RETURNING *
-    `, [req.params.id]);
+    `, [req.params.id, req.user.id]);
 
     res.json(updated);
   } catch (err) { next(err); }
@@ -848,7 +861,7 @@ export const reenviarFactura = async (req, res, next) => {
     const { rows: [umbral] } = await pool.query(
       `SELECT monto_umbral FROM tesoreria_config_umbrales WHERE tipo_operacion = 'egreso_proveedor' LIMIT 1`
     );
-    const requiereGerencia = umbral && Number(f.monto) > Number(umbral.monto_umbral);
+    const requiereGerencia = Boolean(umbral && Number(f.monto) > Number(umbral.monto_umbral));
 
     const { rows } = await pool.query(`
       UPDATE tesoreria_facturas
@@ -1083,45 +1096,79 @@ export const buscarCoincidencias = async (req, res, next) => {
  * Confirma vínculos manuales entre movimientos ya importados y facturas pendientes.
  * Marca la factura como pagada y asigna factura_id al movimiento.
  */
+// C-2: cada vínculo se procesa en su propia transacción con FOR UPDATE para
+// evitar que dos requests concurrentes vinculen el mismo movimiento o factura.
+// Solo se acepta estado 'autorizada' (flujo completo) y se valida que el monto cuadre.
 export const conciliarManual = async (req, res, next) => {
+  let data;
   try {
-    const data = conciliarSchema.parse(req.body);
-    const resultados = [];
+    data = conciliarSchema.parse(req.body);
+  } catch (err) {
+    return next(err);
+  }
+  const resultados = [];
 
-    for (const { factura_id, movimiento_id } of data.vinculos) {
-      const { rows: [mov] } = await pool.query(
-        `SELECT id, fecha FROM tesoreria_movimientos WHERE id = $1 AND factura_id IS NULL`,
+  for (const { factura_id, movimiento_id } of data.vinculos) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const { rows: [mov] } = await client.query(
+        `SELECT id, fecha, monto, tipo FROM tesoreria_movimientos WHERE id = $1 AND factura_id IS NULL FOR UPDATE`,
         [movimiento_id]
       );
       if (!mov) {
+        await client.query('ROLLBACK');
         resultados.push({ factura_id, movimiento_id, ok: false, error: 'Movimiento no encontrado o ya vinculado' });
         continue;
       }
+      if (mov.tipo !== 'egreso') {
+        await client.query('ROLLBACK');
+        resultados.push({ factura_id, movimiento_id, ok: false, error: 'Solo movimientos de tipo egreso pueden vincularse a una factura' });
+        continue;
+      }
 
-      await pool.query(
+      const { rows: [factura] } = await client.query(
+        `SELECT id, estado, monto_neto, movimiento_id FROM tesoreria_facturas WHERE id = $1 FOR UPDATE`,
+        [factura_id]
+      );
+      if (!factura || factura.estado !== 'autorizada' || factura.movimiento_id !== null) {
+        await client.query('ROLLBACK');
+        resultados.push({ factura_id, movimiento_id, ok: false, error: 'Factura no encontrada, no está autorizada, o ya tiene movimiento asignado' });
+        continue;
+      }
+
+      const montoDif = Math.abs(Number(mov.monto) - Number(factura.monto_neto));
+      if (montoDif > 1) {
+        await client.query('ROLLBACK');
+        resultados.push({ factura_id, movimiento_id, ok: false, error: `Diferencia de monto: movimiento $${Number(mov.monto).toFixed(2)} vs factura neta $${Number(factura.monto_neto).toFixed(2)}` });
+        continue;
+      }
+
+      await client.query(
+        `UPDATE tesoreria_facturas
+            SET estado = 'pagada', movimiento_id = $1, fecha_pago = $2,
+                pagada_por = $3, pagada_at = NOW(), updated_at = NOW()
+          WHERE id = $4`,
+        [movimiento_id, mov.fecha, req.user.id, factura_id]
+      );
+      await client.query(
         `UPDATE tesoreria_movimientos SET factura_id = $1 WHERE id = $2`,
         [factura_id, movimiento_id]
       );
 
-      const { rows: [f] } = await pool.query(`
-        UPDATE tesoreria_facturas
-           SET estado        = 'pagada',
-               movimiento_id = $1,
-               fecha_pago    = $2,
-               pagada_por    = $4,
-               updated_at    = NOW()
-         WHERE id = $3
-           AND estado IN ('aprobada', 'verificada', 'autorizada')
-           AND movimiento_id IS NULL
-        RETURNING id
-      `, [movimiento_id, mov.fecha, factura_id, req.user.id]);
-
-      resultados.push({ factura_id, movimiento_id, ok: !!f });
+      await client.query('COMMIT');
+      resultados.push({ factura_id, movimiento_id, ok: true });
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch {}
+      resultados.push({ factura_id, movimiento_id, ok: false, error: err.message });
+    } finally {
+      client.release();
     }
+  }
 
-    const exitosos = resultados.filter(r => r.ok).length;
-    res.json({ resultados, exitosos, total: resultados.length });
-  } catch (err) { next(err); }
+  const exitosos = resultados.filter(r => r.ok).length;
+  res.json({ resultados, exitosos, total: resultados.length });
 };
 
 /**
@@ -1223,15 +1270,25 @@ export const previewExtracto = async (req, res, next) => {
  * Importa las transacciones seleccionadas por la tesorera.
  * Procesa una por una para que un duplicado no aborte el lote completo.
  */
+// C-4: múltiples correcciones:
+// - JSON.parse protegido (SyntaxError → 400)
+// - Selección por clave compuesta (ref|fecha|monto) en lugar de solo referencia
+// - Validación de monto: el movimiento debe cuadrar con monto_neto de la factura
+// - Verificación de rowCount al marcar factura pagada (inconsistencia silenciosa)
+// - fecha_desde/hasta derivadas con fallback a NOW() para cumplir NOT NULL
 export const confirmarExtracto = async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No se recibió ningún archivo' });
 
-    const body = {
-      ...req.body,
-      referencias: JSON.parse(req.body.referencias || '[]'),
-      vinculos:    JSON.parse(req.body.vinculos    || '[]'),
-    };
+    let referencias, vinculos;
+    try {
+      referencias = JSON.parse(req.body.referencias || '[]');
+      vinculos    = JSON.parse(req.body.vinculos    || '[]');
+    } catch {
+      return res.status(400).json({ error: 'referencias o vinculos no son JSON válido' });
+    }
+
+    const body = { ...req.body, referencias, vinculos };
     const data = confirmarExtractoSchema.parse(body);
 
     const { rows: [cuenta] } = await pool.query(
@@ -1243,33 +1300,56 @@ export const confirmarExtracto = async (req, res, next) => {
     const raw = iconv.decode(req.file.buffer, 'latin1');
     const { transacciones } = parseBancolombiaPwxl(raw);
 
-    // Solo las que la tesorera seleccionó
+    // Selección por clave compuesta para no importar dos transacciones con la
+    // misma referencia pero distinto monto o fecha (el banco reutiliza referencias).
+    const claveDedup = (t) => `${t.referencia_bancaria}|${t.fecha}|${Number(t.monto).toFixed(2)}`;
+    const clavesSeleccionadas = new Set(data.referencias);
     const seleccionadas = transacciones.filter(
-      t => t.referencia_bancaria && data.referencias.includes(t.referencia_bancaria)
+      t => t.referencia_bancaria && clavesSeleccionadas.has(claveDedup(t))
     );
 
     if (!seleccionadas.length) {
-      return res.status(400).json({ error: 'Ninguna de las referencias seleccionadas se encontró en el archivo' });
+      return res.status(400).json({ error: 'Ninguna de las transacciones seleccionadas se encontró en el archivo' });
     }
 
-    const importadas  = [];
-    const omitidas    = [];
-
-    // Mapa referencia_bancaria → factura_id para aplicar vínculos
+    // Mapa clave_compuesta → factura_id para aplicar vínculos
     const vinculoMap = Object.fromEntries(
-      data.vinculos.map(v => [v.referencia_bancaria, v.factura_id])
+      data.vinculos.map(v => {
+        const clave = `${v.referencia_bancaria}|${v.fecha}|${Number(v.monto).toFixed(2)}`;
+        return [clave, v.factura_id];
+      })
     );
 
+    const importadas = [];
+    const omitidas   = [];
+
     for (const tx of seleccionadas) {
+      const clave = claveDedup(tx);
       try {
-        const factura_id = vinculoMap[tx.referencia_bancaria] || null;
+        const factura_id = vinculoMap[clave] || null;
+
+        // Si hay vínculo, validar que el monto cuadre antes de insertar el movimiento
+        if (factura_id) {
+          const { rows: [fac] } = await pool.query(
+            `SELECT monto_neto, estado FROM tesoreria_facturas WHERE id = $1`,
+            [factura_id]
+          );
+          if (!fac || fac.estado !== 'autorizada') {
+            omitidas.push({ referencia: tx.referencia_bancaria, razon: 'Factura no encontrada o no está autorizada' });
+            continue;
+          }
+          if (Math.abs(Number(tx.monto) - Number(fac.monto_neto)) > 1) {
+            omitidas.push({ referencia: tx.referencia_bancaria, razon: `Diferencia de monto: transacción $${tx.monto} vs factura neta $${Number(fac.monto_neto).toFixed(2)}` });
+            continue;
+          }
+        }
 
         const { rows: [mov] } = await pool.query(`
           INSERT INTO tesoreria_movimientos
             (tipo, monto, fecha, descripcion, referencia_bancaria,
              tipo_bancario, oficina_bancaria, detalles_banco,
-             cuenta_id, categoria_id, periodo_id, registrado_por, origen, factura_id)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'extracto',$13)
+             cuenta_id, categoria_id, periodo_id, registrado_por, origen)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'extracto')
           RETURNING id
         `, [
           tx.tipo_movimiento,
@@ -1284,19 +1364,26 @@ export const confirmarExtracto = async (req, res, next) => {
           data.categoria_id   || null,
           data.periodo_id     || null,
           req.user.id,
-          factura_id,
         ]);
 
-        // Si hay vínculo, marcar la factura como pagada
         if (factura_id) {
-          await pool.query(`
+          const { rowCount } = await pool.query(`
             UPDATE tesoreria_facturas
                SET estado        = 'pagada',
                    movimiento_id = $1,
+                   fecha_pago    = $2,
                    pagada_por    = $3,
+                   pagada_at     = NOW(),
                    updated_at    = NOW()
-             WHERE id = $2 AND estado = 'autorizada'
-          `, [mov.id, factura_id, req.user.id]);
+             WHERE id = $4 AND estado = 'autorizada' AND movimiento_id IS NULL
+          `, [mov.id, tx.fecha, req.user.id, factura_id]);
+
+          if (rowCount > 0) {
+            await pool.query(
+              `UPDATE tesoreria_movimientos SET factura_id = $1 WHERE id = $2`,
+              [factura_id, mov.id]
+            );
+          }
         }
 
         importadas.push({ referencia: tx.referencia_bancaria, movimiento_id: mov.id, factura_id });
@@ -1304,21 +1391,23 @@ export const confirmarExtracto = async (req, res, next) => {
         if (err.code === '23505') {
           omitidas.push({ referencia: tx.referencia_bancaria, razon: 'ya registrada' });
         } else {
-          omitidas.push({ referencia: tx.referencia_bancaria, razon: err.message });
+          omitidas.push({ referencia: tx.referencia_bancaria, razon: 'Error al importar transacción' });
         }
       }
     }
 
-    // Guardar log de la importación
-    const fechas = seleccionadas.map(t => t.fecha).filter(Boolean).sort();
+    // Guardar log — fecha_desde/hasta con fallback a NOW() para cumplir NOT NULL
+    const fechasValidas = seleccionadas.map(t => t.fecha).filter(Boolean).sort();
+    const fechaDesde = fechasValidas[0]                 || new Date().toISOString().slice(0, 10);
+    const fechaHasta = fechasValidas[fechasValidas.length - 1] || fechaDesde;
     await pool.query(`
       INSERT INTO tesoreria_extractos
         (cuenta_id, fecha_desde, fecha_hasta, total_filas, importadas, omitidas, nombre_archivo, importado_por)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
     `, [
       data.cuenta_id,
-      fechas[0]             || null,
-      fechas[fechas.length - 1] || null,
+      fechaDesde,
+      fechaHasta,
       seleccionadas.length,
       importadas.length,
       omitidas.length,
@@ -1327,8 +1416,8 @@ export const confirmarExtracto = async (req, res, next) => {
     ]);
 
     res.json({
-      importadas: importadas.length,
-      omitidas:   omitidas.length,
+      importadas:       importadas.length,
+      omitidas:         omitidas.length,
       detalle_omitidas: omitidas,
     });
   } catch (err) { next(err); }

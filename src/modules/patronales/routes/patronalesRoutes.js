@@ -2,12 +2,14 @@ import { Router } from 'express';
 import { verifyToken } from '../../../middlewares/auth.js';
 import { checkPermission } from '../../../middlewares/checkPermission.js';
 import { verifyEmpresa } from '../../../middlewares/authEmpresa.js';
+import { loginRateLimiter } from '../../../middlewares/rateLimiter.js';
 import * as ctrl from '../controllers/patronalesController.js';
 
 const router = Router();
 
 // ── Portal empresa ─────────────────────────────────────────────────────────────
-router.post('/portal/login',              ctrl.loginEmpresa);
+// A-4: rate limiter en login del portal (igual que el login de empleados)
+router.post('/portal/login',              loginRateLimiter, ctrl.loginEmpresa);
 router.post('/portal/logout',             verifyEmpresa, ctrl.logoutEmpresa);
 router.get('/portal/me',                  verifyEmpresa, ctrl.meEmpresa);
 router.put('/portal/cambiar-password',    verifyEmpresa, ctrl.cambiarPasswordEmpresa);

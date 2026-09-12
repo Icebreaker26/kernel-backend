@@ -203,13 +203,20 @@ describe('Confirmar importación', () => {
   beforeAll(async () => { ag = agente(); await ag.post('/api/auth/login').send({ email: EMAIL, password: PASS }); });
 
   test('Importa correctamente las 4 transacciones del fixture', async () => {
-    const refs = ['REF001UNICO', 'REFCOMPARTIDA', 'REFEGRESO01'];
+    // C-4: referencias son claves compuestas ref|fecha|monto (dos decimales)
+    // para distinguir transacciones del banco que reutilizan el mismo código.
+    const claves = [
+      'REF001UNICO|2026-09-01|126000.00',
+      'REFCOMPARTIDA|2026-09-01|75000.00',
+      'REFCOMPARTIDA|2026-09-01|50000.00',
+      'REFEGRESO01|2026-09-01|200000.00',
+    ];
 
     const res = await ag
       .post('/api/tesoreria/extracto/confirmar')
       .attach('archivo', FIXTURE)
       .field('cuenta_id', cuentaId)
-      .field('referencias', JSON.stringify([...refs, 'REFCOMPARTIDA']));
+      .field('referencias', JSON.stringify(claves));
 
     expect(res.status).toBe(200);
     expect(res.body.importadas).toBe(4);
@@ -254,13 +261,18 @@ describe('Deduplicación', () => {
   beforeAll(async () => { ag = agente(); await ag.post('/api/auth/login').send({ email: EMAIL, password: PASS }); });
 
   test('Re-importar el mismo archivo: importadas=0, omitidas=4 (caída elegante)', async () => {
-    const refs = ['REF001UNICO', 'REFCOMPARTIDA', 'REFEGRESO01'];
+    const claves = [
+      'REF001UNICO|2026-09-01|126000.00',
+      'REFCOMPARTIDA|2026-09-01|75000.00',
+      'REFCOMPARTIDA|2026-09-01|50000.00',
+      'REFEGRESO01|2026-09-01|200000.00',
+    ];
 
     const res = await ag
       .post('/api/tesoreria/extracto/confirmar')
       .attach('archivo', FIXTURE)
       .field('cuenta_id', cuentaId)
-      .field('referencias', JSON.stringify([...refs, 'REFCOMPARTIDA']));
+      .field('referencias', JSON.stringify(claves));
 
     expect(res.status).toBe(200);
     expect(res.body.importadas).toBe(0);

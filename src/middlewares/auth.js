@@ -35,7 +35,10 @@ export const verifyToken = async (req, res, next) => {
         await redisClient.set(cacheKey, new Date(validFrom).toISOString(), 'EX', 60).catch(() => {});
       }
     }
-    if (validFrom && payload.iat * 1000 < new Date(validFrom).getTime()) {
+    // iat está truncado a segundos; sessions_valid_from tiene precisión de ms.
+    // Comparar en segundos para evitar rechazar tokens emitidos en el mismo
+    // segundo que se estableció sessions_valid_from (p.ej. creación de usuario).
+    if (validFrom && payload.iat < Math.floor(new Date(validFrom).getTime() / 1000)) {
       return res.status(401).json({ error: 'Sesión revocada. Inicia sesión de nuevo.' });
     }
 

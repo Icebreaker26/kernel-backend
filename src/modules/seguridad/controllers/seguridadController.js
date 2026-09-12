@@ -132,8 +132,10 @@ export const forzarLogout = async (req, res, next) => {
     const { id } = req.params;
 
     // Fuente de verdad: sessions_valid_from en Postgres (funciona sin Redis)
+    // +1 segundo para que floor(sessions_valid_from/1000) > iat del token actual,
+    // incluso si login y forced-logout ocurren en el mismo segundo de reloj.
     await pool.query(
-      `UPDATE global_usuarios SET sessions_valid_from = NOW() WHERE id = $1`,
+      `UPDATE global_usuarios SET sessions_valid_from = NOW() + INTERVAL '1 second' WHERE id = $1`,
       [id]
     );
 

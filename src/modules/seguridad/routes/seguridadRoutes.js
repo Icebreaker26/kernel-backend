@@ -14,6 +14,7 @@ router.get('/alertas',                   soloAdmin, ctrl.listarAlertas);
 router.patch('/alertas/:id',             soloAdmin, ctrl.actualizarAlerta);
 router.get('/metricas',                  soloAdmin, ctrl.metricas);
 router.get('/login-fallidos',            soloAdmin, ctrl.loginFallidos);
+router.get('/intentos-login',            soloAdmin, ctrl.intentosLogin);
 router.post('/usuarios/:id/desbloquear', soloAdmin, ctrl.desbloquear);
 router.post('/usuarios/:id/forzar-logout', soloAdmin, ctrl.forzarLogout);
 

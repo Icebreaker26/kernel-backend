@@ -5,7 +5,15 @@ import logger from '../../../config/logger.js';
 // GET /api/seguridad/alertas
 export const listarAlertas = async (req, res, next) => {
   try {
-    const { estado = 'nueva', limit = 50 } = req.query;
+    const { estado = 'nueva', regla, limit = 50 } = req.query;
+    const conditions = [];
+    const params     = [Number(limit)];
+
+    if (estado !== 'todas') { params.push(estado); conditions.push(`sa.estado = $${params.length}`); }
+    if (regla)              { params.push(regla);  conditions.push(`sa.regla  = $${params.length}`); }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
     const { rows } = await pool.query(`
       SELECT sa.*,
              u.nombre  AS usuario_nombre,
@@ -14,10 +22,10 @@ export const listarAlertas = async (req, res, next) => {
         FROM security_alerts sa
         LEFT JOIN global_usuarios u ON u.id = sa.usuario_uuid
         LEFT JOIN global_usuarios r ON r.id = sa.reconocida_por_uuid
-       WHERE ($1 = 'todas' OR sa.estado = $1)
-       ORDER BY sa.ultima_vez_at DESC
-       LIMIT $2
-    `, [estado, Number(limit)]);
+      ${where}
+      ORDER BY sa.ultima_vez_at DESC
+      LIMIT $1
+    `, params);
     res.json(rows);
   } catch (err) { next(err); }
 };
@@ -88,6 +96,33 @@ export const desbloquear = async (req, res, next) => {
     );
     logger.info(`[SEGURIDAD] Usuario ${id} desbloqueado por ${req.user.id}`);
     res.json({ ok: true });
+  } catch (err) { next(err); }
+};
+
+// GET /api/seguridad/intentos-login
+export const intentosLogin = async (req, res, next) => {
+  try {
+    const { email, ip, motivo, limit = 100 } = req.query;
+    const conditions = [];
+    const params     = [];
+
+    if (email)  { params.push(`%${email}%`);  conditions.push(`ai.email ILIKE $${params.length}`); }
+    if (ip)     { params.push(`%${ip}%`);     conditions.push(`ai.ip ILIKE $${params.length}`); }
+    if (motivo) { params.push(motivo);         conditions.push(`ai.motivo = $${params.length}`); }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(Number(limit));
+
+    const { rows } = await pool.query(`
+      SELECT ai.id, ai.email, ai.exitoso, ai.motivo, ai.ip, ai.user_agent, ai.created_at,
+             u.nombre AS usuario_nombre
+        FROM auth_intentos ai
+        LEFT JOIN global_usuarios u ON u.id = ai.usuario_id
+      ${where}
+      ORDER BY ai.created_at DESC
+      LIMIT $${params.length}
+    `, params);
+    res.json(rows);
   } catch (err) { next(err); }
 };
 

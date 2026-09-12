@@ -1,4 +1,4 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { RedisStore } from 'rate-limit-redis';
 import { redisClient } from '../config/redis.js';
 
@@ -38,7 +38,7 @@ export const costlyEndpointLimiter = isTest
       standardHeaders: true,
       legacyHeaders: false,
       store: makeStore('costly'),
-      keyGenerator: (req) => req.user?.id ?? req.ip,
+      keyGenerator: (req) => req.user?.id ?? ipKeyGenerator(req),
       handler: (_req, res) =>
         res.status(429).json({ error: 'Límite de solicitudes para este endpoint. Intenta en un minuto.' }),
     });

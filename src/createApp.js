@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { env } from './config/env.js';
 import { errorHandler } from './middlewares/errorHandler.js';
 import { logActividad } from './middlewares/logActividad.js';
+import { globalLimiter } from './middlewares/rateLimiter.js';
 import logger from './config/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -22,6 +23,7 @@ export const createApp = async () => {
   app.use(cors({ origin: allowedOrigins, credentials: true }));
   app.use(express.json({ limit: '2mb' }));
   app.use(cookieParser());
+  app.use(globalLimiter);
   app.use(logActividad);
 
   const modulesPath   = join(__dirname, 'modules');

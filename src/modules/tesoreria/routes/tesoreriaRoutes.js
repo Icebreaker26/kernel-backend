@@ -4,6 +4,7 @@ import { verifyToken }      from '../../../middlewares/auth.js';
 import { checkPermission }  from '../../../middlewares/checkPermission.js';
 import * as ctrl from '../controllers/tesoreriaController.js';
 import { descargarAdjunto } from '../../contable/controllers/adjuntoController.js';
+import { costlyEndpointLimiter } from '../../../middlewares/rateLimiter.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -75,7 +76,7 @@ router.post('/config/umbrales',    checkPermission('tesoreria', 'WRITE'),  ctrl.
 router.put('/config/umbrales/:id', checkPermission('tesoreria', 'WRITE'),  ctrl.actualizarUmbral);
 
 // ── Conciliación manual ────────────────────────────────────────────────────────
-router.get('/coincidencias',  checkPermission('tesoreria', 'READ'),  ctrl.buscarCoincidencias);
+router.get('/coincidencias',  costlyEndpointLimiter, checkPermission('tesoreria', 'READ'),  ctrl.buscarCoincidencias);
 router.post('/conciliar',     checkPermission('tesoreria', 'WRITE'), ctrl.conciliarManual);
 
 // ── Ingesta de extracto bancario ───────────────────────────────────────────────

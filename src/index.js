@@ -5,7 +5,7 @@ import jwt from 'jsonwebtoken';
 import { createApp } from './createApp.js';
 import { env } from './config/env.js';
 import { initNotificationService } from './services/notificationService.js';
-import { startScheduler, startSchedulerTesoreria } from './services/scheduler.js';
+import { startScheduler, startSchedulerTesoreria, startAnomalyDetector } from './services/scheduler.js';
 import { startDispatcher } from './services/mailingDispatcher.js';
 import logger from './config/logger.js';
 import pool from './db/database.js';
@@ -68,6 +68,7 @@ io.on('connection', (socket) => {
 initNotificationService(io);
 startScheduler();
 startSchedulerTesoreria();
+startAnomalyDetector();
 startDispatcher();
 
 // F-09: retención de actividad extendida a 5 años (1825 días) para auditoría
@@ -75,6 +76,9 @@ const purgarActividad = () => {
   pool.query(`DELETE FROM global_actividad WHERE created_at < NOW() - INTERVAL '1825 days'`)
     .then(({ rowCount }) => { if (rowCount > 0) logger.info(`Purga actividad: ${rowCount} registros eliminados`); })
     .catch((err) => logger.error('Error purga actividad', err));
+  // auth_intentos: retención 90 días (datos más sensibles, ventana más corta)
+  pool.query(`DELETE FROM auth_intentos WHERE created_at < NOW() - INTERVAL '90 days'`)
+    .catch((err) => logger.error('Error purga auth_intentos', err));
 };
 purgarActividad();
 setInterval(purgarActividad, 7 * 24 * 60 * 60 * 1000);

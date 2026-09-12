@@ -1,6 +1,7 @@
 import bcrypt from 'bcrypt';
 import pool from '../../../db/database.js';
 import { crearUsuarioSchema, cambiarRolSchema, asignarPermisosSchema, resetearPasswordSchema } from '../schemas/adminSchema.js';
+import { emitirAlertaSeguridad } from '../../../services/notificationService.js';
 
 const logAdmin = (usuario_uuid, accion, objetivo_tipo, objetivo_id, objetivo_nombre, detalle = null) =>
   pool.query(
@@ -428,6 +429,26 @@ export const togglePermiso = async (req, res, next) => {
         [id, mod.id, acc.id]
       );
       await logAdmin(req.user.id, 'DAR_PERMISO', 'usuario', id, id, `${modulo}:${accion}`);
+
+      // Regla 4 — alerta inmediata si el actor se otorga permisos a sí mismo
+      if (req.user.id === id) {
+        const alertaAutootorgamiento = {
+          regla: 'auto_permiso', tipo: 'Auto-otorgamiento de permiso',
+          severidad: 'critica', titulo: `Un usuario se otorgó permisos a sí mismo: ${modulo}:${accion}`,
+          usuario_uuid: id, entidad_tipo: 'usuario', entidad_id: id,
+        };
+        pool.query(
+          `INSERT INTO security_alerts (regla,tipo,severidad,usuario_uuid,dedupe_key,titulo,detalle,entidad_tipo,entidad_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+           ON CONFLICT (dedupe_key) DO UPDATE SET ocurrencias=security_alerts.ocurrencias+1, ultima_vez_at=NOW()`,
+          ['auto_permiso','Auto-otorgamiento de permiso','critica', id,
+           `auto_permiso:${id}:${modulo}:${accion}`,
+           alertaAutootorgamiento.titulo,
+           JSON.stringify({ modulo, accion, actor: req.user.id }), 'usuario', id]
+        ).catch(() => {});
+        emitirAlertaSeguridad(alertaAutootorgamiento);
+      }
+
       res.json({ activo: true });
     }
   } catch (err) { next(err); }

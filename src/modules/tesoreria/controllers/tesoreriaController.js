@@ -1108,12 +1108,13 @@ export const conciliarManual = async (req, res, next) => {
            SET estado        = 'pagada',
                movimiento_id = $1,
                fecha_pago    = $2,
+               pagada_por    = $4,
                updated_at    = NOW()
          WHERE id = $3
            AND estado IN ('aprobada', 'verificada', 'autorizada')
            AND movimiento_id IS NULL
         RETURNING id
-      `, [movimiento_id, mov.fecha, factura_id]);
+      `, [movimiento_id, mov.fecha, factura_id, req.user.id]);
 
       resultados.push({ factura_id, movimiento_id, ok: !!f });
     }
@@ -1290,11 +1291,12 @@ export const confirmarExtracto = async (req, res, next) => {
         if (factura_id) {
           await pool.query(`
             UPDATE tesoreria_facturas
-               SET estado       = 'pagada',
+               SET estado        = 'pagada',
                    movimiento_id = $1,
-                   updated_at   = NOW()
+                   pagada_por    = $3,
+                   updated_at    = NOW()
              WHERE id = $2 AND estado = 'autorizada'
-          `, [mov.id, factura_id]);
+          `, [mov.id, factura_id, req.user.id]);
         }
 
         importadas.push({ referencia: tx.referencia_bancaria, movimiento_id: mov.id, factura_id });

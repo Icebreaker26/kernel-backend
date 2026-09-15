@@ -218,17 +218,69 @@ const consolidarPeriodo = async (client, periodo, quincena, empresa_codigo = nul
 export const loginEmpresa = async (req, res, next) => {
   try {
     const { email, password } = loginEmpresaSchema.parse(req.body);
+
+    const ip = req.ip ?? req.socket?.remoteAddress ?? null;
+    const ua = (req.get('user-agent') ?? '').slice(0, 255);
+
+    const registrarIntento = (exitoso, motivo) =>
+      pool.query(
+        `INSERT INTO auth_intentos (email, exitoso, motivo, ip, user_agent, contexto, identificador)
+         VALUES ($1, $2, $3, $4, $5, 'empresa', $6)`,
+        [email, exitoso, motivo, ip, ua, email]
+      ).catch(() => {});
+
     const { rows } = await pool.query(
       `SELECT epa.*, e.nombre
          FROM empresas_portal_acceso epa
          JOIN empresas e ON e.codigo = epa.empresa_codigo
-        WHERE epa.email = $1 AND epa.portal_activo = true`,
+        WHERE epa.email = $1`,
       [email]
     );
-    if (!rows.length) return res.status(401).json({ error: 'Credenciales inválidas' });
-    const acc   = rows[0];
+
+    const acc = rows[0];
+
+    if (!acc) {
+      await registrarIntento(false, 'no_existe');
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+
+    if (acc.locked_until && new Date(acc.locked_until) > new Date()) {
+      await registrarIntento(false, 'bloqueado');
+      return res.status(429).json({ error: 'Cuenta bloqueada temporalmente. Intenta en 15 minutos.' });
+    }
+
+    if (!acc.portal_activo) {
+      await registrarIntento(false, 'inactivo');
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+
     const valid = await bcrypt.compare(password, acc.password_hash);
-    if (!valid) return res.status(401).json({ error: 'Credenciales inválidas' });
+    if (!valid) {
+      await pool.query(
+        `UPDATE empresas_portal_acceso
+            SET failed_attempts = CASE
+                  WHEN locked_until IS NOT NULL AND locked_until < NOW() THEN 1
+                  ELSE failed_attempts + 1
+                END,
+                locked_until = CASE
+                  WHEN locked_until IS NOT NULL AND locked_until < NOW() THEN NULL
+                  WHEN failed_attempts + 1 >= 5 THEN NOW() + INTERVAL '15 minutes'
+                  ELSE locked_until
+                END
+          WHERE email = $1`,
+        [email]
+      );
+      await registrarIntento(false, 'password');
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+
+    if (acc.failed_attempts > 0) {
+      pool.query(
+        `UPDATE empresas_portal_acceso SET failed_attempts = 0, locked_until = NULL WHERE email = $1`,
+        [email]
+      ).catch(() => {});
+    }
+    await registrarIntento(true, 'ok');
 
     const token = jwt.sign(
       { tipo: 'empresa', codigo: acc.empresa_codigo, email: acc.email, nombre: acc.nombre },

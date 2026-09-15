@@ -9,6 +9,7 @@ import { startScheduler, startSchedulerTesoreria, startAnomalyDetector } from '.
 import { startDispatcher } from './services/mailingDispatcher.js';
 import logger from './config/logger.js';
 import pool from './db/database.js';
+import { redisClient } from './config/redis.js';
 
 const app        = await createApp();
 const httpServer = createServer(app);
@@ -63,6 +64,33 @@ io.on('connection', (socket) => {
   } else {
     socket.join(`asociado:${payload.id}`);
   }
+
+  // Revalidar sessions_valid_from cada 60s — asegura que revocarSesiones desconecte
+  // sockets que sobreviven cuando el proceso no llama desconectarSockets directamente
+  const revalidar = setInterval(async () => {
+    try {
+      if (tipo === 'usuario') {
+        const { rows: [r] } = await pool.query(
+          `SELECT sessions_valid_from FROM global_usuarios WHERE id = $1`, [payload.id]
+        );
+        const revocado = r?.sessions_valid_from &&
+          payload.iat < Math.floor(new Date(r.sessions_valid_from).getTime() / 1000);
+        const jtiRevocado = payload.jti && redisClient
+          ? await redisClient.get(`jti:${payload.jti}`).catch(() => null) : null;
+        if (revocado || jtiRevocado) socket.disconnect(true);
+      } else {
+        const { rows: [r] } = await pool.query(
+          `SELECT sessions_valid_from, portal_activo FROM asociados WHERE codigo = $1`, [payload.id]
+        );
+        const revocado = !r?.portal_activo ||
+          (r?.sessions_valid_from &&
+           payload.iat < Math.floor(new Date(r.sessions_valid_from).getTime() / 1000));
+        if (revocado) socket.disconnect(true);
+      }
+    } catch { /* no desconectar por fallo transitorio de DB */ }
+  }, 60_000);
+
+  socket.on('disconnect', () => clearInterval(revalidar));
 });
 
 initNotificationService(io);

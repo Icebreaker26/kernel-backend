@@ -6,7 +6,7 @@ import iconv from 'iconv-lite';
 import pool from '../../../db/database.js';
 import { env } from '../../../config/env.js';
 import { loginAsociadoSchema, importarFilaSchema, solicitarPortalSchema, registroPortalSchema, cambiarPasswordSchema, subsanarSchema, pagoEfectivoSchema, guardarEmailSchema } from '../schemas/asociadosSchema.js';
-import { notificarUsuario, notificarAdmins } from '../../../services/notificationService.js';
+import { notificarUsuario, notificarAdmins, desconectarSockets } from '../../../services/notificationService.js';
 import { enviarCredencialesPortal } from '../../../services/emailService.js';
 import { redisClient } from '../../../config/redis.js';
 
@@ -29,22 +29,66 @@ export const loginAsociado = async (req, res, next) => {
   try {
     const { codigo, password } = loginAsociadoSchema.parse(req.body);
 
+    const ip = req.ip ?? req.socket?.remoteAddress ?? null;
+    const ua = (req.get('user-agent') ?? '').slice(0, 255);
+
+    const registrarIntento = (exitoso, motivo) =>
+      pool.query(
+        `INSERT INTO auth_intentos (email, exitoso, motivo, ip, user_agent, contexto, identificador)
+         VALUES ($1, $2, $3, $4, $5, 'asociado', $6)`,
+        [codigo, exitoso, motivo, ip, ua, codigo]
+      ).catch(() => {});
+
     const { rows } = await pool.query(
-      `SELECT codigo, nombre, apellido, password_hash, portal_activo, primer_login
+      `SELECT codigo, nombre, apellido, password_hash, portal_activo, primer_login,
+              failed_attempts, locked_until
        FROM asociados WHERE codigo = $1 AND is_active = true`,
       [codigo]
     );
 
     const asociado = rows[0];
 
-    // Mismo mensaje para usuario no encontrado y contraseña incorrecta — no revelar si existe
-    if (!asociado || !asociado.password_hash || !(await bcrypt.compare(password, asociado.password_hash))) {
+    if (!asociado) {
+      await registrarIntento(false, 'no_existe');
+      return res.status(401).json({ error: 'Código o contraseña incorrectos' });
+    }
+
+    if (asociado.locked_until && new Date(asociado.locked_until) > new Date()) {
+      await registrarIntento(false, 'bloqueado');
+      return res.status(429).json({ error: 'Cuenta bloqueada temporalmente. Intenta en 15 minutos.' });
+    }
+
+    if (!asociado.password_hash || !(await bcrypt.compare(password, asociado.password_hash))) {
+      await pool.query(
+        `UPDATE asociados
+            SET failed_attempts = CASE
+                  WHEN locked_until IS NOT NULL AND locked_until < NOW() THEN 1
+                  ELSE failed_attempts + 1
+                END,
+                locked_until = CASE
+                  WHEN locked_until IS NOT NULL AND locked_until < NOW() THEN NULL
+                  WHEN failed_attempts + 1 >= 5 THEN NOW() + INTERVAL '15 minutes'
+                  ELSE locked_until
+                END
+          WHERE codigo = $1`,
+        [codigo]
+      );
+      await registrarIntento(false, 'password');
       return res.status(401).json({ error: 'Código o contraseña incorrectos' });
     }
 
     if (!asociado.portal_activo) {
+      await registrarIntento(false, 'inactivo');
       return res.status(403).json({ error: 'Tu acceso al portal no está activado. Contacta a la cooperativa.' });
     }
+
+    if (asociado.failed_attempts > 0) {
+      pool.query(
+        `UPDATE asociados SET failed_attempts = 0, locked_until = NULL WHERE codigo = $1`,
+        [codigo]
+      ).catch(() => {});
+    }
+    await registrarIntento(true, 'ok');
 
     const token = jwt.sign(
       { id: asociado.codigo, nombre: asociado.nombre, tipo: 'asociado', primer_login: asociado.primer_login },
@@ -52,9 +96,7 @@ export const loginAsociado = async (req, res, next) => {
       { expiresIn: '8h' }
     );
 
-    res.cookie('token_asociado', token, {
-      ...cookieOpts(),
-    });
+    res.cookie('token_asociado', token, cookieOpts());
 
     res.json({
       codigo:       asociado.codigo,
@@ -344,6 +386,7 @@ export const desactivarPortal = async (req, res, next) => {
     if (redisClient) {
       await redisClient.del(`uvf_a:${codigo}`).catch(() => {});
     }
+    desconectarSockets(codigo, 'asociado');
     res.json({ ok: true });
   } catch (err) {
     next(err);

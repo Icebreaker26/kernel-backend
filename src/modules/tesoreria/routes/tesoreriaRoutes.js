@@ -5,6 +5,7 @@ import { checkPermission }  from '../../../middlewares/checkPermission.js';
 import * as ctrl from '../controllers/tesoreriaController.js';
 import { descargarAdjunto } from '../../contable/controllers/adjuntoController.js';
 import { costlyEndpointLimiter } from '../../../middlewares/rateLimiter.js';
+import { lockdownFinanciero } from '../../../middlewares/lockdown.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -47,7 +48,7 @@ router.put('/periodos/:id/cerrar', checkPermission('tesoreria', 'WRITE'), ctrl.c
 // ── Movimientos ────────────────────────────────────────────────────────────────
 router.get('/movimientos/export', checkPermission('tesoreria', 'READ'),  ctrl.exportarMovimientos);
 router.get('/movimientos',        checkPermission('tesoreria', 'READ'),  ctrl.listarMovimientos);
-router.post('/movimientos',       checkPermission('tesoreria', 'WRITE'), ctrl.crearMovimiento);
+router.post('/movimientos',       lockdownFinanciero, checkPermission('tesoreria', 'WRITE'), ctrl.crearMovimiento);
 
 // ── Proveedores ────────────────────────────────────────────────────────────────
 router.get('/proveedores',                checkPermission('tesoreria', 'READ'),   ctrl.listarProveedores);
@@ -63,10 +64,10 @@ router.get('/facturas/:id/adjunto',            checkPermission('tesoreria', 'REA
 router.get('/facturas/:id',                    checkPermission('tesoreria', 'READ'),   ctrl.getFactura);
 router.post('/facturas',                       checkPermission('tesoreria', 'WRITE'),  ctrl.crearFactura);
 // C-1: acción específica por etapa — impide que el mismo usuario acumule roles
-router.put('/facturas/:id/aprobar-area',       checkPermission('tesoreria', 'APROBAR_AREA'),    ctrl.aprobarArea);
-router.put('/facturas/:id/autorizar',          checkPermission('tesoreria', 'AUTORIZAR'),       ctrl.autorizarPago);
-router.put('/facturas/:id/aprobar-gerencia',   checkPermission('tesoreria', 'APROBAR_GERENCIA'),ctrl.aprobarGerencia);
-router.put('/facturas/:id/rechazar-gerencia',  checkPermission('tesoreria', 'APROBAR_GERENCIA'),ctrl.rechazarGerencia);
+router.put('/facturas/:id/aprobar-area',       lockdownFinanciero, checkPermission('tesoreria', 'APROBAR_AREA'),    ctrl.aprobarArea);
+router.put('/facturas/:id/autorizar',          lockdownFinanciero, checkPermission('tesoreria', 'AUTORIZAR'),       ctrl.autorizarPago);
+router.put('/facturas/:id/aprobar-gerencia',   lockdownFinanciero, checkPermission('tesoreria', 'APROBAR_GERENCIA'),ctrl.aprobarGerencia);
+router.put('/facturas/:id/rechazar-gerencia',  lockdownFinanciero, checkPermission('tesoreria', 'APROBAR_GERENCIA'),ctrl.rechazarGerencia);
 
 // ── Usuarios disponibles (selector de responsable) ─────────────────────────────
 router.get('/usuarios-disponibles', checkPermission('tesoreria', 'READ'), ctrl.listarUsuariosDisponibles);
@@ -80,10 +81,10 @@ router.put('/config/umbrales/:id', checkPermission('tesoreria', 'CONFIG_UMBRAL')
 // ── Conciliación manual ────────────────────────────────────────────────────────
 router.get('/coincidencias',  costlyEndpointLimiter, checkPermission('tesoreria', 'READ'),    ctrl.buscarCoincidencias);
 // C-1: CONCILIAR es acción separada — no cualquier usuario con WRITE puede conciliar
-router.post('/conciliar',     checkPermission('tesoreria', 'CONCILIAR'), ctrl.conciliarManual);
+router.post('/conciliar',     lockdownFinanciero, checkPermission('tesoreria', 'CONCILIAR'), ctrl.conciliarManual);
 
 // ── Ingesta de extracto bancario ───────────────────────────────────────────────
 router.post('/extracto/preview',   checkPermission('tesoreria', 'WRITE'),   upload.single('archivo'), ctrl.previewExtracto);
-router.post('/extracto/confirmar', checkPermission('tesoreria', 'CONCILIAR'),upload.single('archivo'), ctrl.confirmarExtracto);
+router.post('/extracto/confirmar', lockdownFinanciero, checkPermission('tesoreria', 'CONCILIAR'),upload.single('archivo'), ctrl.confirmarExtracto);
 
 export default router;

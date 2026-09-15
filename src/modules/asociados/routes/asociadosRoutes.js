@@ -4,14 +4,15 @@ import { verifyToken } from '../../../middlewares/auth.js';
 import { verifyAsociado } from '../../../middlewares/authAsociado.js';
 import { checkPermission } from '../../../middlewares/checkPermission.js';
 import { loginRateLimiter, solicitarPortalLimiter } from '../../../middlewares/rateLimiter.js';
+import { lockdownRegistro } from '../../../middlewares/lockdown.js';
 import * as ctrl from '../controllers/asociadosController.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 // ── Público: solicitud y registro de acceso ───────────────────────────────────
-router.post('/solicitar-portal', solicitarPortalLimiter, ctrl.solicitarPortal);
-router.post('/registro-portal',  solicitarPortalLimiter, ctrl.registroPortal);
+router.post('/solicitar-portal', solicitarPortalLimiter, lockdownRegistro, ctrl.solicitarPortal);
+router.post('/registro-portal',  solicitarPortalLimiter, lockdownRegistro, ctrl.registroPortal);
 
 // ── Portal del asociado ───────────────────────────────────────────────────────
 router.post('/login',  loginRateLimiter, ctrl.loginAsociado);

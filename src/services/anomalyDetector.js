@@ -1,6 +1,7 @@
 import pool from '../db/database.js';
 import logger from '../config/logger.js';
 import { emitirAlertaSeguridad } from './notificationService.js';
+import { cuarentenaDirigida } from './lockdownService.js';
 
 const upsertAlerta = async (alerta) => {
   const { rows: [row] } = await pool.query(
@@ -11,7 +12,7 @@ const upsertAlerta = async (alerta) => {
        SET ocurrencias   = security_alerts.ocurrencias + 1,
            ultima_vez_at = NOW(),
            detalle       = EXCLUDED.detalle
-     RETURNING (xmax = 0) AS es_nueva`,
+     RETURNING id, (xmax = 0) AS es_nueva`,
     [
       alerta.regla, alerta.tipo, alerta.severidad,
       alerta.usuario_uuid ?? null, alerta.ip ?? null,
@@ -24,7 +25,7 @@ const upsertAlerta = async (alerta) => {
   if (row.es_nueva && ['alta', 'critica'].includes(alerta.severidad)) {
     emitirAlertaSeguridad(alerta);
   }
-  return row.es_nueva;
+  return { es_nueva: row.es_nueva, id: row.id };
 };
 
 // Ventana de detección: últimos 15 min (solapada — cubre borde entre ejecuciones)
@@ -146,14 +147,17 @@ const detectarPasswordSpraying = async () => {
       FROM auth_intentos
      WHERE exitoso = false AND created_at > ${VENTANA}
      GROUP BY ip
-    HAVING COUNT(DISTINCT email) >= 5
+    HAVING COUNT(DISTINCT email) >= 8
+        OR (COUNT(DISTINCT email) >= 5 AND COUNT(*) FILTER (WHERE motivo = 'no_existe') >= 3)
   `);
 
   for (const r of spray) {
+    // solo emitir alta si hay emails inexistentes (atacante con lista) — evita falsos positivos de NAT corporativo
+    const severidad = Number(r.emails_inexistentes) >= 3 ? 'alta' : 'media';
     const ventana = new Date().toISOString().slice(0, 13);
     await upsertAlerta({
       regla: 'password_spraying', tipo: 'Password spraying',
-      severidad: 'alta', ip: r.ip,
+      severidad, ip: r.ip,
       dedupe_key: `spray:${r.ip}:${ventana}`,
       titulo: `IP ${r.ip} intentó acceso contra ${r.cuentas} cuentas distintas`,
       detalle: { cuentas: Number(r.cuentas), intentos: Number(r.intentos), emails_inexistentes: Number(r.emails_inexistentes) },
@@ -161,31 +165,217 @@ const detectarPasswordSpraying = async () => {
   }
 
   // Éxito después de racha de fallos desde misma IP — compromiso probable
+  // FIX: la query anterior tenía WHERE exitoso=true pero HAVING COUNT(*) FILTER (WHERE NOT exitoso)
+  // que es siempre 0 → nunca disparaba. Ahora se usa CTE + JOIN contra la tabla de fallos.
   const { rows: burst } = await pool.query(`
-    SELECT a.ip, a.usuario_id, a.email,
-           COUNT(*) FILTER (WHERE NOT exitoso) AS fallos_previos
-      FROM auth_intentos a
-     WHERE a.created_at > NOW() - INTERVAL '30 minutes'
-       AND a.exitoso = true
-       AND EXISTS (
-         SELECT 1 FROM auth_intentos b
-          WHERE b.ip = a.ip AND b.exitoso = false
-            AND b.created_at < a.created_at
-            AND b.created_at > NOW() - INTERVAL '30 minutes'
-       )
-     GROUP BY a.ip, a.usuario_id, a.email
-    HAVING COUNT(*) FILTER (WHERE NOT exitoso) >= 5
+    WITH exitos AS (
+      SELECT id, ip, usuario_id, email, created_at
+        FROM auth_intentos
+       WHERE exitoso = true
+         AND created_at > NOW() - INTERVAL '30 minutes'
+    )
+    SELECT e.ip, e.usuario_id, e.email, e.created_at,
+           COUNT(*)                                         AS fallos_previos,
+           COUNT(DISTINCT f.email)                         AS cuentas_atacadas,
+           COUNT(*) FILTER (WHERE f.email <> e.email)      AS fallos_otras_cuentas,
+           COUNT(*) FILTER (WHERE f.motivo = 'no_existe')  AS emails_inexistentes
+      FROM exitos e
+      JOIN auth_intentos f
+        ON f.ip = e.ip
+       AND f.exitoso = false
+       AND f.created_at < e.created_at
+       AND f.created_at >= e.created_at - INTERVAL '30 minutes'
+     GROUP BY e.id, e.ip, e.usuario_id, e.email, e.created_at
+    HAVING COUNT(DISTINCT f.email) >= 3
+       AND COUNT(*) FILTER (WHERE f.email <> e.email) >= 4
   `);
 
   for (const r of burst) {
+    // critica si hay emails inexistentes (atacante trabajando desde lista), alta si no
+    const severidad = Number(r.emails_inexistentes) >= 2 ? 'critica' : 'alta';
     const ventana = new Date().toISOString().slice(0, 16);
-    await upsertAlerta({
+    const { es_nueva, id: alerta_id } = await upsertAlerta({
       regla: 'exito_tras_fallos', tipo: 'Login exitoso tras múltiples fallos',
-      severidad: 'critica', usuario_uuid: r.usuario_id, ip: r.ip,
+      severidad, usuario_uuid: r.usuario_id, ip: r.ip,
       dedupe_key: `exito_fallos:${r.ip}:${r.email}:${ventana}`,
-      titulo: `Login exitoso de ${r.email} desde IP con ${r.fallos_previos} fallos previos`,
-      detalle: { email: r.email, ip: r.ip, fallos_previos: Number(r.fallos_previos) },
+      titulo: `Login exitoso de ${r.email} desde IP con ${r.fallos_previos} fallos previos (${r.cuentas_atacadas} cuentas tanteadas)`,
+      detalle: {
+        email: r.email, ip: r.ip,
+        fallos_previos: Number(r.fallos_previos),
+        cuentas_atacadas: Number(r.cuentas_atacadas),
+        fallos_otras_cuentas: Number(r.fallos_otras_cuentas),
+        emails_inexistentes: Number(r.emails_inexistentes),
+      },
       entidad_tipo: 'usuario', entidad_id: r.usuario_id,
+    });
+
+    // L3: cuarentena dirigida — solo en alerta nueva para no re-activar en cada ciclo
+    // critica → 60 min (atacante con lista confirmada), alta → 30 min
+    if (es_nueva) {
+      const duracion_min = severidad === 'critica' ? 60 : 30;
+      await cuarentenaDirigida({
+        usuario_uuid: r.usuario_id ?? null,
+        ip: r.ip ?? null,
+        motivo: `exito_tras_fallos: ${r.email} — ${r.cuentas_atacadas} cuentas tanteadas desde esta IP`,
+        alerta_ids: alerta_id ? [alerta_id] : [],
+        duracion_min,
+      }).catch((err) => logger.error('cuarentenaDirigida error', err));
+    }
+  }
+};
+
+// ── Regla 6: spray lento — misma IP, muchas cuentas distintas en 24h ─────────
+// Complementa detectarPasswordSpraying (ventana 15 min).
+// Un atacante paciente puede espaciar intentos para evadir la ventana corta.
+const detectarSprayLento = async () => {
+  const { rows } = await pool.query(`
+    SELECT ip,
+           COUNT(DISTINCT email)                        AS cuentas,
+           COUNT(*)                                     AS intentos,
+           COUNT(*) FILTER (WHERE motivo = 'no_existe') AS emails_inexistentes
+      FROM auth_intentos
+     WHERE exitoso = false
+       AND created_at > NOW() - INTERVAL '24 hours'
+     GROUP BY ip
+    HAVING COUNT(DISTINCT email) >= 15
+  `);
+
+  for (const r of rows) {
+    const severidad = Number(r.emails_inexistentes) >= 5 ? 'alta' : 'media';
+    const ventana   = new Date().toISOString().slice(0, 10); // bucket por día
+    await upsertAlerta({
+      regla: 'spray_lento', tipo: 'Password spraying (ventana 24h)',
+      severidad, ip: r.ip,
+      dedupe_key: `spray_lento:${r.ip}:${ventana}`,
+      titulo: `IP ${r.ip} intentó acceso contra ${r.cuentas} cuentas distintas en 24h`,
+      detalle: {
+        cuentas: Number(r.cuentas),
+        intentos: Number(r.intentos),
+        emails_inexistentes: Number(r.emails_inexistentes),
+      },
+    });
+  }
+};
+
+// ── Regla 7: portal spray — misma IP contra muchas cuentas de portal en 15 min ─
+const detectarSprayPortal = async () => {
+  const { rows } = await pool.query(`
+    SELECT ip,
+           contexto,
+           COUNT(DISTINCT identificador)               AS cuentas,
+           COUNT(*)                                    AS intentos
+      FROM auth_intentos
+     WHERE exitoso  = false
+       AND contexto IN ('asociado', 'empresa')
+       AND created_at > NOW() - INTERVAL '15 minutes'
+     GROUP BY ip, contexto
+    HAVING COUNT(DISTINCT identificador) >= 5
+        OR COUNT(*) >= 15
+  `);
+
+  for (const r of rows) {
+    const severidad = Number(r.cuentas) >= 8 ? 'alta' : 'media';
+    const ventana   = new Date().toISOString().slice(0, 16);
+    await upsertAlerta({
+      regla: 'reset_masivo_portal', tipo: 'Spray de credenciales en portal',
+      severidad, ip: r.ip,
+      dedupe_key: `portal_spray:${r.ip}:${r.contexto}:${ventana}`,
+      titulo: `IP ${r.ip} intentó ${r.intentos} accesos en portal ${r.contexto} contra ${r.cuentas} cuentas`,
+      detalle: {
+        contexto: r.contexto,
+        cuentas: Number(r.cuentas),
+        intentos: Number(r.intentos),
+      },
+    });
+  }
+};
+
+// ── Regla 8: actividad financiera fuera de horario laboral ────────────────────
+// Mutaciones en módulos financieros fuera de L-V 06:00-21:00 hora Bogotá (UTC-5, sin DST)
+const detectarActividadFueraHorario = async () => {
+  const { rows } = await pool.query(`
+    SELECT a.usuario_id, u.nombre AS usuario, a.endpoint, a.method,
+           a.created_at,
+           EXTRACT(DOW  FROM a.created_at AT TIME ZONE 'America/Bogota') AS dow,
+           EXTRACT(HOUR FROM a.created_at AT TIME ZONE 'America/Bogota') AS hora
+      FROM global_actividad a
+      JOIN global_usuarios u ON u.id = a.usuario_id
+     WHERE a.created_at > ${VENTANA}
+       AND a.method IN ('POST', 'PUT', 'DELETE', 'PATCH')
+       AND a.status_code BETWEEN 200 AND 299
+       AND a.endpoint ~* '/(facturas|movimientos|conciliar|causar|pagos?|aporte|proveedores|extracto)'
+       AND (
+         -- Fin de semana
+         EXTRACT(DOW FROM a.created_at AT TIME ZONE 'America/Bogota') IN (0, 6)
+         OR
+         -- Fuera de horario en día hábil
+         EXTRACT(HOUR FROM a.created_at AT TIME ZONE 'America/Bogota') < 6
+         OR
+         EXTRACT(HOUR FROM a.created_at AT TIME ZONE 'America/Bogota') >= 21
+       )
+  `);
+
+  for (const r of rows) {
+    const esFinDeSemana = [0, 6].includes(Number(r.dow));
+    const severidad     = esFinDeSemana ? 'alta' : 'media';
+    const ventana       = new Date(r.created_at).toISOString().slice(0, 16);
+    await upsertAlerta({
+      regla: 'actividad_fuera_horario', tipo: 'Actividad financiera fuera de horario',
+      severidad, usuario_uuid: r.usuario_id,
+      dedupe_key: `fuera_horario:${r.usuario_id}:${r.endpoint}:${ventana}`,
+      titulo: `${r.usuario} ejecutó ${r.method} ${r.endpoint} a las ${String(Math.floor(Number(r.hora))).padStart(2,'0')}:xx${esFinDeSemana ? ' (fin de semana)' : ''}`,
+      detalle: {
+        endpoint: r.endpoint,
+        method: r.method,
+        hora: Number(r.hora),
+        fin_de_semana: esFinDeSemana,
+        created_at: r.created_at,
+      },
+      entidad_tipo: 'usuario', entidad_id: r.usuario_id,
+    });
+  }
+};
+
+// ── Regla 9: fraccionamiento de pagos ────────────────────────────────────────
+// Múltiples facturas al mismo proveedor en 24h, cada una bajo el umbral de gerencia,
+// pero la suma supera dicho umbral → sospecha de evasión del flujo de aprobación.
+const detectarFraccionamiento = async () => {
+  const { rows } = await pool.query(`
+    WITH umbral AS (
+      SELECT monto_umbral FROM tesoreria_config_umbrales WHERE tipo_operacion = 'egreso_proveedor'
+    )
+    SELECT f.proveedor_id, p.nombre AS proveedor,
+           COUNT(*)        AS num_facturas,
+           SUM(f.monto)    AS total,
+           MAX(u.monto_umbral) AS umbral_unitario,
+           ARRAY_AGG(f.id) AS factura_ids,
+           MIN(f.registrado_por) AS registrado_por
+      FROM tesoreria_facturas f
+      JOIN tesoreria_proveedores p ON p.id = f.proveedor_id
+      CROSS JOIN umbral u
+     WHERE f.created_at > NOW() - INTERVAL '24 hours'
+       AND f.estado NOT IN ('rechazada')
+       AND f.monto < u.monto_umbral
+     GROUP BY f.proveedor_id, p.nombre
+    HAVING COUNT(*) >= 2
+       AND SUM(f.monto) > MAX(u.monto_umbral)
+  `);
+
+  for (const r of rows) {
+    const ventana = new Date().toISOString().slice(0, 10);
+    await upsertAlerta({
+      regla: 'fraccionamiento_umbral', tipo: 'Fraccionamiento de pagos',
+      severidad: 'alta', usuario_uuid: r.registrado_por ?? null,
+      dedupe_key: `fraccionamiento:${r.proveedor_id}:${ventana}`,
+      titulo: `${r.num_facturas} facturas a ${r.proveedor} suman ${Number(r.total).toLocaleString('es-CO')} (umbral: ${Number(r.umbral_unitario).toLocaleString('es-CO')})`,
+      detalle: {
+        proveedor: r.proveedor,
+        num_facturas: Number(r.num_facturas),
+        total: Number(r.total),
+        umbral_unitario: Number(r.umbral_unitario),
+        factura_ids: r.factura_ids,
+      },
+      entidad_tipo: 'proveedor', entidad_id: r.proveedor_id,
     });
   }
 };
@@ -194,7 +384,7 @@ const detectarPasswordSpraying = async () => {
 const actualizarSnapshot = async () => {
   const t0 = Date.now();
 
-  const [topUsuarios, topEndpoints, sesionesActivas, alertasNuevas] = await Promise.all([
+  const [topUsuarios, topEndpoints, sesionesActivas, alertasNuevas, lockdownsActivos] = await Promise.all([
     pool.query(`
       SELECT u.nombre, u.id, COUNT(*) AS requests
         FROM global_actividad a
@@ -210,14 +400,16 @@ const actualizarSnapshot = async () => {
     `),
     pool.query(`SELECT COUNT(*) AS n FROM global_usuarios WHERE last_active_at > NOW() - INTERVAL '15 minutes' AND is_active = true`),
     pool.query(`SELECT COUNT(*) AS n FROM security_alerts WHERE estado = 'nueva'`),
+    pool.query(`SELECT COUNT(*) AS n FROM security_lockdown WHERE reset_at IS NULL AND (expira_at IS NULL OR expira_at > NOW())`),
   ]);
 
   const datos = {
-    top_usuarios:    topUsuarios.rows,
-    top_endpoints:   topEndpoints.rows,
-    sesiones_activas: Number(sesionesActivas.rows[0].n),
-    alertas_nuevas:   Number(alertasNuevas.rows[0].n),
-    updated_at:      new Date().toISOString(),
+    top_usuarios:     topUsuarios.rows,
+    top_endpoints:    topEndpoints.rows,
+    sesiones_activas:  Number(sesionesActivas.rows[0].n),
+    alertas_nuevas:    Number(alertasNuevas.rows[0].n),
+    lockdowns_activos: Number(lockdownsActivos.rows[0].n),
+    updated_at:       new Date().toISOString(),
   };
 
   await pool.query(
@@ -236,6 +428,10 @@ export const runAnomalyDetector = async () => {
       detectarBancoDespuesDesembolso(),
       detectarExportacionMasiva(),
       detectarPasswordSpraying(),
+      detectarSprayLento(),
+      detectarSprayPortal(),
+      detectarActividadFueraHorario(),
+      detectarFraccionamiento(),
     ]);
   } catch (err) {
     logger.error(`anomalyDetector error: ${err.message}`);

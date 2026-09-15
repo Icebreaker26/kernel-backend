@@ -18,4 +18,10 @@ router.get('/intentos-login',            soloAdmin, ctrl.intentosLogin);
 router.post('/usuarios/:id/desbloquear', soloAdmin, ctrl.desbloquear);
 router.post('/usuarios/:id/forzar-logout', soloAdmin, ctrl.forzarLogout);
 
+// Lockdown (circuit breaker) — /shadow ANTES de /:id para que Express no lo capture como param
+router.get('/lockdown/shadow',        soloAdmin, ctrl.getShadowEvents);
+router.get('/lockdown',               soloAdmin, ctrl.getLockdowns);
+router.post('/lockdown',              soloAdmin, ctrl.crearLockdown);
+router.delete('/lockdown/:id',        soloAdmin, ctrl.eliminarLockdown);
+
 export default router;

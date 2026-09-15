@@ -1,6 +1,12 @@
 import pool from '../../../db/database.js';
 import { redisClient } from '../../../config/redis.js';
 import logger from '../../../config/logger.js';
+import {
+  activarLockdown,
+  resetearLockdown,
+  listarLockdownsActivos,
+  historialLockdowns,
+} from '../../../services/lockdownService.js';
 
 // GET /api/seguridad/alertas
 export const listarAlertas = async (req, res, next) => {
@@ -152,5 +158,86 @@ export const forzarLogout = async (req, res, next) => {
 
     logger.info(`[SEGURIDAD] Logout forzado de usuario ${id} por admin ${req.user.id}`);
     res.json({ ok: true });
+  } catch (err) { next(err); }
+};
+
+// ── Lockdown ──────────────────────────────────────────────────────────────────
+
+// GET /api/seguridad/lockdown — activos + historial paginado
+export const getLockdowns = async (req, res, next) => {
+  try {
+    const [activos, historial] = await Promise.all([
+      listarLockdownsActivos(),
+      historialLockdowns({ limit: 50, offset: 0 }),
+    ]);
+    res.json({ activos, historial });
+  } catch (err) { next(err); }
+};
+
+// POST /api/seguridad/lockdown — activar manual (nivel 2 ó 3)
+export const crearLockdown = async (req, res, next) => {
+  try {
+    const { nivel, alcance = 'global', objetivo = '*', motivo } = req.body;
+    if (![2, 3].includes(Number(nivel)))
+      return res.status(400).json({ error: 'nivel debe ser 2 ó 3' });
+    if (!motivo?.trim())
+      return res.status(400).json({ error: 'motivo requerido' });
+
+    const { activado, registro } = await activarLockdown({
+      nivel: Number(nivel), alcance, objetivo,
+      motivo: motivo.trim(),
+      origen: 'manual',
+      activado_por_uuid: req.user.id,
+    });
+
+    if (!activado)
+      return res.status(409).json({ error: 'Ya existe un lockdown activo para ese objetivo' });
+
+    logger.warn(`[SEGURIDAD] Lockdown N${nivel} activado manualmente por ${req.user.id}`, { alcance, objetivo });
+    res.status(201).json(registro);
+  } catch (err) { next(err); }
+};
+
+// GET /api/seguridad/lockdown/shadow — eventos que shadow mode habría bloqueado
+export const getShadowEvents = async (req, res, next) => {
+  try {
+    const limit  = Math.min(Number(req.query.limit  ?? 100), 500);
+    const offset = Number(req.query.offset ?? 0);
+
+    const { rows } = await pool.query(
+      `SELECT s.*, u.nombre AS usuario_nombre, u.email AS usuario_email
+         FROM security_lockdown_shadow s
+         LEFT JOIN global_usuarios u ON u.id = s.usuario_uuid
+        ORDER BY s.created_at DESC
+        LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const { rows: [{ total }] } = await pool.query(
+      `SELECT COUNT(*) AS total FROM security_lockdown_shadow`
+    );
+
+    res.json({ rows, total: Number(total), limit, offset });
+  } catch (err) { next(err); }
+};
+
+// DELETE /api/seguridad/lockdown/:id — resetear (levantar) lockdown
+export const eliminarLockdown = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { nota } = req.body;
+
+    const { reseteado, registro } = await resetearLockdown({
+      id,
+      reset_por_uuid: req.user.id,
+      reset_tipo: 'manual',
+      reset_nota: nota ?? null,
+    });
+
+    if (!reseteado)
+      return res.status(404).json({ error: 'Lockdown no encontrado o ya reseteado' });
+
+    logger.info(`[SEGURIDAD] Lockdown ${id} reseteado por admin ${req.user.id}`);
+    res.json(registro);
   } catch (err) { next(err); }
 };

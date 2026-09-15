@@ -60,8 +60,8 @@ export const listarUsuarios = async (req, res, next) => {
 export const getDetalle = async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `${facturaBase} WHERE f.id = $1`,
-      [req.params.id]
+      `${facturaBase} WHERE f.id = $1 AND f.responsable_id = $2`,
+      [req.params.id, req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Factura no encontrada' });
     res.json(rows[0]);
@@ -86,58 +86,64 @@ export const rechazar = async (req, res, next) => {
     const { motivo } = req.body;
     if (!motivo?.trim()) return res.status(400).json({ error: 'El motivo de rechazo es obligatorio' });
 
-    const { rows } = await pool.query(
-      `SELECT estado, responsable_id FROM tesoreria_facturas WHERE id = $1`,
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Factura no encontrada' });
-    const f = rows[0];
-    if (f.estado !== 'pendiente_aprobacion')
-      return res.status(400).json({ error: 'Solo se pueden rechazar facturas pendientes de aprobación' });
-    if (f.responsable_id && f.responsable_id !== req.user.id)
-      return res.status(403).json({ error: 'No tienes permiso para rechazar esta factura' });
-
-    const { rows: updated } = await pool.query(
+    const { rows: [updated] } = await pool.query(
       `UPDATE tesoreria_facturas
-          SET estado = 'rechazada', rechazo_motivo = $1
+          SET estado = 'rechazada', rechazo_motivo = $1, updated_at = NOW()
         WHERE id = $2
+          AND estado = 'pendiente_aprobacion'
+          AND responsable_id = $3
         RETURNING *`,
-      [motivo.trim(), id]
+      [motivo.trim(), id, req.user.id]
     );
-    res.json(updated[0]);
+    if (!updated) {
+      const { rows: [f] } = await pool.query(
+        `SELECT estado, responsable_id FROM tesoreria_facturas WHERE id = $1`,
+        [id]
+      );
+      if (!f || f.responsable_id !== req.user.id) return res.status(404).json({ error: 'Factura no encontrada' });
+      return res.status(400).json({ error: 'Solo se pueden rechazar facturas pendientes de aprobación' });
+    }
+    res.json(updated);
   } catch (err) { next(err); }
 };
 
 export const aprobar = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { rows } = await pool.query(
-      `SELECT estado, responsable_id FROM tesoreria_facturas WHERE id = $1`,
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Factura no encontrada' });
-    const f = rows[0];
-    if (f.estado !== 'pendiente_aprobacion')
-      return res.status(400).json({ error: 'La factura no está pendiente de aprobación' });
-    if (f.responsable_id && f.responsable_id !== req.user.id)
-      return res.status(403).json({ error: 'No tienes permiso para aprobar esta factura' });
-
-    const { rows: updated } = await pool.query(
+    const { rows: [updated] } = await pool.query(
       `UPDATE tesoreria_facturas
-          SET estado = 'aprobada', aprobado_por = $1, aprobado_at = NOW()
+          SET estado = 'aprobada', aprobado_por = $1, aprobado_at = NOW(), updated_at = NOW()
         WHERE id = $2
+          AND estado = 'pendiente_aprobacion'
+          AND responsable_id = $1
+          AND (registrado_por IS NULL OR registrado_por <> $1)
         RETURNING *`,
       [req.user.id, id]
     );
-    res.json(updated[0]);
+    if (!updated) {
+      const { rows: [f] } = await pool.query(
+        `SELECT estado, responsable_id, registrado_por FROM tesoreria_facturas WHERE id = $1`,
+        [id]
+      );
+      if (!f || f.responsable_id !== req.user.id) return res.status(404).json({ error: 'Factura no encontrada' });
+      if (f.registrado_por === req.user.id)
+        return res.status(403).json({ error: 'No puede aprobar una factura que usted mismo registró' });
+      return res.status(409).json({ error: 'La factura no está pendiente de aprobación' });
+    }
+    res.json(updated);
   } catch (err) { next(err); }
 };
 
 export const verAdjunto = async (req, res, next) => {
   try {
+    const { rowCount } = await pool.query(
+      `SELECT 1 FROM tesoreria_facturas WHERE id = $1 AND responsable_id = $2`,
+      [req.params.id, req.user.id]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'Factura no encontrada' });
+
     const archivos = await listarArchivos('factura', req.params.id);
     if (!archivos.length) return res.status(404).json({ error: 'Sin adjunto' });
-    const result = await generarPresignedDescarga(archivos[0].id);
-    res.json(result);
+    res.json(await generarPresignedDescarga(archivos[0].id));
   } catch (err) { next(err); }
 };

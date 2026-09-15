@@ -799,7 +799,7 @@ export const aprobarArea = async (req, res, next) => {
     // C-1: quien registró la factura no puede aprobarla en su propia área
     if (req.user.rol !== 'admin' && factura.registrado_por === req.user.id)
       return res.status(403).json({ error: 'No puede aprobar una factura que usted mismo registró' });
-    if (factura.responsable_id && factura.responsable_id !== req.user.id)
+    if (req.user.rol !== 'admin' && factura.responsable_id !== req.user.id)
       return res.status(403).json({ error: 'Solo el responsable asignado puede aprobar esta factura' });
 
     const { rows: [updated] } = await pool.query(`

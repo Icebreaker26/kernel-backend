@@ -35,10 +35,16 @@ export const guardarEmailSchema = z.object({
 }).refine((d) => d.email === d.emailConfirm, { message: 'Los correos no coinciden', path: ['emailConfirm'] });
 
 export const registroPortalSchema = z.object({
-  codigo:           z.string().min(1, 'El código es obligatorio'),
-  fecha_nacimiento: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato de fecha inválido (YYYY-MM-DD)'),
-  email:            z.string().email('Correo electrónico inválido'),
-});
+  codigo:           z.string().trim().min(1, 'El código es obligatorio').max(20),
+  fecha_nacimiento: z.string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato de fecha inválido (YYYY-MM-DD)')
+    .refine((s) => {
+      const [y, m, d] = s.split('-').map(Number);
+      const dt = new Date(Date.UTC(y, m - 1, d));
+      return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+    }, 'Fecha inválida'),
+  email:            z.string().trim().email('Correo electrónico inválido').max(255),
+}).strict();
 
 // DD/MM/YYYY → YYYY-MM-DD, vacío → null
 const parseDate = z.preprocess((v) => {

@@ -64,12 +64,23 @@ export const login = async (req, res, next) => {
 
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) {
-      const attempts = (user.failed_attempts || 0) + 1;
-      const lock = attempts >= 5 ? `NOW() + INTERVAL '15 minutes'` : 'NULL';
-      pool.query(
-        `UPDATE global_usuarios SET failed_attempts = $1, locked_until = ${lock} WHERE id = $2`,
-        [attempts, user.id]
-      ).catch(() => {});
+      // Incremento atómico — evita race condition con requests paralelos.
+      // El CASE resetea el contador si el bloqueo anterior ya expiró,
+      // evitando DoS permanente por intentos acumulados entre lockouts.
+      await pool.query(
+        `UPDATE global_usuarios
+            SET failed_attempts = CASE
+                  WHEN locked_until IS NOT NULL AND locked_until < NOW() THEN 1
+                  ELSE failed_attempts + 1
+                END,
+                locked_until = CASE
+                  WHEN locked_until IS NOT NULL AND locked_until < NOW() THEN NULL
+                  WHEN failed_attempts + 1 >= 5 THEN NOW() + INTERVAL '15 minutes'
+                  ELSE locked_until
+                END
+          WHERE id = $1`,
+        [user.id]
+      );
       registrarIntento(false, 'password');
       return res.status(401).json({ error: 'Credenciales inválidas' });
     }

@@ -241,7 +241,7 @@ export const loginEmpresa = async (req, res, next) => {
 };
 
 export const logoutEmpresa = (_req, res) => {
-  res.clearCookie('token_empresa');
+  res.clearCookie('token_empresa', cookieOpts());
   res.json({ ok: true });
 };
 

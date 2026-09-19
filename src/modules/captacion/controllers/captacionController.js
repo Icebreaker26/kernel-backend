@@ -520,7 +520,7 @@ export const pubGetStandSession = async (req, res, next) => {
     );
     if (!s) return res.status(404).json({ error: 'Sesión de stand no válida' });
     if (new Date(s.expira_at) < new Date()) return res.status(410).json({ error: 'Sesión expirada' });
-    res.json(s);
+    res.json({ ...s, tarifas: TARIFAS });
   } catch (err) { next(err); }
 };
 
@@ -623,7 +623,7 @@ export const pubGetEnlace = async (req, res, next) => {
   try {
     const e = await enlacePublicoVigente(req.params.token);
     if (!e) return res.status(404).json({ error: 'Enlace no válido' });
-    res.json({ empresa_nombre: e.empresa_nombre, asesor_nombre: e.asesor_nombre });
+    res.json({ empresa_nombre: e.empresa_nombre, asesor_nombre: e.asesor_nombre, tarifas: TARIFAS });
   } catch (err) { next(err); }
 };
 

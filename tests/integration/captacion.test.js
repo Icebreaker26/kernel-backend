@@ -1463,7 +1463,10 @@ describe('Captacion — Enlace público para grupos', () => {
   test('GET /pub/enlace/:token — muestra empresa y asesor, sin datos sensibles', async () => {
     const res = await request(app).get(`/api/captacion/pub/enlace/${token}`);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ empresa_nombre: 'Empresa Captacion Test', asesor_nombre: 'Asesor Test' });
+    expect(res.body).toMatchObject({ empresa_nombre: 'Empresa Captacion Test', asesor_nombre: 'Asesor Test' });
+    // Los valores de la presentación salen de las tarifas del servidor, no de texto fijo en el frontend
+    expect(res.body.tarifas).toMatchObject({ aporte_minimo: 74000, fondo_bienestar: 5300, cuota_admision: 35000 });
+    expect(Object.keys(res.body).sort()).toEqual(['asesor_nombre', 'empresa_nombre', 'tarifas']); // nada sensible más
   });
 
   test('token inexistente → 404 al consultar y al iniciar', async () => {

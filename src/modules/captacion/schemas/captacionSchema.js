@@ -121,6 +121,6 @@ export const stepUpSchema = z.object({
 });
 
 export const valoresAsesorSchema = z.object({
-  valor_aporte  : z.preprocess(v => Number(v), z.number().nonneg()).optional(),
-  cuota_admision: z.preprocess(v => Number(v), z.number().nonneg()).optional(),
+  valor_aporte  : z.preprocess(v => Number(v), z.number().nonnegative()).optional(),
+  cuota_admision: z.preprocess(v => Number(v), z.number().nonnegative()).optional(),
 }).strict();

@@ -1,22 +1,35 @@
 import { Router } from 'express';
 import { verifyToken } from '../../../middlewares/auth.js';
 import { checkPermission } from '../../../middlewares/checkPermission.js';
+import { captacionPublicLimiter } from '../../../middlewares/rateLimiter.js';
 import * as ctrl from '../controllers/captacionController.js';
 
 const router = Router();
 
+// Headers de privacidad para todos los endpoints públicos
+const privacyHeaders = (_req, res, next) => {
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  next();
+};
+
 // ── Endpoints públicos (sin auth — token como sesión) ─────────────────────────
-router.get ('/pub/empresas',                   ctrl.pubListarEmpresas);
-router.get ('/pub/:token',                     ctrl.pubGetProspecto);
-router.post('/pub/:token/ping',                ctrl.pubPing);
-router.post('/pub/:token/step-up',             ctrl.pubStepUp);
-router.put ('/pub/:token/personal',            ctrl.pubSeccionPersonal);
-router.put ('/pub/:token/laboral',             ctrl.pubSeccionLaboral);
-router.put ('/pub/:token/pep',                 ctrl.pubSeccionPepHandler);
-router.put ('/pub/:token/financiera',          ctrl.pubSeccionFinanciera);
-router.put ('/pub/:token/beneficiarios',       ctrl.pubSeccionBeneficiarios);
-router.put ('/pub/:token/referencias',         ctrl.pubSeccionReferencias);
-router.post('/pub/:token/firmar',              ctrl.pubFirmar);
+router.get ('/pub/empresas',                              ctrl.pubListarEmpresas);
+
+router.use('/pub/:token', privacyHeaders, captacionPublicLimiter);
+
+router.get ('/pub/:token',                                ctrl.pubGetProspecto);
+router.post('/pub/:token/ping',                           ctrl.pubPing);
+router.post('/pub/:token/step-up',                        ctrl.pubStepUp);
+router.put ('/pub/:token/personal',                       ctrl.pubSeccionPersonal);
+router.put ('/pub/:token/laboral',                        ctrl.pubSeccionLaboral);
+router.put ('/pub/:token/pep',                            ctrl.pubSeccionPepHandler);
+router.put ('/pub/:token/financiera',                     ctrl.pubSeccionFinanciera);
+router.put ('/pub/:token/beneficiarios',                  ctrl.pubSeccionBeneficiarios);
+router.put ('/pub/:token/referencias',                    ctrl.pubSeccionReferencias);
+router.post('/pub/:token/firmar',                         ctrl.pubFirmar);
+router.post('/pub/:token/documentos/:lado/solicitar',     ctrl.pubSolicitarUploadCedula);
+router.patch('/pub/:token/documentos/:lado/confirmar',    ctrl.pubConfirmarUploadCedula);
 
 // ── Endpoints internos (auth + ACL) ──────────────────────────────────────────
 router.use(verifyToken);

@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import pool from '../../../db/database.js';
 import { notificarUsuario } from '../../../services/notificationService.js';
+import { validarArchivo, generarPresignedUpload, guardarArchivo } from '../../../services/archivoService.js';
 import {
   crearProspectoSchema, toqueSchema, updateProspectoSchema,
   seccionPersonalSchema, seccionLaboralSchema, seccionPepSchema,
@@ -50,11 +51,11 @@ export const crearProspecto = async (req, res, next) => {
 
     const { rows: [p] } = await pool.query(
       `INSERT INTO captacion_prospectos
-         (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular, correo, token_hash)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular, correo, token_hash, token)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING id, nombres, apellidos, cedula, celular, correo, empresa_codigo, estado, created_at`,
       [data.empresa_codigo, req.user.id, data.nombres, data.apellidos,
-       data.cedula, data.celular, data.correo || null, tokenHash]
+       data.cedula, data.celular, data.correo || null, tokenHash, rawToken]
     );
 
     await pool.query(
@@ -177,7 +178,7 @@ export const whatsappUrl = async (req, res, next) => {
     if (!p) return res.status(404).json({ error: 'Prospecto no encontrado' });
 
     const baseUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-    const link = `${baseUrl}/conocenos/${Buffer.from(req.params.id + ':' + p.token_hash.slice(0,8)).toString('base64url')}`;
+    const link = `${baseUrl}/conocenos/${p.token}`;
     const telefono = p.celular.replace(/\D/g, '').replace(/^0/, '57');
     const mensaje = encodeURIComponent(
       `Hola ${p.nombres}, soy ${p.asesor_nombre} de Cooperativa Progresemos. ` +
@@ -305,13 +306,12 @@ export const entregar = async (req, res, next) => {
 // ── Endpoints públicos (sin auth — token como sesión) ─────────────────────────
 
 const resolverToken = async (rawToken) => {
-  const hash = hashToken(rawToken);
   const { rows: [p] } = await pool.query(
     `SELECT id, nombres, apellidos, cedula, celular, correo, empresa_codigo,
             estado, ping_count, token_expira_at, asesor_uuid
        FROM captacion_prospectos
-      WHERE token_hash = $1 AND is_active = true`,
-    [hash]
+      WHERE token = $1 AND is_active = true`,
+    [rawToken]
   );
   return p || null;
 };
@@ -628,6 +628,87 @@ export const pubFirmar = async (req, res, next) => {
     });
 
     res.json({ ok: true, estado: 'solicitud_completa' });
+  } catch (err) { next(err); }
+};
+
+// ── Upload de cédula (presigned URL pattern) ──────────────────────────────────
+
+const LADOS_CEDULA = ['frente', 'reverso'];
+
+export const pubSolicitarUploadCedula = async (req, res, next) => {
+  try {
+    const { lado } = req.params;
+    if (!LADOS_CEDULA.includes(lado))
+      return res.status(400).json({ error: 'lado debe ser frente o reverso' });
+
+    const p = await resolverToken(req.params.token);
+    if (!p) return res.status(404).json({ error: 'Link no válido' });
+    if (new Date(p.token_expira_at) < new Date()) return res.status(410).json({ error: 'Link expirado' });
+
+    const error = validarArchivo(req.body);
+    if (error) return res.status(400).json({ error });
+
+    // Asegurar que la vinculación exista
+    let { rows: [v] } = await pool.query(
+      `SELECT id FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]
+    );
+    if (!v) {
+      const { rows: [nv] } = await pool.query(
+        `INSERT INTO captacion_vinculaciones (prospecto_id) VALUES ($1) RETURNING id`, [p.id]
+      );
+      v = nv;
+    }
+
+    const result = await generarPresignedUpload(`captacion_cedula_${lado}`, v.id, req.body);
+    res.json(result);
+  } catch (err) { next(err); }
+};
+
+export const pubConfirmarUploadCedula = async (req, res, next) => {
+  try {
+    const { lado } = req.params;
+    if (!LADOS_CEDULA.includes(lado))
+      return res.status(400).json({ error: 'lado debe ser frente o reverso' });
+
+    const p = await resolverToken(req.params.token);
+    if (!p) return res.status(404).json({ error: 'Link no válido' });
+
+    const { key, nombre, mime, size } = req.body;
+    if (!key || !nombre) return res.status(400).json({ error: 'Faltan campos: key, nombre' });
+
+    const { rows: [v] } = await pool.query(
+      `SELECT id FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]
+    );
+    if (!v) return res.status(400).json({ error: 'No hay formulario iniciado' });
+
+    if (!key.startsWith(`kernel/captacion_cedula_${lado}s/${v.id}/`))
+      return res.status(400).json({ error: 'Key inválida para esta solicitud' });
+
+    const archivo = await guardarArchivo(`captacion_cedula_${lado}`, v.id, { key, nombre, mime, size }, null);
+
+    const columna = lado === 'frente' ? 'cedula_frente_id' : 'cedula_reverso_id';
+    await pool.query(
+      `UPDATE captacion_vinculaciones SET ${columna} = $1, updated_at = NOW() WHERE id = $2`,
+      [archivo.id, v.id]
+    );
+
+    // Marcar sección documentos si ambos lados subidos
+    await pool.query(
+      `UPDATE captacion_vinculaciones
+          SET seccion_documentos_at = NOW(), seccion_documentos_autor = 'prospecto',
+              updated_at = NOW()
+        WHERE id = $1 AND cedula_frente_id IS NOT NULL AND cedula_reverso_id IS NOT NULL
+          AND seccion_documentos_at IS NULL`,
+      [v.id]
+    );
+
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, ip)
+       VALUES ($1,$2,'seccion_guardada','documentos','prospecto',$3)`,
+      [p.id, v.id, req.ip]
+    );
+
+    res.json({ ok: true, archivo_id: archivo.id });
   } catch (err) { next(err); }
 };
 

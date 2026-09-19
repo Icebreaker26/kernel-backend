@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { RedisStore } from 'rate-limit-redis';
 import { redisClient } from '../config/redis.js';
@@ -79,4 +80,23 @@ export const registerLimiter = isTest
       store: makeStore('register'),
       handler: (_req, res) =>
         res.status(429).json({ error: 'Demasiados intentos. Intenta de nuevo en una hora.' }),
+    });
+
+// ── Captación pública: por token (no por IP — varios prospectos comparten red de empresa) ──
+export const captacionPublicLimiter = isTest
+  ? (_req, _res, next) => next()
+  : rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 60,
+      standardHeaders: true,
+      legacyHeaders: false,
+      store: makeStore('captacion_pub'),
+      keyGenerator: (req) => {
+        const token = req.params?.token;
+        return token
+          ? createHash('sha256').update(token).digest('hex')
+          : ipKeyGenerator(req);
+      },
+      handler: (_req, res) =>
+        res.status(429).json({ error: 'Demasiadas solicitudes para este formulario. Intenta en 15 minutos.' }),
     });

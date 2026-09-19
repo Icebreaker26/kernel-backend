@@ -349,7 +349,7 @@ const detectarFraccionamiento = async () => {
            SUM(f.monto)    AS total,
            MAX(u.monto_umbral) AS umbral_unitario,
            ARRAY_AGG(f.id) AS factura_ids,
-           MIN(f.registrado_por) AS registrado_por
+           (ARRAY_AGG(f.registrado_por))[1] AS registrado_por
       FROM tesoreria_facturas f
       JOIN tesoreria_proveedores p ON p.id = f.proveedor_id
       CROSS JOIN umbral u

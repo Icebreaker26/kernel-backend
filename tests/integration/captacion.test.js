@@ -5,6 +5,7 @@ import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { jest } from '@jest/globals';
 import { limpiarProspectosSinIdentificar } from '../../src/modules/captacion/services/captacionService.js';
+import { emailsDePrueba, simulacionDePrueba } from '../../src/services/emailService.js';
 
 jest.setTimeout(30000);
 
@@ -72,7 +73,7 @@ afterAll(async () => {
        (SELECT id FROM captacion_prospectos WHERE asesor_uuid = $1)`, [asesorUuid]
   );
   await pool.query(
-    `DELETE FROM archivos WHERE entidad_tipo LIKE 'captacion_cedula_%' AND entidad_id = $1`, [vinculacionId]
+    `DELETE FROM archivos WHERE entidad_tipo IN ('captacion_cedula_frente','captacion_cedula_reverso','captacion_formato') AND entidad_id = $1`, [vinculacionId]
   );
   await pool.query(
     `DELETE FROM captacion_toques WHERE prospecto_id IN
@@ -254,22 +255,113 @@ describe('Captacion — Endpoints públicos', () => {
     expect(p.estado).toBe('vio_landing');
   });
 
-  test('POST /pub/:token/step-up — dígitos incorrectos → 403', async () => {
-    const res = await request(app)
-      .post(`/api/captacion/pub/${rawToken}/step-up`)
-      .send({ digitos: '0000' });
-    expect(res.status).toBe(403);
-  });
+  describe('verificación por código (OTP) al correo', () => {
+    const otpUrl    = () => `/api/captacion/pub/${rawToken}/otp`;
+    const stepupUrl = () => `/api/captacion/pub/${rawToken}/step-up`;
+    const codigoEnviado = () => emailsDePrueba.at(-1).text.match(/es: (\d{6})/)[1];
+    // Salta la espera mínima entre envíos sin dormir el test
+    const sinEspera = () => pool.query(
+      `UPDATE captacion_otp SET created_at = created_at - INTERVAL '2 minutes' WHERE prospecto_id = $1`, [prospectoId]);
 
-  test('POST /pub/:token/step-up — últimos 4 dígitos correctos → devuelve stepup_token', async () => {
-    const res = await request(app)
-      .post(`/api/captacion/pub/${rawToken}/step-up`)
-      .send({ digitos: '1111' }); // cedula = '11111111'
-    expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(true);
-    expect(res.body).toHaveProperty('stepup_token');
-    expect(typeof res.body.stepup_token).toBe('string');
-    stepupToken = res.body.stepup_token; // guardar para usar en firma
+    test('sin correo registrado → 400 CORREO_REQUERIDO', async () => {
+      await pool.query('UPDATE captacion_prospectos SET correo = NULL WHERE id = $1', [prospectoId]);
+      try {
+        const res = await request(app).post(otpUrl());
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('CORREO_REQUERIDO');
+      } finally {
+        await pool.query(`UPDATE captacion_prospectos SET correo = 'juan@test.com' WHERE id = $1`, [prospectoId]);
+      }
+    });
+
+    test('pedir el código envía un correo de 6 dígitos y no expone el correo completo ni el código', async () => {
+      const antes = emailsDePrueba.length;
+      const res = await request(app).post(otpUrl());
+      expect(res.status).toBe(200);
+      expect(res.body.correo).toBe('ju**@test.com');
+      expect(JSON.stringify(res.body)).not.toMatch(/\d{6}/);
+      expect(emailsDePrueba.length).toBe(antes + 1);
+      expect(emailsDePrueba.at(-1).to).toBe('juan@test.com');
+      expect(codigoEnviado()).toMatch(/^\d{6}$/);
+      // Solo se guarda el hash
+      const { rows: [o] } = await pool.query('SELECT codigo_hash FROM captacion_otp WHERE prospecto_id = $1', [prospectoId]);
+      expect(o.codigo_hash).toHaveLength(64);
+      expect(o.codigo_hash).not.toBe(codigoEnviado());
+    });
+
+    test('con el correo caído → 502, el código anterior sigue vigente y no se gasta la espera', async () => {
+      const filas = () => pool.query('SELECT COUNT(*)::int AS n FROM captacion_otp WHERE prospecto_id = $1', [prospectoId]).then((r) => r.rows[0].n);
+      const antes = await filas();
+      await sinEspera();
+      simulacionDePrueba.fallar = true;
+      try {
+        const res = await request(app).post(otpUrl());
+        expect(res.status).toBe(502);
+        expect(res.body.code).toBe('CORREO_NO_ENVIADO');
+      } finally {
+        simulacionDePrueba.fallar = false;
+      }
+      expect(await filas()).toBe(antes);
+      const { rows: [vigente] } = await pool.query('SELECT usado_at FROM captacion_otp WHERE prospecto_id = $1 ORDER BY created_at DESC LIMIT 1', [prospectoId]);
+      expect(vigente.usado_at).toBeNull();
+      const { rows: ev } = await pool.query(`SELECT 1 FROM captacion_eventos WHERE prospecto_id = $1 AND tipo = 'otp_envio_fallido'`, [prospectoId]);
+      expect(ev.length).toBe(1);
+      // Al volver el servicio, se puede pedir de inmediato
+      expect((await request(app).post(otpUrl())).status).toBe(200);
+    });
+
+    test('pedir otro código enseguida → 429', async () => {
+      const res = await request(app).post(otpUrl());
+      expect(res.status).toBe(429);
+    });
+
+    test('el formato anterior (últimos 4 dígitos de la cédula) ya no sirve → 400', async () => {
+      expect((await request(app).post(stepupUrl()).send({ digitos: '1111' })).status).toBe(400);
+    });
+
+    test('tras 5 intentos fallidos el código se invalida, aunque después se escriba el correcto', async () => {
+      await sinEspera();
+      expect((await request(app).post(otpUrl())).status).toBe(200);
+      const bueno = codigoEnviado();
+      const malo = bueno === '000000' ? '111111' : '000000';
+      for (let i = 0; i < 4; i += 1) {
+        const r = await request(app).post(stepupUrl()).send({ codigo: malo });
+        expect(r.status).toBe(403);
+        expect(r.body.code).toBe('OTP_INCORRECTO');
+      }
+      const quinto = await request(app).post(stepupUrl()).send({ codigo: malo });
+      expect(quinto.status).toBe(403);
+      expect(quinto.body.code).toBe('OTP_NO_VIGENTE');
+      const tarde = await request(app).post(stepupUrl()).send({ codigo: bueno });
+      expect(tarde.status).toBe(403);
+    });
+
+    test('código vencido → 403', async () => {
+      await sinEspera();
+      expect((await request(app).post(otpUrl())).status).toBe(200);
+      const codigo = codigoEnviado();
+      await pool.query(`UPDATE captacion_otp SET expira_at = NOW() - INTERVAL '1 second' WHERE prospecto_id = $1 AND usado_at IS NULL`, [prospectoId]);
+      expect((await request(app).post(stepupUrl()).send({ codigo })).status).toBe(403);
+    });
+
+    test('código correcto → devuelve stepup_token y el código no se puede reutilizar', async () => {
+      await sinEspera();
+      expect((await request(app).post(otpUrl())).status).toBe(200);
+      const codigo = codigoEnviado();
+      const mal = await request(app).post(stepupUrl()).send({ codigo: codigo === '000000' ? '111111' : '000000' });
+      expect(mal.status).toBe(403);
+
+      const res = await request(app).post(stepupUrl()).send({ codigo });
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      expect(typeof res.body.stepup_token).toBe('string');
+      stepupToken = res.body.stepup_token; // guardar para usar en firma
+
+      expect((await request(app).post(stepupUrl()).send({ codigo })).status).toBe(403);
+      const { rows } = await pool.query(
+        `SELECT payload FROM captacion_eventos WHERE prospecto_id = $1 AND tipo = 'stepup_ok'`, [prospectoId]);
+      expect(rows[0].payload).toMatchObject({ canal: 'correo', destino: 'ju**@test.com' });
+    });
   });
 
   test('PUT /pub/:token/personal — guarda sección y crea vinculación', async () => {
@@ -307,6 +399,8 @@ describe('Captacion — Endpoints públicos', () => {
 
     const despues = await request(app).get(`/api/captacion/pub/${rawToken}`);
     expect(despues.body.requiere_correo).toBe(false);
+    // Volver al correo con el que se verificó el código: cambiarlo invalida la verificación (se prueba aparte)
+    await pool.query(`UPDATE captacion_prospectos SET correo = 'juan@test.com' WHERE id = $1`, [prospectoId]);
   });
 
   test('PUT /pub/:token/personal — correo o celular inválidos → 400 y no se modifica nada', async () => {
@@ -471,7 +565,7 @@ describe('Captacion — Endpoints públicos', () => {
       .send({
         firma_png: 'data:image/png;base64,iVBORw0KGgo=',
         firma_trazos: [{ x: 10, y: 20, t: 100 }],
-        version_consentimiento: 'v1.0', acepta_terminos: true,
+        version_consentimiento: 'v1.0', acepta_terminos: true, acepta_firma_electronica: true, version_firma_electronica: 'fe-v1.0',
       });
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('STEPUP_REQUIRED');
@@ -489,6 +583,8 @@ describe('Captacion — Endpoints públicos', () => {
         firma_trazos          : [{ x: 10, y: 20, t: 100 }],
         version_consentimiento: 'v1.0',
         acepta_terminos       : true,
+        acepta_firma_electronica: true,
+        version_firma_electronica: 'fe-v1.0',
       });
     expect(res.status).toBe(400);
   });
@@ -504,12 +600,42 @@ describe('Captacion — Endpoints públicos', () => {
         .send({
           firma_png: 'data:image/png;base64,iVBORw0KGgo=',
           firma_trazos: [{ x: 10, y: 20, t: 100 }],
-          version_consentimiento: 'v1.0', acepta_terminos: true,
+          version_consentimiento: 'v1.0', acepta_terminos: true, acepta_firma_electronica: true, version_firma_electronica: 'fe-v1.0',
         });
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/aporte/i);
     } finally {
       await pool.query(`UPDATE captacion_vinculaciones SET seccion_aportes_at = NOW() WHERE id = $1`, [vinculacionId]);
+    }
+  });
+
+  test('POST /pub/:token/firmar — sin consentimiento a firmar electrónicamente o con texto viejo → 400', async () => {
+    const base = {
+      firma_png: 'data:image/png;base64,iVBORw0KGgo=',
+      firma_trazos: [{ x: 10, y: 20, t: 100 }],
+      version_consentimiento: 'v1.0', acepta_terminos: true,
+    };
+    const firmar = (extra) => request(app).post(`/api/captacion/pub/${rawToken}/firmar`).set('x-stepup-token', stepupToken).send({ ...base, ...extra });
+    expect((await firmar({})).status).toBe(400);
+    expect((await firmar({ acepta_firma_electronica: false, version_firma_electronica: 'fe-v1.0' })).status).toBe(400);
+    const vieja = await firmar({ acepta_firma_electronica: true, version_firma_electronica: 'fe-v0.1' });
+    expect(vieja.status).toBe(400);
+    expect(vieja.body.error).toMatch(/consentimiento/i);
+    const { rows: [v] } = await pool.query('SELECT seccion_firma_at FROM captacion_vinculaciones WHERE id = $1', [vinculacionId]);
+    expect(v.seccion_firma_at).toBeNull();
+  });
+
+  test('POST /pub/:token/firmar — si el correo cambió tras verificarlo, hay que verificar de nuevo → 403', async () => {
+    await pool.query(`UPDATE captacion_prospectos SET correo = 'otro@test.com' WHERE id = $1`, [prospectoId]);
+    try {
+      const res = await request(app)
+        .post(`/api/captacion/pub/${rawToken}/firmar`)
+        .set('x-stepup-token', stepupToken)
+        .send({});
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('STEPUP_EXPIRED');
+    } finally {
+      await pool.query(`UPDATE captacion_prospectos SET correo = 'juan@test.com' WHERE id = $1`, [prospectoId]);
     }
   });
 
@@ -526,6 +652,8 @@ describe('Captacion — Endpoints públicos', () => {
         firma_trazos          : [{ x: 10, y: 20, t: 100 }, { x: 15, y: 25, t: 150 }],
         version_consentimiento: 'v1.0',
         acepta_terminos       : true,
+        acepta_firma_electronica: true,
+        version_firma_electronica: 'fe-v1.0',
       });
     expect(res.status).toBe(200);
     expect(res.body.estado).toBe('solicitud_completa');
@@ -543,6 +671,62 @@ describe('Captacion — Endpoints públicos', () => {
     );
     expect(v.firma_doc_hash).toHaveLength(64);
     expect(v.formulario_snapshot).not.toBeNull();
+  });
+
+  test('firma electrónica: queda constancia del consentimiento y se sella el PDF con su hash', async () => {
+    const { rows: [v] } = await pool.query(
+      `SELECT firma_electronica_at, firma_electronica_version, firma_pdf_archivo_id, firma_pdf_hash, firma_doc_hash
+         FROM captacion_vinculaciones WHERE id = $1`, [vinculacionId]);
+    expect(v.firma_electronica_at).toBeTruthy();
+    expect(v.firma_electronica_version).toBe('fe-v1.0');
+    expect(v.firma_pdf_archivo_id).toBeTruthy();
+    expect(v.firma_pdf_hash).toHaveLength(64);
+    const { rows: [ver] } = await pool.query('SELECT firma_verificacion FROM captacion_vinculaciones WHERE id = $1', [vinculacionId]);
+    expect(ver.firma_verificacion).toMatchObject({ canal: 'correo', destino: 'ju**@test.com' });
+
+    const ev = await pool.query(
+      `SELECT tipo, payload FROM captacion_eventos WHERE vinculacion_id = $1 AND tipo IN ('firma','formato_sellado')`, [vinculacionId]);
+    const firma = ev.rows.find((e) => e.tipo === 'firma');
+    expect(firma.payload.firma_electronica).toBe('fe-v1.0');
+    const sello = ev.rows.find((e) => e.tipo === 'formato_sellado');
+    expect(sello.payload.pdf_hash).toBe(v.firma_pdf_hash);
+    expect(sello.payload.doc_hash).toBe(v.firma_doc_hash);
+  });
+
+  test('firma electrónica: la descarga entrega el PDF sellado (mismo hash) aunque los datos cambien después', async () => {
+    const binario = (r, cb) => { const c = []; r.on('data', (d) => c.push(d)); r.on('end', () => cb(null, Buffer.concat(c))); };
+    const ag = agent();
+    await loginAsesor(ag);
+    const url = `/api/captacion/vinculaciones/${vinculacionId}/formato`;
+    const { rows: [v] } = await pool.query('SELECT firma_pdf_hash, cargo FROM captacion_vinculaciones WHERE id = $1', [vinculacionId]);
+
+    const sellado = await ag.get(url).buffer(true).parse(binario);
+    expect(sellado.headers['x-formato-sellado']).toBe('true');
+    expect(crypto.createHash('sha256').update(sellado.body).digest('hex')).toBe(v.firma_pdf_hash);
+
+    await pool.query(`UPDATE captacion_vinculaciones SET cargo = 'Cargo modificado después' WHERE id = $1`, [vinculacionId]);
+    try {
+      const otra = await ag.get(url).buffer(true).parse(binario);
+      expect(crypto.createHash('sha256').update(otra.body).digest('hex')).toBe(v.firma_pdf_hash); // inmutable
+      const actual = await ag.get(`${url}?actual=1`).buffer(true).parse(binario);
+      expect(actual.headers['x-formato-sellado']).toBe('false');
+      expect(actual.body.subarray(0, 5).toString()).toBe('%PDF-');
+    } finally {
+      await pool.query('UPDATE captacion_vinculaciones SET cargo = $1 WHERE id = $2', [v.cargo, vinculacionId]);
+    }
+  });
+
+  test('POST /pub/:token/firmar — una solicitud ya firmada no se puede firmar de nuevo → 409', async () => {
+    const res = await request(app)
+      .post(`/api/captacion/pub/${rawToken}/firmar`)
+      .set('x-stepup-token', stepupToken)
+      .send({
+        firma_png: 'data:image/png;base64,iVBORw0KGgo=',
+        firma_trazos: [{ x: 1, y: 2, t: 3 }],
+        version_consentimiento: 'v1.0', acepta_terminos: true,
+        acepta_firma_electronica: true, version_firma_electronica: 'fe-v1.0',
+      });
+    expect(res.status).toBe(409);
   });
 
   test('subsanación: firmada y sin entregar, el asociado puede seguir completando secciones sin perder la firma', async () => {
@@ -563,6 +747,19 @@ describe('Captacion — Endpoints públicos', () => {
     expect(despues.firma_doc_hash).toBe(antes.firma_doc_hash);         // evidencia de lo que firmó, intacta
     expect(Number(despues.valor_aporte)).toBe(90000);
     expect(despues.cargo).toBe('Coordinador');
+
+    // Cada cambio posterior a la firma queda auditado (autor, sección y campos; no los valores)
+    const ag = agent();
+    await loginAsesor(ag);
+    expect((await ag.put(`/api/captacion/vinculaciones/${vinculacionId}/valores`).send({ cuota_admision: 35000 })).status).toBe(200);
+    const { rows: cambios } = await pool.query(
+      `SELECT seccion, autor_tipo, autor_uuid, payload FROM captacion_eventos
+        WHERE vinculacion_id = $1 AND tipo = 'cambio_posterior_a_firma' ORDER BY created_at`, [vinculacionId]);
+    expect(cambios.map((c) => c.seccion)).toEqual(['aportes', 'laboral', 'valores']);
+    expect(cambios[0].autor_tipo).toBe('prospecto');
+    expect(cambios[0].payload.campos).toContain('valor_aporte');
+    expect(JSON.stringify(cambios[0].payload)).not.toContain('90000'); // solo nombres de campo
+    expect(cambios[2]).toMatchObject({ autor_tipo: 'asesor', autor_uuid: asesorUuid });
 
     // El GET público deja que el formulario detecte qué pasos siguen pendientes tras la firma
     const get = await request(app).get(`/api/captacion/pub/${rawToken}`);

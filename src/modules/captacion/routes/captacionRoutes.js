@@ -5,6 +5,8 @@ import { captacionPublicLimiter, enlacePublicoLimiter } from '../../../middlewar
 import * as ctrl from '../controllers/captacionController.js';
 
 const router = Router();
+const auditarPub = ctrl.auditarCambioPosteriorAFirma('prospecto');
+const auditarAsesor = ctrl.auditarCambioPosteriorAFirma('asesor');
 
 // Headers de privacidad para todos los endpoints públicos
 const privacyHeaders = (_req, res, next) => {
@@ -26,17 +28,18 @@ router.use('/pub/:token', privacyHeaders, captacionPublicLimiter);
 
 router.get ('/pub/:token',                                ctrl.pubGetProspecto);
 router.post('/pub/:token/ping',                           ctrl.pubPing);
+router.post('/pub/:token/otp',                            ctrl.pubSolicitarOtp);
 router.post('/pub/:token/step-up',                        ctrl.pubStepUp);
-router.put ('/pub/:token/personal',                       ctrl.pubSeccionPersonal);
-router.put ('/pub/:token/laboral',                        ctrl.pubSeccionLaboral);
-router.put ('/pub/:token/pep',                            ctrl.pubSeccionPepHandler);
-router.put ('/pub/:token/financiera',                     ctrl.pubSeccionFinanciera);
-router.put ('/pub/:token/aportes',                        ctrl.pubSeccionAportes);
-router.put ('/pub/:token/beneficiarios',                  ctrl.pubSeccionBeneficiarios);
-router.put ('/pub/:token/referencias',                    ctrl.pubSeccionReferencias);
+router.put ('/pub/:token/personal',                       auditarPub, ctrl.pubSeccionPersonal);
+router.put ('/pub/:token/laboral',                        auditarPub, ctrl.pubSeccionLaboral);
+router.put ('/pub/:token/pep',                            auditarPub, ctrl.pubSeccionPepHandler);
+router.put ('/pub/:token/financiera',                     auditarPub, ctrl.pubSeccionFinanciera);
+router.put ('/pub/:token/aportes',                        auditarPub, ctrl.pubSeccionAportes);
+router.put ('/pub/:token/beneficiarios',                  auditarPub, ctrl.pubSeccionBeneficiarios);
+router.put ('/pub/:token/referencias',                    auditarPub, ctrl.pubSeccionReferencias);
 router.post('/pub/:token/firmar',                         ctrl.pubFirmar);
 router.post('/pub/:token/documentos/:lado/solicitar',     ctrl.pubSolicitarUploadCedula);
-router.patch('/pub/:token/documentos/:lado/confirmar',    ctrl.pubConfirmarUploadCedula);
+router.patch('/pub/:token/documentos/:lado/confirmar',    auditarPub, ctrl.pubConfirmarUploadCedula);
 
 // ── Endpoints internos (auth + ACL) ──────────────────────────────────────────
 router.use(verifyToken);
@@ -60,9 +63,9 @@ router.get ('/vinculaciones/:id',              checkPermission('captacion', 'REA
 router.get ('/vinculaciones/:id/documentos',   checkPermission('captacion', 'READ'),     ctrl.getDocumentosVinculacion);
 router.get ('/vinculaciones/:id/formato',      checkPermission('captacion', 'READ'),     ctrl.descargarFormato);
 router.post ('/vinculaciones/:id/documentos/:lado/solicitar', checkPermission('captacion', 'WRITE'), ctrl.solicitarDocumentoAsesor);
-router.patch('/vinculaciones/:id/documentos/:lado/confirmar', checkPermission('captacion', 'WRITE'), ctrl.confirmarDocumentoAsesor);
-router.put ('/vinculaciones/:id/aportes',      checkPermission('captacion', 'WRITE'),    ctrl.asesorSeccionAportes);
-router.put ('/vinculaciones/:id/valores',     checkPermission('captacion', 'WRITE'),    ctrl.actualizarValoresAsesor);
+router.patch('/vinculaciones/:id/documentos/:lado/confirmar', checkPermission('captacion', 'WRITE'), auditarAsesor, ctrl.confirmarDocumentoAsesor);
+router.put ('/vinculaciones/:id/aportes',      checkPermission('captacion', 'WRITE'),    auditarAsesor, ctrl.asesorSeccionAportes);
+router.put ('/vinculaciones/:id/valores',     checkPermission('captacion', 'WRITE'),    auditarAsesor, ctrl.actualizarValoresAsesor);
 router.post('/vinculaciones/:id/entregar',     checkPermission('captacion', 'ENTREGAR'), ctrl.entregar);
 
 export default router;

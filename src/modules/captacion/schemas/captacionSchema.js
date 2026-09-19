@@ -135,10 +135,14 @@ export const seccionFirmaSchema = z.object({
   firma_trazos          : z.array(z.object({ x: z.number(), y: z.number(), t: z.number() })),
   version_consentimiento: z.string().min(1),
   acepta_terminos       : z.literal(true),
+  // Consentimiento explícito a firmar electrónicamente (Ley 527 de 1999); equivale a la firma manuscrita
+  acepta_firma_electronica: z.literal(true),
+  version_firma_electronica: z.string().min(1),
 });
 
+// Código de un solo uso que se envía al correo del asociado
 export const stepUpSchema = z.object({
-  digitos: z.string().length(4).regex(/^\d{4}$/),
+  codigo: z.string().regex(/^\d{6}$/, 'El código tiene 6 dígitos'),
 });
 
 export const valoresAsesorSchema = z.object({

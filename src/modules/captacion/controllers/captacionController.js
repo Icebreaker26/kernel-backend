@@ -3,7 +3,8 @@ import jwt from 'jsonwebtoken';
 import pool from '../../../db/database.js';
 import { env } from '../../../config/env.js';
 import { notificarUsuario } from '../../../services/notificationService.js';
-import { validarArchivo, generarPresignedUpload, guardarArchivo, generarPresignedDescarga, eliminarArchivo } from '../../../services/archivoService.js';
+import { enviarCodigoFirma } from '../../../services/emailService.js';
+import { validarArchivo, generarPresignedUpload, guardarArchivo, generarPresignedDescarga, eliminarArchivo, subirBuffer, leerBuffer } from '../../../services/archivoService.js';
 import logger from '../../../config/logger.js';
 import { TARIFAS } from '../tarifas.js';
 import { generarFormatoVinculacion } from '../services/formatoVinculacionPdf.js';
@@ -27,6 +28,8 @@ const calcScore = `(
 ) AS score`;
 
 const VERSION_CONSENTIMIENTO = 'v1.0';
+// Texto del consentimiento a firmar electrónicamente; súbelo si cambia la redacción en el formulario.
+const VERSION_FIRMA_ELECTRONICA = 'fe-v1.0';
 
 // Tras la entrega la solicitud está en procesamiento: ni el asociado ni el asesor pueden modificarla.
 // Antes de la entrega SÍ se puede completar o corregir (subsanar) aunque ya esté firmada.
@@ -291,35 +294,79 @@ export const getVinculacion = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// Formato No. 5 (PDF oficial) lleno con los datos de la solicitud. Contiene datos personales y la
-// firma: solo el asesor dueño, sin caché, y cada descarga queda en captacion_eventos.
+// Datos que alimentan el Formato No. 5. `asesorUuid` restringe al asesor dueño (null = uso interno del sistema).
+const cargarDatosFormato = async (vinculacionId, asesorUuid = null) => {
+  const { rows: [v] } = await pool.query(
+    `SELECT v.*,
+            p.nombres, p.apellidos, p.cedula, p.celular, p.correo,
+            e.nombre AS empresa_nombre,
+            u.nombre AS asesor_nombre
+       FROM captacion_vinculaciones v
+       JOIN captacion_prospectos p ON p.id = v.prospecto_id
+       JOIN empresas e ON e.codigo = p.empresa_codigo
+       LEFT JOIN global_usuarios u ON u.id = p.asesor_uuid
+      WHERE v.id = $1 AND v.is_active = true AND ($2::uuid IS NULL OR p.asesor_uuid = $2)`,
+    [vinculacionId, asesorUuid]
+  );
+  if (!v) return null;
+
+  const [{ rows: beneficiarios }, { rows: referencias }] = await Promise.all([
+    pool.query('SELECT * FROM captacion_beneficiarios WHERE vinculacion_id = $1 ORDER BY orden', [v.id]),
+    pool.query('SELECT * FROM captacion_referencias WHERE vinculacion_id = $1 ORDER BY created_at', [v.id]),
+  ]);
+  return { ...v, beneficiarios, referencias };
+};
+
+// Copia inmutable del formato tal como quedó al firmar: se guarda una sola vez y su hash SHA-256 queda
+// en la vinculación para poder comprobar después que no fue alterada. Si falla, la firma sigue siendo
+// válida (tiene snapshot y hash) y la descarga genera el PDF al vuelo.
+const sellarFormato = async (vinculacionId) => {
+  try {
+    const datos = await cargarDatosFormato(vinculacionId);
+    if (!datos || datos.firma_pdf_archivo_id) return;
+    const pdf = Buffer.from(await generarFormatoVinculacion(datos));
+    const hash = crypto.createHash('sha256').update(pdf).digest('hex');
+    const archivo = await subirBuffer('captacion_formato', vinculacionId, pdf,
+      { nombre: `formato-vinculacion-${String(datos.cedula).replace(/[^A-Za-z0-9_-]/g, '')}.pdf`, mime: 'application/pdf' });
+    await pool.query(
+      `UPDATE captacion_vinculaciones
+          SET firma_pdf_archivo_id = $1, firma_pdf_hash = $2, firma_pdf_at = NOW()
+        WHERE id = $3 AND firma_pdf_archivo_id IS NULL`,
+      [archivo.id, hash, vinculacionId]
+    );
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, payload)
+       VALUES ($1,$2,'formato_sellado','firma','sistema',$3)`,
+      [datos.prospecto_id, vinculacionId, JSON.stringify({ pdf_hash: hash, doc_hash: datos.firma_doc_hash })]
+    );
+  } catch (err) {
+    logger.error(`captacion: no se pudo sellar el formato de ${vinculacionId}: ${err.message}`);
+  }
+};
+
+// Formato No. 5 (PDF oficial). Firmada la solicitud se entrega la copia sellada; con `?actual=1`
+// (o sin firma) se genera con los datos de hoy. Contiene datos personales y la firma: solo el asesor
+// dueño, sin caché, y cada descarga queda en captacion_eventos.
 export const descargarFormato = async (req, res, next) => {
   try {
-    const { rows: [v] } = await pool.query(
-      `SELECT v.*,
-              p.nombres, p.apellidos, p.cedula, p.celular, p.correo,
-              e.nombre AS empresa_nombre,
-              u.nombre AS asesor_nombre
-         FROM captacion_vinculaciones v
-         JOIN captacion_prospectos p ON p.id = v.prospecto_id
-         JOIN empresas e ON e.codigo = p.empresa_codigo
-         LEFT JOIN global_usuarios u ON u.id = p.asesor_uuid
-        WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true`,
-      [req.params.id, req.user.id]
-    );
+    const v = await cargarDatosFormato(req.params.id, req.user.id);
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
 
-    const [{ rows: beneficiarios }, { rows: referencias }] = await Promise.all([
-      pool.query('SELECT * FROM captacion_beneficiarios WHERE vinculacion_id = $1 ORDER BY orden', [v.id]),
-      pool.query('SELECT * FROM captacion_referencias WHERE vinculacion_id = $1 ORDER BY created_at', [v.id]),
-    ]);
-
-    const pdf = await generarFormatoVinculacion({ ...v, beneficiarios, referencias });
+    let pdf = null;
+    let sellado = false;
+    if (v.firma_pdf_archivo_id && req.query.actual !== '1') {
+      pdf = await leerBuffer(v.firma_pdf_archivo_id).catch((err) => {
+        logger.error(`captacion: no se pudo leer el formato sellado de ${v.id}: ${err.message}`);
+        return null;
+      });
+      sellado = !!pdf;
+    }
+    if (!pdf) pdf = Buffer.from(await generarFormatoVinculacion(v));
 
     await pool.query(
       `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, autor_uuid, ip, payload)
        VALUES ($1,$2,'formato_descargado','formato','asesor',$3,$4,$5)`,
-      [v.prospecto_id, v.id, req.user.id, req.ip, JSON.stringify({ estado: v.estado })]
+      [v.prospecto_id, v.id, req.user.id, req.ip, JSON.stringify({ estado: v.estado, sellado })]
     );
 
     const nombre = `formato-vinculacion-${String(v.cedula || v.id).replace(/[^A-Za-z0-9_-]/g, '')}.pdf`;
@@ -327,8 +374,9 @@ export const descargarFormato = async (req, res, next) => {
       'Content-Type': 'application/pdf',
       'Content-Disposition': `attachment; filename="${nombre}"`,
       'Cache-Control': 'no-store',
+      'X-Formato-Sellado': String(sellado),
     });
-    res.send(Buffer.from(pdf));
+    res.send(pdf);
   } catch (err) { next(err); }
 };
 
@@ -707,6 +755,7 @@ export const pubGetProspecto = async (req, res, next) => {
       empresa_codigo: p.empresa_codigo,
       asesor: { nombre: asesor?.nombre, avatar_url: asesor?.avatar_url, celular: p.celular },
       version_consentimiento: VERSION_CONSENTIMIENTO,
+      version_firma_electronica: VERSION_FIRMA_ELECTRONICA,
       tarifas: TARIFAS,
       vinculacion: v || null,
     });
@@ -737,34 +786,162 @@ export const pubPing = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── Verificación de identidad para firmar: OTP por correo ─────────────────────
+const OTP_MINUTOS = 10;
+const OTP_MAX_INTENTOS = 5;
+const OTP_ESPERA_SEG = 60;       // mínimo entre dos envíos
+const OTP_MAX_POR_HORA = 5;
+const STEPUP_MINUTOS = 30;
+
+const hashOtp = (pid, codigo) => crypto.createHash('sha256').update(`${pid}:${codigo}:${env.JWT_SECRET}`).digest('hex');
+const hashCorreo = (c) => crypto.createHash('sha256').update(String(c).trim().toLowerCase()).digest('hex');
+const enmascararCorreo = (c) => {
+  const [u, d] = String(c).split('@');
+  return `${u.slice(0, 2)}${'*'.repeat(Math.max(u.length - 2, 2))}@${d}`;
+};
+
+export const pubSolicitarOtp = async (req, res, next) => {
+  try {
+    const p = await resolverToken(req.params.token);
+    if (!p) return res.status(404).json({ error: 'Link no válido' });
+    if (await solicitudEntregada(p.id)) return res.status(400).json(ERROR_ENTREGADA);
+    if (!p.correo) {
+      return res.status(400).json({ error: 'Necesitamos tu correo electrónico para enviarte el código. Complétalo en tus datos personales.', code: 'CORREO_REQUERIDO' });
+    }
+
+    const { rows: [rec] } = await pool.query(
+      `SELECT COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 hour')::int AS ultima_hora,
+              EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int AS seg_desde_ultimo
+         FROM captacion_otp WHERE prospecto_id = $1`, [p.id]
+    );
+    if (rec.seg_desde_ultimo !== null && rec.seg_desde_ultimo < OTP_ESPERA_SEG) {
+      return res.status(429).json({ error: `Espera ${OTP_ESPERA_SEG - rec.seg_desde_ultimo} segundos para pedir otro código.`, espera: OTP_ESPERA_SEG - rec.seg_desde_ultimo });
+    }
+    if (rec.ultima_hora >= OTP_MAX_POR_HORA) {
+      return res.status(429).json({ error: 'Pediste demasiados códigos. Inténtalo de nuevo en una hora.' });
+    }
+
+    const codigo = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+
+    // Primero se envía y solo si sale bien se guarda: si el correo está caído, el código anterior
+    // sigue vigente y el intento fallido no gasta la espera ni el límite por hora.
+    try {
+      await enviarCodigoFirma(p.correo, p.nombres || 'asociado', codigo, OTP_MINUTOS);
+    } catch (err) {
+      logger.error(`captacion: no se pudo enviar el código de firma a prospecto ${p.id}: ${err.message}`);
+      await pool.query(
+        `INSERT INTO captacion_eventos (prospecto_id, tipo, autor_tipo, ip, payload) VALUES ($1,'otp_envio_fallido','sistema',$2,$3)`,
+        [p.id, req.ip, JSON.stringify({ canal: 'correo', error: String(err.message).slice(0, 200) })]
+      ).catch(() => {});
+      return res.status(502).json({ error: 'No pudimos enviar el correo en este momento. Tu avance está guardado: inténtalo de nuevo en unos minutos.', code: 'CORREO_NO_ENVIADO' });
+    }
+
+    // Un código nuevo invalida los anteriores
+    await pool.query(`UPDATE captacion_otp SET usado_at = NOW() WHERE prospecto_id = $1 AND usado_at IS NULL`, [p.id]);
+    await pool.query(
+      `INSERT INTO captacion_otp (prospecto_id, canal, destino, codigo_hash, expira_at, ip)
+       VALUES ($1,'correo',$2,$3, NOW() + make_interval(mins => $4), $5)`,
+      [p.id, p.correo, hashOtp(p.id, codigo), OTP_MINUTOS, req.ip]
+    );
+
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, tipo, autor_tipo, ip, payload) VALUES ($1,'otp_enviado','prospecto',$2,$3)`,
+      [p.id, req.ip, JSON.stringify({ canal: 'correo', destino: enmascararCorreo(p.correo) })]
+    );
+    res.json({ ok: true, correo: enmascararCorreo(p.correo), expira_min: OTP_MINUTOS, espera: OTP_ESPERA_SEG });
+  } catch (err) { next(err); }
+};
+
 export const pubStepUp = async (req, res, next) => {
   try {
-    const { digitos } = stepUpSchema.parse(req.body);
+    const { codigo } = stepUpSchema.parse(req.body);
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido' });
 
-    const ultimosCuatro = p.cedula.slice(-4);
-    if (digitos !== ultimosCuatro) {
+    const { rows: [otp] } = await pool.query(
+      `SELECT id, codigo_hash, destino, intentos FROM captacion_otp
+        WHERE prospecto_id = $1 AND usado_at IS NULL AND expira_at > NOW()
+        ORDER BY created_at DESC LIMIT 1`, [p.id]
+    );
+    if (!otp || otp.intentos >= OTP_MAX_INTENTOS) {
+      return res.status(403).json({ error: 'El código venció o ya no es válido. Pide uno nuevo.', code: 'OTP_NO_VIGENTE' });
+    }
+    // El código debe seguir yendo al mismo correo del prospecto (si lo cambió, no vale)
+    if (hashCorreo(otp.destino) !== hashCorreo(p.correo || '')) {
+      return res.status(403).json({ error: 'Tu correo cambió. Pide un código nuevo.', code: 'OTP_NO_VIGENTE' });
+    }
+
+    const a = Buffer.from(hashOtp(p.id, codigo));
+    const b = Buffer.from(otp.codigo_hash);
+    if (!crypto.timingSafeEqual(a, b)) {
+      await pool.query(`UPDATE captacion_otp SET intentos = intentos + 1 WHERE id = $1`, [otp.id]);
       await pool.query(
         `INSERT INTO captacion_eventos (prospecto_id, tipo, autor_tipo, ip) VALUES ($1,'stepup_fallido','prospecto',$2)`,
         [p.id, req.ip]
       );
-      return res.status(403).json({ error: 'Verificación incorrecta' });
+      const restan = OTP_MAX_INTENTOS - otp.intentos - 1;
+      return res.status(403).json({
+        error: restan > 0 ? `Código incorrecto. Te quedan ${restan} intentos.` : 'Código incorrecto. Pide uno nuevo.',
+        code: restan > 0 ? 'OTP_INCORRECTO' : 'OTP_NO_VIGENTE',
+      });
     }
 
-    // Emitir JWT de corta duración para autorizar acciones sensibles (firma)
+    await pool.query(`UPDATE captacion_otp SET usado_at = NOW() WHERE id = $1`, [otp.id]);
+
+    // JWT de corta duración que autoriza la firma; lleva el canal verificado como evidencia
+    const enmascarado = enmascararCorreo(otp.destino);
     const stepupToken = jwt.sign(
-      { sub: 'captacion_stepup', pid: p.id },
+      { sub: 'captacion_stepup', pid: p.id, canal: 'correo', destino: enmascarado, otp: otp.id, c: hashCorreo(otp.destino) },
       env.JWT_SECRET,
-      { expiresIn: '8h' }
+      { expiresIn: `${STEPUP_MINUTOS}m` }
     );
 
     await pool.query(
-      `INSERT INTO captacion_eventos (prospecto_id, tipo, autor_tipo, ip) VALUES ($1,'stepup_ok','prospecto',$2)`,
-      [p.id, req.ip]
+      `INSERT INTO captacion_eventos (prospecto_id, tipo, autor_tipo, ip, payload) VALUES ($1,'stepup_ok','prospecto',$2,$3)`,
+      [p.id, req.ip, JSON.stringify({ canal: 'correo', destino: enmascarado, otp_id: otp.id })]
     );
 
     res.json({ ok: true, stepup_token: stepupToken });
+  } catch (err) { next(err); }
+};
+
+// ── Auditoría de cambios posteriores a la firma ──────────────────────────────
+// La subsanación (completar o corregir datos tras firmar) se permite sin volver a firmar, pero cada
+// cambio queda registrado: quién, cuándo, desde dónde y qué campos tocó (solo nombres, no valores,
+// para no duplicar datos personales). El PDF sellado conserva lo que el asociado firmó.
+export const auditarCambioPosteriorAFirma = (autorTipo) => async (req, res, next) => {
+  try {
+    const partes = req.path.split('/').filter(Boolean);
+    const ultima = partes[partes.length - 1];
+    if (req.method === 'GET' || ultima === 'solicitar') return next();
+
+    const { rows: [v] } = autorTipo === 'prospecto'
+      ? await pool.query(
+          `SELECT v.id, v.prospecto_id, v.seccion_firma_at FROM captacion_vinculaciones v
+             JOIN captacion_prospectos p ON p.id = v.prospecto_id
+            WHERE p.token = $1 AND v.is_active = true`, [req.params.token])
+      : await pool.query(
+          `SELECT v.id, v.prospecto_id, v.seccion_firma_at FROM captacion_vinculaciones v
+             JOIN captacion_prospectos p ON p.id = v.prospecto_id
+            WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true`, [req.params.id, req.user.id]);
+    if (!v?.seccion_firma_at) return next();
+
+    const seccion = partes.slice(2).filter((x) => x !== 'confirmar').join('/') || partes[1];
+    const campos = req.body && typeof req.body === 'object' ? Object.keys(req.body).filter((k) => k !== 'key') : [];
+    // Se registra justo antes de responder (así el evento existe cuando el cliente recibe el 2xx)
+    const responder = res.json.bind(res);
+    res.json = async (cuerpo) => {
+      if (res.statusCode < 300) {
+        await pool.query(
+          `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, autor_uuid, ip, payload)
+           VALUES ($1,$2,'cambio_posterior_a_firma',$3,$4,$5,$6,$7)`,
+          [v.prospecto_id, v.id, seccion, autorTipo, autorTipo === 'prospecto' ? null : req.user.id, req.ip,
+           JSON.stringify({ campos, firmada_at: v.seccion_firma_at })]
+        ).catch((err) => logger.error(`captacion: no se pudo auditar cambio posterior a la firma: ${err.message}`));
+      }
+      return responder(cuerpo);
+    };
+    next();
   } catch (err) { next(err); }
 };
 
@@ -1095,21 +1272,29 @@ export const pubFirmar = async (req, res, next) => {
 
     // Exigir step-up: la firma tiene validez legal y requiere identidad verificada
     const stepupToken = req.headers['x-stepup-token'];
+    let decoded;
     if (!stepupToken) return res.status(403).json({ error: 'Se requiere verificación de identidad para firmar', code: 'STEPUP_REQUIRED' });
     try {
-      const decoded = jwt.verify(stepupToken, env.JWT_SECRET);
-      if (decoded.sub !== 'captacion_stepup' || decoded.pid !== p.id)
+      decoded = jwt.verify(stepupToken, env.JWT_SECRET);
+      if (decoded.sub !== 'captacion_stepup' || decoded.pid !== p.id || !decoded.otp)
         return res.status(403).json({ error: 'Token de verificación no corresponde a este formulario', code: 'STEPUP_MISMATCH' });
+      // Si el correo cambió después de verificarlo, la verificación ya no vale
+      if (decoded.c !== hashCorreo(p.correo || ''))
+        return res.status(403).json({ error: 'Tu correo cambió: verifica tu identidad de nuevo', code: 'STEPUP_EXPIRED' });
     } catch {
       return res.status(403).json({ error: 'Verificación expirada — realiza el paso de identidad nuevamente', code: 'STEPUP_EXPIRED' });
     }
 
     const data = seccionFirmaSchema.parse(req.body);
+    if (data.version_firma_electronica !== VERSION_FIRMA_ELECTRONICA)
+      return res.status(400).json({ error: 'El texto del consentimiento cambió: recarga el formulario para firmar' });
 
     const { rows: [v] } = await pool.query(
-      `SELECT id, seccion_pep_at, seccion_aportes_at FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]
+      `SELECT id, seccion_pep_at, seccion_aportes_at, seccion_firma_at FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]
     );
     if (!v) return res.status(400).json({ error: 'No hay formulario iniciado' });
+    // La firma sella el documento: no se puede volver a firmar (la subsanación completa datos sin re-firmar)
+    if (v.seccion_firma_at) return res.status(409).json({ error: 'Esta solicitud ya fue firmada' });
     if (!v.seccion_pep_at) return res.status(400).json({ error: 'Debe completar la sección PEP antes de firmar' });
     if (!v.seccion_aportes_at) return res.status(400).json({ error: 'Debe elegir su aporte antes de firmar' });
 
@@ -1131,13 +1316,17 @@ export const pubFirmar = async (req, res, next) => {
          firma_doc_hash         = $5,
          version_consentimiento = $6,
          formulario_snapshot    = $7,
+         firma_electronica_at      = NOW(),
+         firma_electronica_version = $8,
+         firma_verificacion        = $10,
          seccion_firma_at       = NOW(),
          estado                 = 'solicitud_completa',
          updated_at             = NOW()
-       WHERE id = $8`,
+       WHERE id = $9`,
       [data.firma_png, JSON.stringify(data.firma_trazos), req.ip,
        req.headers['user-agent'] || null, docHash, data.version_consentimiento,
-       snapshotStr, v.id]
+       snapshotStr, data.version_firma_electronica, v.id,
+       JSON.stringify({ canal: decoded.canal, destino: decoded.destino, otp_id: decoded.otp })]
     );
 
     await pool.query(
@@ -1148,7 +1337,7 @@ export const pubFirmar = async (req, res, next) => {
     await pool.query(
       `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, autor_tipo, ip, payload)
        VALUES ($1,$2,'firma','prospecto',$3,$4)`,
-      [p.id, v.id, req.ip, JSON.stringify({ doc_hash: docHash, version: data.version_consentimiento })]
+      [p.id, v.id, req.ip, JSON.stringify({ doc_hash: docHash, version: data.version_consentimiento, firma_electronica: data.version_firma_electronica, verificacion: { canal: decoded.canal, destino: decoded.destino } })]
     );
 
     // Notificar al asesor
@@ -1163,6 +1352,9 @@ export const pubFirmar = async (req, res, next) => {
         }).catch(() => {});
       }
     });
+
+    // Copia sellada del formato tal como se firmó (no bloquea la firma si falla)
+    await sellarFormato(v.id);
 
     res.json({ ok: true, estado: 'solicitud_completa' });
   } catch (err) { next(err); }

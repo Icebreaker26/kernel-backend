@@ -9,7 +9,7 @@ router.use(verifyToken);
 router.get('/',                                                     ctrl.misFacturas);
 router.get('/contar',                                               ctrl.contarPendientes);
 router.get('/historial',                                            ctrl.historial);
-router.get('/usuarios',  checkPermission('contable', 'READ'),       ctrl.listarUsuarios);
+router.get('/usuarios',                                             ctrl.listarUsuarios);
 router.get('/:id',                                                  ctrl.getDetalle);
 router.get('/:id/adjunto',                                          ctrl.verAdjunto);
 router.put('/:id/aprobar',                                          ctrl.aprobar);

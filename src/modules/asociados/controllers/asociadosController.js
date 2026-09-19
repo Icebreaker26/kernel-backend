@@ -327,11 +327,15 @@ export const activarPortal = async (req, res, next) => {
     await pool.query(
       `UPDATE asociados
        SET password_hash = $1, portal_activo = true, primer_login = true,
+           sessions_valid_from = NULL,
            solicitud_portal_at = NULL, portal_activado_at = COALESCE(portal_activado_at, NOW()),
            updated_at = NOW()
        WHERE codigo = $2`,
       [hash, codigo]
     );
+    if (redisClient) {
+      await redisClient.del(`uvf_a:${codigo}`).catch(() => {});
+    }
 
     res.json({
       password,

@@ -60,8 +60,8 @@ export const listarUsuarios = async (req, res, next) => {
 export const getDetalle = async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `${facturaBase} WHERE f.id = $1 AND f.responsable_id = $2`,
-      [req.params.id, req.user.id]
+      `${facturaBase} WHERE f.id = $1`,
+      [req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Factura no encontrada' });
     res.json(rows[0]);
@@ -91,7 +91,7 @@ export const rechazar = async (req, res, next) => {
           SET estado = 'rechazada', rechazo_motivo = $1, updated_at = NOW()
         WHERE id = $2
           AND estado = 'pendiente_aprobacion'
-          AND responsable_id = $3
+          AND (responsable_id = $3 OR responsable_id IS NULL)
         RETURNING *`,
       [motivo.trim(), id, req.user.id]
     );
@@ -100,7 +100,9 @@ export const rechazar = async (req, res, next) => {
         `SELECT estado, responsable_id FROM tesoreria_facturas WHERE id = $1`,
         [id]
       );
-      if (!f || f.responsable_id !== req.user.id) return res.status(404).json({ error: 'Factura no encontrada' });
+      if (!f) return res.status(404).json({ error: 'Factura no encontrada' });
+      if (f.responsable_id !== null && f.responsable_id !== req.user.id)
+        return res.status(403).json({ error: 'Sin permiso para rechazar esta factura' });
       return res.status(400).json({ error: 'Solo se pueden rechazar facturas pendientes de aprobación' });
     }
     res.json(updated);
@@ -115,8 +117,8 @@ export const aprobar = async (req, res, next) => {
           SET estado = 'aprobada', aprobado_por = $1, aprobado_at = NOW(), updated_at = NOW()
         WHERE id = $2
           AND estado = 'pendiente_aprobacion'
-          AND responsable_id = $1
-          AND (registrado_por IS NULL OR registrado_por <> $1)
+          AND (responsable_id = $1 OR responsable_id IS NULL)
+          AND (responsable_id IS NULL OR registrado_por IS NULL OR registrado_por <> $1)
         RETURNING *`,
       [req.user.id, id]
     );
@@ -125,10 +127,12 @@ export const aprobar = async (req, res, next) => {
         `SELECT estado, responsable_id, registrado_por FROM tesoreria_facturas WHERE id = $1`,
         [id]
       );
-      if (!f || f.responsable_id !== req.user.id) return res.status(404).json({ error: 'Factura no encontrada' });
-      if (f.registrado_por === req.user.id)
+      if (!f) return res.status(404).json({ error: 'Factura no encontrada' });
+      if (f.responsable_id !== null && f.responsable_id !== req.user.id)
+        return res.status(403).json({ error: 'Sin permiso para aprobar esta factura' });
+      if (f.responsable_id !== null && f.registrado_por === req.user.id)
         return res.status(403).json({ error: 'No puede aprobar una factura que usted mismo registró' });
-      return res.status(409).json({ error: 'La factura no está pendiente de aprobación' });
+      return res.status(400).json({ error: 'La factura no está pendiente de aprobación' });
     }
     res.json(updated);
   } catch (err) { next(err); }

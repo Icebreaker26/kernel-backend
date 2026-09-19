@@ -117,6 +117,20 @@ export const enlacePublicoLimiter = isTest
         res.status(429).json({ error: 'Demasiados intentos desde esta conexión. Inténtalo de nuevo en unos minutos.' }),
     });
 
+// ── Páginas públicas del sitio (transparencia, etc.): por IP, amplio porque es lectura ──
+export const paginaPublicaLimiter = isTest
+  ? (_req, _res, next) => next()
+  : rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 200,
+      standardHeaders: true,
+      legacyHeaders: false,
+      store: makeStore('pagina_publica'),
+      keyGenerator: (req) => ipKeyGenerator(req),
+      handler: (_req, res) =>
+        res.status(429).json({ error: 'Demasiadas solicitudes. Inténtalo de nuevo en unos minutos.' }),
+    });
+
 // ── Baja de avisos por enlace (público): por IP ─────────────────────────────
 export const bajaLimiter = isTest
   ? (_req, _res, next) => next()

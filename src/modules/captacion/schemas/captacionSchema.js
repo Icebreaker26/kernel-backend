@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { TARIFAS, PERIODICIDADES } from '../tarifas.js';
 
 export const crearProspectoSchema = z.object({
   empresa_codigo    : z.string().min(1),
@@ -25,6 +26,12 @@ export const updateProspectoSchema = z.object({
 // ── Secciones del formulario público ─────────────────────────────────────────
 
 export const seccionPersonalSchema = z.object({
+  nombres                 : z.string().min(1).optional(),
+  apellidos               : z.string().min(1).optional(),
+  cedula                  : z.string().min(1).optional(),
+  // Contacto: se guarda en captacion_prospectos (no en la vinculación)
+  celular                 : z.string().trim().min(7).max(20).optional(),
+  correo                  : z.string().trim().email().max(150).optional(),
   tipo_documento          : z.enum(['CC','TI','CE','PAS']).optional(),
   ciudad_expedicion       : z.string().optional(),
   fecha_expedicion        : z.string().optional(),
@@ -89,6 +96,18 @@ export const seccionFinancieraSchema = z.object({
     moneda : z.string().optional(),
     cuenta : z.string().optional(),
   })).optional(),
+});
+
+// El asociado solo elige: cuánto aporta, cada cuánto le descuentan y si toma seguro/bono.
+// Los valores de fondo, seguro, bono y cuota los fija el servidor (tarifas.js).
+const pesos = (n) => `$${n.toLocaleString('es-CO')}`;
+export const seccionAportesSchema = z.object({
+  valor_aporte: z.number({ invalid_type_error: 'El aporte debe ser un número' }).int()
+    .min(TARIFAS.aporte_minimo, `El aporte mínimo es ${pesos(TARIFAS.aporte_minimo)}`)
+    .refine((v) => v % TARIFAS.aporte_paso === 0, { message: `El aporte debe ser múltiplo de ${pesos(TARIFAS.aporte_paso)}` }),
+  periodicidad: z.enum(PERIODICIDADES),
+  seguro_vida : z.boolean(),
+  bono_sorteo : z.boolean(),
 });
 
 export const seccionBeneficiariosSchema = z.object({

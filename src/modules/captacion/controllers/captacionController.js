@@ -3,11 +3,14 @@ import jwt from 'jsonwebtoken';
 import pool from '../../../db/database.js';
 import { env } from '../../../config/env.js';
 import { notificarUsuario } from '../../../services/notificationService.js';
-import { validarArchivo, generarPresignedUpload, guardarArchivo } from '../../../services/archivoService.js';
+import { validarArchivo, generarPresignedUpload, guardarArchivo, generarPresignedDescarga, eliminarArchivo } from '../../../services/archivoService.js';
+import logger from '../../../config/logger.js';
+import { TARIFAS } from '../tarifas.js';
+import { SQL_SIN_IDENTIFICAR } from '../services/captacionService.js';
 import {
   crearProspectoSchema, toqueSchema, updateProspectoSchema,
   seccionPersonalSchema, seccionLaboralSchema, seccionPepSchema,
-  seccionFinancieraSchema, seccionBeneficiariosSchema, seccionReferenciasSchema,
+  seccionFinancieraSchema, seccionAportesSchema, seccionBeneficiariosSchema, seccionReferenciasSchema,
   seccionFirmaSchema, stepUpSchema, valoresAsesorSchema,
 } from '../schemas/captacionSchema.js';
 
@@ -23,6 +26,16 @@ const calcScore = `(
 ) AS score`;
 
 const VERSION_CONSENTIMIENTO = 'v1.0';
+
+// Tras la entrega la solicitud está en procesamiento: ni el asociado ni el asesor pueden modificarla.
+// Antes de la entrega SÍ se puede completar o corregir (subsanar) aunque ya esté firmada.
+const solicitudEntregada = async (prospectoId) => {
+  const { rows: [v] } = await pool.query(
+    `SELECT estado FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [prospectoId]
+  );
+  return v?.estado === 'entregada';
+};
+const ERROR_ENTREGADA = { error: 'La solicitud ya fue entregada' };
 
 // ── CRUD interno (asesor) ─────────────────────────────────────────────────────
 
@@ -75,9 +88,14 @@ export const crearProspecto = async (req, res, next) => {
 
 export const listarProspectos = async (req, res, next) => {
   try {
-    const { estado, empresa } = req.query;
+    const { estado, empresa, sin_identificar } = req.query;
     const params = [req.user.id];
     const filters = [`p.asesor_uuid = $1`, `p.is_active = true`];
+
+    // Por defecto se ocultan los prospectos del stand que nadie ha identificado (ver captacionService).
+    // ?sin_identificar=solo → únicamente esos; ?sin_identificar=incluir → todos.
+    if (sin_identificar === 'solo') filters.push(SQL_SIN_IDENTIFICAR);
+    else if (sin_identificar !== 'incluir') filters.push(`NOT ${SQL_SIN_IDENTIFICAR}`);
 
     if (estado) { params.push(estado); filters.push(`p.estado = $${params.length}`); }
     if (empresa) { params.push(empresa); filters.push(`p.empresa_codigo = $${params.length}`); }
@@ -85,10 +103,14 @@ export const listarProspectos = async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT p.id, p.nombres, p.apellidos, p.cedula, p.celular, p.correo,
               p.empresa_codigo, e.nombre AS empresa_nombre,
-              p.estado, p.ping_count, p.ping_at, p.created_at, p.convertido_at,
+              p.estado, p.ping_count, p.ping_at, p.created_at, p.convertido_at, p.interes_principal,
+              ${SQL_SIN_IDENTIFICAR} AS sin_identificar,
+              CASE WHEN EXISTS (SELECT 1 FROM captacion_eventos ev WHERE ev.prospecto_id = p.id AND ev.tipo = 'stand_init') THEN 'stand'
+                   WHEN EXISTS (SELECT 1 FROM captacion_eventos ev WHERE ev.prospecto_id = p.id AND ev.tipo = 'enlace_publico_init') THEN 'grupo'
+                   ELSE 'enlace' END AS origen,
               v.id AS vinculacion_id, v.estado AS vinculacion_estado,
               v.seccion_personal_at, v.seccion_laboral_at, v.seccion_pep_at,
-              v.seccion_financiera_at, v.seccion_beneficiarios_at,
+              v.seccion_financiera_at, v.seccion_aportes_at, v.seccion_beneficiarios_at,
               v.seccion_referencias_at, v.seccion_documentos_at, v.seccion_firma_at,
               (SELECT resultado FROM captacion_toques
                 WHERE prospecto_id = p.id ORDER BY created_at DESC LIMIT 1) AS ultimo_toque,
@@ -103,6 +125,19 @@ export const listarProspectos = async (req, res, next) => {
       params
     );
     res.json(rows);
+  } catch (err) { next(err); }
+};
+
+// Conteos que la lista necesita y que no salen de la propia lista (que oculta los sin identificar)
+export const resumenProspectos = async (req, res, next) => {
+  try {
+    const { rows: [r] } = await pool.query(
+      `SELECT COUNT(*) FILTER (WHERE ${SQL_SIN_IDENTIFICAR}) AS sin_identificar
+         FROM captacion_prospectos p
+        WHERE p.asesor_uuid = $1 AND p.is_active = true`,
+      [req.user.id]
+    );
+    res.json({ sin_identificar: Number(r.sin_identificar) });
   } catch (err) { next(err); }
 };
 
@@ -211,7 +246,8 @@ export const listarVinculaciones = async (req, res, next) => {
               e.nombre AS empresa_nombre,
               v.seccion_personal_at, v.seccion_laboral_at, v.seccion_pep_at,
               v.seccion_financiera_at, v.seccion_beneficiarios_at,
-              v.seccion_referencias_at, v.seccion_documentos_at, v.seccion_firma_at,
+              v.seccion_referencias_at, v.seccion_documentos_at, v.seccion_firma_at, v.seccion_aportes_at,
+              v.valor_aporte, v.periodicidad_descuento,
               v.debida_diligencia_ampliada, v.entregada_at
          FROM captacion_vinculaciones v
          JOIN captacion_prospectos p ON p.id = v.prospecto_id
@@ -250,7 +286,39 @@ export const getVinculacion = async (req, res, next) => {
       [req.params.id, req.user.id]
     );
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
-    res.json(v);
+    res.json({ ...v, tarifas: TARIFAS });
+  } catch (err) { next(err); }
+};
+
+// URLs de descarga (15 min) de la cédula. Son datos personales sensibles: solo el asesor dueño
+// de la solicitud y cada consulta queda en captacion_eventos.
+export const getDocumentosVinculacion = async (req, res, next) => {
+  try {
+    const { rows: [v] } = await pool.query(
+      `SELECT v.id, v.prospecto_id, v.cedula_frente_id, v.cedula_reverso_id
+         FROM captacion_vinculaciones v
+         JOIN captacion_prospectos p ON p.id = v.prospecto_id
+        WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true`,
+      [req.params.id, req.user.id]
+    );
+    if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
+
+    const [frente, reverso] = await Promise.all([
+      v.cedula_frente_id  ? generarPresignedDescarga(v.cedula_frente_id)  : null,
+      v.cedula_reverso_id ? generarPresignedDescarga(v.cedula_reverso_id) : null,
+    ]);
+
+    if (frente || reverso) {
+      await pool.query(
+        `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, autor_uuid, ip, payload)
+         VALUES ($1,$2,'documento_visto','documentos','asesor',$3,$4,$5)`,
+        [v.prospecto_id, v.id, req.user.id, req.ip,
+         JSON.stringify({ lados: [frente && 'frente', reverso && 'reverso'].filter(Boolean) })]
+      );
+    }
+
+    res.set('Cache-Control', 'no-store');
+    res.json({ frente, reverso });
   } catch (err) { next(err); }
 };
 
@@ -277,7 +345,7 @@ export const entregar = async (req, res, next) => {
   try {
     const { rows: [v] } = await pool.query(
       `SELECT v.id, v.estado,
-              v.seccion_pep_at, v.seccion_firma_at, v.seccion_documentos_at
+              v.seccion_pep_at, v.seccion_firma_at, v.seccion_documentos_at, v.valor_aporte
          FROM captacion_vinculaciones v
          JOIN captacion_prospectos p ON p.id = v.prospecto_id
         WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true`,
@@ -288,6 +356,7 @@ export const entregar = async (req, res, next) => {
     if (!v.seccion_pep_at) return res.status(400).json({ error: 'Falta completar la sección PEP (SARLAFT)' });
     if (!v.seccion_firma_at) return res.status(400).json({ error: 'Falta la firma digital del asociado' });
     if (!v.seccion_documentos_at) return res.status(400).json({ error: 'Falta cargar la cédula' });
+    if (v.valor_aporte === null) return res.status(400).json({ error: 'Falta definir el aporte del asociado' });
 
     const { rows: [updated] } = await pool.query(
       `UPDATE captacion_vinculaciones
@@ -305,6 +374,228 @@ export const entregar = async (req, res, next) => {
     );
 
     res.json(updated);
+  } catch (err) { next(err); }
+};
+
+// ── Stand sessions (kiosko reutilizable) ─────────────────────────────────────
+
+export const crearStandSession = async (req, res, next) => {
+  try {
+    const { empresa_codigo } = req.body;
+    if (!empresa_codigo) return res.status(400).json({ error: 'empresa_codigo requerido' });
+
+    const { rowCount: emp } = await pool.query(
+      `SELECT 1 FROM empresas WHERE codigo = $1 AND is_active = true`, [empresa_codigo]
+    );
+    if (!emp) return res.status(400).json({ error: 'Empresa no encontrada o inactiva' });
+
+    const token = crypto.randomBytes(16).toString('base64url');
+    const expira_at = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+
+    // Desactivar sesiones previas del mismo asesor+empresa
+    await pool.query(
+      `UPDATE captacion_stand_sessions SET is_active = false
+        WHERE asesor_uuid = $1 AND empresa_codigo = $2 AND is_active = true`,
+      [req.user.id, empresa_codigo]
+    );
+
+    await pool.query(
+      `INSERT INTO captacion_stand_sessions (token, asesor_uuid, empresa_codigo, expira_at)
+       VALUES ($1, $2, $3, $4)`,
+      [token, req.user.id, empresa_codigo, expira_at]
+    );
+
+    res.status(201).json({ token, expira_at });
+  } catch (err) { next(err); }
+};
+
+export const pubGetStandSession = async (req, res, next) => {
+  try {
+    const { rows: [s] } = await pool.query(
+      `SELECT s.empresa_codigo, s.expira_at,
+              e.nombre AS empresa_nombre,
+              u.nombre AS asesor_nombre
+         FROM captacion_stand_sessions s
+         JOIN empresas e ON e.codigo = s.empresa_codigo
+         JOIN global_usuarios u ON u.id = s.asesor_uuid
+        WHERE s.token = $1 AND s.is_active = true`,
+      [req.params.standToken]
+    );
+    if (!s) return res.status(404).json({ error: 'Sesión de stand no válida' });
+    if (new Date(s.expira_at) < new Date()) return res.status(410).json({ error: 'Sesión expirada' });
+    res.json(s);
+  } catch (err) { next(err); }
+};
+
+// Prospecto sin identificar: lo crea el kiosco o el enlace público al tocar "Quiero asociarme".
+// Usa el prefijo STAND_ y nombre vacío (ver SQL_SIN_IDENTIFICAR) hasta que la persona escribe sus datos.
+const crearProspectoSinIdentificar = async ({ empresaCodigo, asesorUuid, ip, evento }) => {
+  const rawToken = crypto.randomBytes(32).toString('base64url');
+  const placeholderCedula = 'STAND_' + crypto.randomBytes(6).toString('hex');
+
+  const { rows: [p] } = await pool.query(
+    `INSERT INTO captacion_prospectos
+       (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular,
+        token_hash, token, acepta_habeas_data, habeas_data_at)
+     VALUES ($1, $2, '', '', $3, '', $4, $5, true, NOW())
+     RETURNING id, token`,
+    [empresaCodigo, asesorUuid, placeholderCedula, hashToken(rawToken), rawToken]
+  );
+
+  await pool.query(
+    `INSERT INTO captacion_eventos (prospecto_id, tipo, autor_tipo, ip)
+     VALUES ($1, $2, 'prospecto', $3)`,
+    [p.id, evento, ip]
+  );
+  return p;
+};
+
+export const pubIniciarDesdeStand = async (req, res, next) => {
+  try {
+    const { rows: [s] } = await pool.query(
+      `SELECT asesor_uuid, empresa_codigo, expira_at
+         FROM captacion_stand_sessions
+        WHERE token = $1 AND is_active = true`,
+      [req.params.standToken]
+    );
+    if (!s) return res.status(404).json({ error: 'Sesión de stand no válida' });
+    if (new Date(s.expira_at) < new Date()) return res.status(410).json({ error: 'Sesión expirada' });
+
+    const p = await crearProspectoSinIdentificar({
+      empresaCodigo: s.empresa_codigo, asesorUuid: s.asesor_uuid, ip: req.ip, evento: 'stand_init',
+    });
+
+    res.status(201).json({ token: p.token });
+  } catch (err) { next(err); }
+};
+
+// ── Enlace público de presentación (para compartir en grupos) ────────────────
+
+// El asesor obtiene (o crea) su enlace para una empresa. `renovar` genera uno nuevo e invalida el anterior
+// (por si se filtró a quien no debía). Idempotente: pedirlo varias veces devuelve el mismo enlace.
+export const obtenerEnlacePublico = async (req, res, next) => {
+  try {
+    const { empresa_codigo, renovar } = req.body || {};
+    if (!empresa_codigo) return res.status(400).json({ error: 'empresa_codigo requerido' });
+
+    const { rowCount: emp } = await pool.query(
+      `SELECT 1 FROM empresas WHERE codigo = $1 AND is_active = true`, [empresa_codigo]
+    );
+    if (!emp) return res.status(400).json({ error: 'Empresa no encontrada o inactiva' });
+
+    const nuevoToken = crypto.randomBytes(16).toString('base64url');
+    const { rows: [e] } = await pool.query(
+      `INSERT INTO captacion_enlaces_publicos (token, asesor_uuid, empresa_codigo)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (asesor_uuid, empresa_codigo) DO UPDATE
+         SET is_active = true,
+             token = CASE WHEN $4::boolean THEN EXCLUDED.token ELSE captacion_enlaces_publicos.token END,
+             updated_at = NOW()
+       RETURNING token`,
+      [nuevoToken, req.user.id, empresa_codigo, renovar === true]
+    );
+    res.json({ token: e.token });
+  } catch (err) { next(err); }
+};
+
+export const desactivarEnlacePublico = async (req, res, next) => {
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE captacion_enlaces_publicos SET is_active = false, updated_at = NOW()
+        WHERE asesor_uuid = $1 AND empresa_codigo = $2 AND is_active = true`,
+      [req.user.id, req.params.empresa]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'No hay un enlace activo para esa empresa' });
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+};
+
+const enlacePublicoVigente = async (token) => {
+  const { rows: [e] } = await pool.query(
+    `SELECT l.asesor_uuid, l.empresa_codigo, emp.nombre AS empresa_nombre, u.nombre AS asesor_nombre
+       FROM captacion_enlaces_publicos l
+       JOIN empresas emp ON emp.codigo = l.empresa_codigo
+       JOIN global_usuarios u ON u.id = l.asesor_uuid
+      WHERE l.token = $1 AND l.is_active = true AND emp.is_active = true AND u.is_active = true`,
+    [token]
+  );
+  return e || null;
+};
+
+export const pubGetEnlace = async (req, res, next) => {
+  try {
+    const e = await enlacePublicoVigente(req.params.token);
+    if (!e) return res.status(404).json({ error: 'Enlace no válido' });
+    res.json({ empresa_nombre: e.empresa_nombre, asesor_nombre: e.asesor_nombre });
+  } catch (err) { next(err); }
+};
+
+export const pubIniciarDesdeEnlace = async (req, res, next) => {
+  try {
+    const e = await enlacePublicoVigente(req.params.token);
+    if (!e) return res.status(404).json({ error: 'Enlace no válido' });
+
+    const p = await crearProspectoSinIdentificar({
+      empresaCodigo: e.empresa_codigo, asesorUuid: e.asesor_uuid, ip: req.ip, evento: 'enlace_publico_init',
+    });
+    res.status(201).json({ token: p.token });
+  } catch (err) { next(err); }
+};
+
+export const initStandProspecto = async (req, res, next) => {
+  try {
+    const rawToken = crypto.randomBytes(32).toString('base64url');
+    const tokenHash = hashToken(rawToken);
+    const placeholderCedula = 'STAND_' + crypto.randomBytes(6).toString('hex');
+
+    const { rows: [p] } = await pool.query(
+      `INSERT INTO captacion_prospectos
+         (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular,
+          token_hash, token, acepta_habeas_data, habeas_data_at)
+       VALUES ($1, $2, '', '', $3, '',
+               $4, $5, true, NOW())
+       RETURNING id, token`,
+      [req.body.empresa_codigo || null, req.user.id, placeholderCedula, tokenHash, rawToken]
+    );
+
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, tipo, autor_tipo, autor_uuid, ip)
+       VALUES ($1, 'stand_init', 'asesor', $2, $3)`,
+      [p.id, req.user.id, req.ip]
+    );
+
+    res.status(201).json({ token: p.token });
+  } catch (err) { next(err); }
+};
+
+export const getValoresAsesor = async (req, res, next) => {
+  try {
+    const asesor_uuid = req.params.uuid;
+    const { rows: [r] } = await pool.query(`
+      SELECT
+        COUNT(p.id)                                              AS total_prospectos,
+        COUNT(v.id) FILTER (WHERE v.is_active = true)           AS vinculados,
+        COUNT(v.id) FILTER (WHERE v.estado = 'entregada')       AS entregados,
+        COUNT(v.id) FILTER (
+          WHERE v.is_active = true AND v.estado NOT IN ('entregada'))  AS en_proceso,
+        COUNT(p.id) FILTER (
+          WHERE p.created_at >= NOW() - INTERVAL '30 days')     AS ultimo_mes
+        FROM captacion_prospectos p
+        LEFT JOIN captacion_vinculaciones v ON v.prospecto_id = p.id
+       WHERE p.asesor_uuid = $1 AND p.is_active = true
+         AND NOT ${SQL_SIN_IDENTIFICAR}  -- los del stand sin identificar no son prospectos reales
+    `, [asesor_uuid]);
+
+    const vinculados = Number(r.vinculados);
+    const total      = Number(r.total_prospectos);
+    res.json({
+      total_prospectos: total,
+      vinculados,
+      entregados:       Number(r.entregados),
+      en_proceso:       Number(r.en_proceso),
+      ultimo_mes:       Number(r.ultimo_mes),
+      tasa_conversion:  total > 0 ? Math.round((vinculados / total) * 100) : 0,
+    });
   } catch (err) { next(err); }
 };
 
@@ -356,7 +647,7 @@ export const pubGetProspecto = async (req, res, next) => {
 
     const { rows: [v] } = await pool.query(
       `SELECT estado, seccion_personal_at, seccion_laboral_at, seccion_pep_at,
-              seccion_financiera_at, seccion_beneficiarios_at, seccion_referencias_at,
+              seccion_financiera_at, seccion_aportes_at, seccion_beneficiarios_at, seccion_referencias_at,
               seccion_documentos_at, seccion_firma_at
          FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`,
       [p.id]
@@ -364,9 +655,17 @@ export const pubGetProspecto = async (req, res, next) => {
 
     res.json({
       nombres: p.nombres,
+      apellidos: p.apellidos,
+      // En modo stand la cédula es un placeholder hasta que la persona la escribe; el frontend
+      // solo necesita saber si debe pedirla (nunca se devuelve la cédula real).
+      requiere_identificacion: p.cedula?.startsWith('STAND_') ?? false,
+      // Datos de contacto que aún no tenemos (p. ej. prospectos creados desde el stand)
+      requiere_celular: !p.celular,
+      requiere_correo:  !p.correo,
       empresa_codigo: p.empresa_codigo,
       asesor: { nombre: asesor?.nombre, avatar_url: asesor?.avatar_url, celular: p.celular },
       version_consentimiento: VERSION_CONSENTIMIENTO,
+      tarifas: TARIFAS,
       vinculacion: v || null,
     });
   } catch (err) { next(err); }
@@ -433,6 +732,7 @@ const guardarSeccion = (seccion, schema, camposExtra) => async (req, res, next) 
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido' });
     if (new Date(p.token_expira_at) < new Date()) return respuesta410(p, req, res);
+    if (await solicitudEntregada(p.id)) return res.status(400).json(ERROR_ENTREGADA);
 
     const data = schema.parse(req.body);
 
@@ -457,9 +757,12 @@ const guardarSeccion = (seccion, schema, camposExtra) => async (req, res, next) 
     // Construir SET dinámico con los campos de la sección
     const campos = { ...data, ...camposExtra(v.id) };
     const sets = Object.keys(campos).map((k, i) => `${k} = $${i + 2}`);
+    // pg serializa los arrays JS como arrays de Postgres, no como JSON: las columnas jsonb
+    // (p. ej. moneda_extranjera_detalle) necesitan el valor ya convertido a texto JSON.
+    const valores = Object.values(campos).map(x => (x !== null && typeof x === 'object' ? JSON.stringify(x) : x));
     await pool.query(
       `UPDATE captacion_vinculaciones SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $1`,
-      [v.id, ...Object.values(campos)]
+      [v.id, ...valores]
     );
 
     await pool.query(
@@ -473,10 +776,62 @@ const guardarSeccion = (seccion, schema, camposExtra) => async (req, res, next) 
   } catch (err) { next(err); }
 };
 
-export const pubSeccionPersonal = guardarSeccion('personal', seccionPersonalSchema, () => ({
-  seccion_personal_at   : new Date().toISOString(),
-  seccion_personal_autor: 'prospecto',
-}));
+export const pubSeccionPersonal = async (req, res, next) => {
+  try {
+    const p = await resolverToken(req.params.token);
+    if (!p) return res.status(404).json({ error: 'Link no válido' });
+    if (new Date(p.token_expira_at) < new Date()) return respuesta410(p, req, res);
+    if (await solicitudEntregada(p.id)) return res.status(400).json(ERROR_ENTREGADA);
+
+    const data = seccionPersonalSchema.parse(req.body);
+    const { nombres, apellidos, cedula, celular, correo, ...vinculacionData } = data;
+
+    // Info básica y contacto viven en captacion_prospectos (en stand llegan aquí por primera vez)
+    if (nombres || apellidos || cedula || celular || correo) {
+      const campos = [];
+      const vals   = [];
+      if (nombres)   { campos.push(`nombres   = $${vals.length + 2}`); vals.push(nombres); }
+      if (apellidos) { campos.push(`apellidos = $${vals.length + 2}`); vals.push(apellidos); }
+      if (cedula)    { campos.push(`cedula    = $${vals.length + 2}`); vals.push(cedula); }
+      if (celular)   { campos.push(`celular   = $${vals.length + 2}`); vals.push(celular); }
+      if (correo)    { campos.push(`correo    = $${vals.length + 2}`); vals.push(correo); }
+      await pool.query(
+        `UPDATE captacion_prospectos SET ${campos.join(', ')}, updated_at = NOW() WHERE id = $1`,
+        [p.id, ...vals]
+      );
+    }
+
+    // Asegurar vinculación
+    let { rows: [v] } = await pool.query(
+      `SELECT id FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]
+    );
+    if (!v) {
+      const { rows: [nv] } = await pool.query(
+        `INSERT INTO captacion_vinculaciones (prospecto_id) VALUES ($1) RETURNING id`, [p.id]
+      );
+      v = nv;
+      await pool.query(
+        `UPDATE captacion_prospectos SET estado = CASE WHEN estado = 'vio_landing' THEN 'interesado' ELSE estado END, updated_at = NOW() WHERE id = $1`,
+        [p.id]
+      );
+    }
+
+    const campos = { ...vinculacionData, seccion_personal_at: new Date().toISOString(), seccion_personal_autor: 'prospecto' };
+    const sets   = Object.keys(campos).map((k, i) => `${k} = $${i + 2}`);
+    await pool.query(
+      `UPDATE captacion_vinculaciones SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $1`,
+      [v.id, ...Object.values(campos)]
+    );
+
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, ip, user_agent)
+       VALUES ($1,$2,'seccion_guardada','personal','prospecto',$3,$4)`,
+      [p.id, v.id, req.ip, req.headers['user-agent'] || null]
+    );
+
+    res.json({ ok: true, vinculacion_id: v.id });
+  } catch (err) { next(err); }
+};
 
 export const pubSeccionLaboral = guardarSeccion('laboral', seccionLaboralSchema, () => ({
   seccion_laboral_at   : new Date().toISOString(),
@@ -495,6 +850,7 @@ export const pubSeccionPepHandler = async (req, res, next) => {
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido' });
     if (new Date(p.token_expira_at) < new Date()) return respuesta410(p, req, res);
+    if (await solicitudEntregada(p.id)) return res.status(400).json(ERROR_ENTREGADA);
 
     const data = seccionPepSchema.parse(req.body);
     const esAmpliada = data.pep_maneja_recursos_publicos || data.pep_reconocimiento_publico ||
@@ -538,11 +894,89 @@ export const pubSeccionFinanciera = guardarSeccion('financiera', seccionFinancie
   seccion_financiera_autor: 'prospecto',
 }));
 
+// Guarda la elección de aportes. Los precios de fondo, seguro, bono y cuota los fija el servidor.
+// `autor` queda en seccion_aportes_autor: 'prospecto' (lo eligió el asociado) o 'asesor' (lo definió el asesor).
+const aplicarAportes = async ({ vinculacionId, datos, autor }) => {
+  const seguro = datos.seguro_vida ? TARIFAS.seguro_vida : 0;
+  const bono   = datos.bono_sorteo ? TARIFAS.bono_sorteo : 0;
+
+  await pool.query(
+    `UPDATE captacion_vinculaciones SET
+       valor_aporte = $1, periodicidad_descuento = $2,
+       valor_fondo_bienestar = $3,
+       seguro_vida_activo = $4, valor_seguro_vida = $5,
+       bono_sorteo_activo = $6, valor_bono_sorteo = $7,
+       cuota_admision = COALESCE(cuota_admision, $8),
+       seccion_aportes_at = NOW(), seccion_aportes_autor = $10, updated_at = NOW()
+     WHERE id = $9`,
+    [datos.valor_aporte, datos.periodicidad, TARIFAS.fondo_bienestar,
+     datos.seguro_vida, seguro, datos.bono_sorteo, bono, TARIFAS.cuota_admision, vinculacionId, autor]
+  );
+  return datos.valor_aporte + TARIFAS.fondo_bienestar + seguro + bono;
+};
+
+const resumenAportes = (d) => JSON.stringify({
+  valor_aporte: d.valor_aporte, periodicidad: d.periodicidad, seguro_vida: d.seguro_vida, bono_sorteo: d.bono_sorteo,
+});
+
+export const pubSeccionAportes = async (req, res, next) => {
+  try {
+    const p = await resolverToken(req.params.token);
+    if (!p) return res.status(404).json({ error: 'Link no válido' });
+    if (new Date(p.token_expira_at) < new Date()) return respuesta410(p, req, res);
+
+    const d = seccionAportesSchema.parse(req.body);
+
+    let { rows: [v] } = await pool.query(
+      `SELECT id, estado FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]
+    );
+    if (!v) {
+      const { rows: [nv] } = await pool.query(
+        `INSERT INTO captacion_vinculaciones (prospecto_id) VALUES ($1) RETURNING id, estado`, [p.id]
+      );
+      v = nv;
+    }
+    if (v.estado === 'entregada') return res.status(400).json(ERROR_ENTREGADA);
+
+    const totalMensual = await aplicarAportes({ vinculacionId: v.id, datos: d, autor: 'prospecto' });
+
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, ip, payload)
+       VALUES ($1,$2,'seccion_guardada','aportes','prospecto',$3,$4)`,
+      [p.id, v.id, req.ip, resumenAportes(d)]
+    );
+
+    res.json({ ok: true, total_mensual: totalMensual });
+  } catch (err) { next(err); }
+};
+
+// El asesor define o corrige los aportes desde el panel (p. ej. solicitudes firmadas antes de que
+// existiera este paso). Queda registrado que lo hizo el asesor.
+export const asesorSeccionAportes = async (req, res, next) => {
+  try {
+    const d = seccionAportesSchema.parse(req.body);
+    const v = await vinculacionDelAsesor(req.params.id, req.user.id);
+    if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
+    if (v.estado === 'entregada') return res.status(400).json(ERROR_ENTREGADA);
+
+    const totalMensual = await aplicarAportes({ vinculacionId: v.id, datos: d, autor: 'asesor' });
+
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, autor_uuid, ip, payload)
+       VALUES ($1,$2,'aportes_definidos_asesor','aportes','asesor',$3,$4,$5)`,
+      [v.prospecto_id, v.id, req.user.id, req.ip, resumenAportes(d)]
+    );
+
+    res.json({ ok: true, total_mensual: totalMensual });
+  } catch (err) { next(err); }
+};
+
 export const pubSeccionBeneficiarios = async (req, res, next) => {
   try {
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido' });
     if (new Date(p.token_expira_at) < new Date()) return respuesta410(p, req, res);
+    if (await solicitudEntregada(p.id)) return res.status(400).json(ERROR_ENTREGADA);
 
     const { beneficiarios } = seccionBeneficiariosSchema.parse(req.body);
     const total = beneficiarios.reduce((s, b) => s + b.porcentaje, 0);
@@ -580,6 +1014,7 @@ export const pubSeccionReferencias = async (req, res, next) => {
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido' });
     if (new Date(p.token_expira_at) < new Date()) return respuesta410(p, req, res);
+    if (await solicitudEntregada(p.id)) return res.status(400).json(ERROR_ENTREGADA);
 
     const { referencias } = seccionReferenciasSchema.parse(req.body);
 
@@ -614,6 +1049,7 @@ export const pubFirmar = async (req, res, next) => {
   try {
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido' });
+    if (await solicitudEntregada(p.id)) return res.status(400).json(ERROR_ENTREGADA);
 
     // Exigir step-up: la firma tiene validez legal y requiere identidad verificada
     const stepupToken = req.headers['x-stepup-token'];
@@ -629,10 +1065,11 @@ export const pubFirmar = async (req, res, next) => {
     const data = seccionFirmaSchema.parse(req.body);
 
     const { rows: [v] } = await pool.query(
-      `SELECT id, seccion_pep_at FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]
+      `SELECT id, seccion_pep_at, seccion_aportes_at FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]
     );
     if (!v) return res.status(400).json({ error: 'No hay formulario iniciado' });
     if (!v.seccion_pep_at) return res.status(400).json({ error: 'Debe completar la sección PEP antes de firmar' });
+    if (!v.seccion_aportes_at) return res.status(400).json({ error: 'Debe elegir su aporte antes de firmar' });
 
     // Snapshot del estado actual para hash
     const { rows: [snap] } = await pool.query(
@@ -690,14 +1127,57 @@ export const pubFirmar = async (req, res, next) => {
 };
 
 // ── Upload de cédula (presigned URL pattern) ──────────────────────────────────
+// Lo usan dos flujos: el asociado (por su enlace) y el asesor (desde el panel, cuando el
+// asociado le manda la foto por otro medio). Ambos comparten estas funciones.
 
 const LADOS_CEDULA = ['frente', 'reverso'];
+const COLUMNA_CEDULA = { frente: 'cedula_frente_id', reverso: 'cedula_reverso_id' };
+
+// Devuelve un mensaje de error si el lado no es válido.
+const validarLado = (lado) => (LADOS_CEDULA.includes(lado) ? null : 'lado debe ser frente o reverso');
+
+/**
+ * Registra el archivo ya subido a S3 como cédula (frente | reverso), reemplaza el anterior
+ * (borrándolo de la tabla y de S3, para no dejar huérfanos) y marca la sección como completa
+ * cuando ya están ambas caras. `autor` queda en seccion_documentos_autor.
+ */
+const registrarCedula = async ({ vinculacionId, lado, archivo, subidoPor, autor }) => {
+  const columna = COLUMNA_CEDULA[lado];
+  const { rows: [previo] } = await pool.query(
+    `SELECT ${columna} AS id FROM captacion_vinculaciones WHERE id = $1`, [vinculacionId]
+  );
+
+  const nuevo = await guardarArchivo(`captacion_cedula_${lado}`, vinculacionId, archivo, subidoPor);
+  await pool.query(
+    `UPDATE captacion_vinculaciones SET ${columna} = $1, updated_at = NOW() WHERE id = $2`,
+    [nuevo.id, vinculacionId]
+  );
+
+  await pool.query(
+    `UPDATE captacion_vinculaciones
+        SET seccion_documentos_at = NOW(), seccion_documentos_autor = $2, updated_at = NOW()
+      WHERE id = $1 AND cedula_frente_id IS NOT NULL AND cedula_reverso_id IS NOT NULL
+        AND seccion_documentos_at IS NULL`,
+    [vinculacionId, autor]
+  );
+
+  // Ya apunta al nuevo: el anterior se puede borrar sin romper la FK. Si falla S3 no se
+  // revierte la subida (el documento nuevo ya es válido); queda en el log para limpieza manual.
+  if (previo?.id) {
+    // En tests no se toca el bucket real: solo se elimina la fila.
+    await eliminarArchivo(previo.id, { omitirS3: env.NODE_ENV === 'test' })
+      .catch((err) => logger.warn(`No se pudo eliminar la cédula anterior ${previo.id}: ${err.message}`));
+  }
+  return nuevo;
+};
+
+const datosArchivo = ({ key, nombre, mime, size }) => ({ key, nombre, mime, size });
 
 export const pubSolicitarUploadCedula = async (req, res, next) => {
   try {
     const { lado } = req.params;
-    if (!LADOS_CEDULA.includes(lado))
-      return res.status(400).json({ error: 'lado debe ser frente o reverso' });
+    const errLado = validarLado(lado);
+    if (errLado) return res.status(400).json({ error: errLado });
 
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido' });
@@ -708,14 +1188,15 @@ export const pubSolicitarUploadCedula = async (req, res, next) => {
 
     // Asegurar que la vinculación exista
     let { rows: [v] } = await pool.query(
-      `SELECT id FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]
+      `SELECT id, estado FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]
     );
     if (!v) {
       const { rows: [nv] } = await pool.query(
-        `INSERT INTO captacion_vinculaciones (prospecto_id) VALUES ($1) RETURNING id`, [p.id]
+        `INSERT INTO captacion_vinculaciones (prospecto_id) VALUES ($1) RETURNING id, estado`, [p.id]
       );
       v = nv;
     }
+    if (v.estado === 'entregada') return res.status(400).json({ error: 'La solicitud ya fue entregada' });
 
     const result = await generarPresignedUpload(`captacion_cedula_${lado}`, v.id, req.body);
     res.json(result);
@@ -725,45 +1206,97 @@ export const pubSolicitarUploadCedula = async (req, res, next) => {
 export const pubConfirmarUploadCedula = async (req, res, next) => {
   try {
     const { lado } = req.params;
-    if (!LADOS_CEDULA.includes(lado))
-      return res.status(400).json({ error: 'lado debe ser frente o reverso' });
+    const errLado = validarLado(lado);
+    if (errLado) return res.status(400).json({ error: errLado });
 
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido' });
 
-    const { key, nombre, mime, size } = req.body;
+    const { key, nombre } = req.body;
     if (!key || !nombre) return res.status(400).json({ error: 'Faltan campos: key, nombre' });
+    const error = validarArchivo(req.body);
+    if (error) return res.status(400).json({ error });
 
     const { rows: [v] } = await pool.query(
-      `SELECT id FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]
+      `SELECT id, estado FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]
     );
     if (!v) return res.status(400).json({ error: 'No hay formulario iniciado' });
+    if (v.estado === 'entregada') return res.status(400).json({ error: 'La solicitud ya fue entregada' });
 
     if (!key.startsWith(`kernel/captacion_cedula_${lado}s/${v.id}/`))
       return res.status(400).json({ error: 'Key inválida para esta solicitud' });
 
-    const archivo = await guardarArchivo(`captacion_cedula_${lado}`, v.id, { key, nombre, mime, size }, null);
-
-    const columna = lado === 'frente' ? 'cedula_frente_id' : 'cedula_reverso_id';
-    await pool.query(
-      `UPDATE captacion_vinculaciones SET ${columna} = $1, updated_at = NOW() WHERE id = $2`,
-      [archivo.id, v.id]
-    );
-
-    // Marcar sección documentos si ambos lados subidos
-    await pool.query(
-      `UPDATE captacion_vinculaciones
-          SET seccion_documentos_at = NOW(), seccion_documentos_autor = 'prospecto',
-              updated_at = NOW()
-        WHERE id = $1 AND cedula_frente_id IS NOT NULL AND cedula_reverso_id IS NOT NULL
-          AND seccion_documentos_at IS NULL`,
-      [v.id]
-    );
+    const archivo = await registrarCedula({
+      vinculacionId: v.id, lado, archivo: datosArchivo(req.body), subidoPor: null, autor: 'prospecto',
+    });
 
     await pool.query(
       `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, ip)
        VALUES ($1,$2,'seccion_guardada','documentos','prospecto',$3)`,
       [p.id, v.id, req.ip]
+    );
+
+    res.json({ ok: true, archivo_id: archivo.id });
+  } catch (err) { next(err); }
+};
+
+// ── Cédula cargada por el asesor (subsanación desde el panel) ────────────────
+
+// Solo el asesor dueño de la solicitud, y mientras no esté entregada.
+const vinculacionDelAsesor = async (id, asesorUuid) => {
+  const { rows: [v] } = await pool.query(
+    `SELECT v.id, v.estado, v.prospecto_id
+       FROM captacion_vinculaciones v
+       JOIN captacion_prospectos p ON p.id = v.prospecto_id
+      WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true`,
+    [id, asesorUuid]
+  );
+  return v || null;
+};
+
+export const solicitarDocumentoAsesor = async (req, res, next) => {
+  try {
+    const { id, lado } = req.params;
+    const errLado = validarLado(lado);
+    if (errLado) return res.status(400).json({ error: errLado });
+
+    const v = await vinculacionDelAsesor(id, req.user.id);
+    if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
+    if (v.estado === 'entregada') return res.status(400).json({ error: 'La solicitud ya fue entregada' });
+
+    const error = validarArchivo(req.body);
+    if (error) return res.status(400).json({ error });
+
+    res.json(await generarPresignedUpload(`captacion_cedula_${lado}`, v.id, req.body));
+  } catch (err) { next(err); }
+};
+
+export const confirmarDocumentoAsesor = async (req, res, next) => {
+  try {
+    const { id, lado } = req.params;
+    const errLado = validarLado(lado);
+    if (errLado) return res.status(400).json({ error: errLado });
+
+    const v = await vinculacionDelAsesor(id, req.user.id);
+    if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
+    if (v.estado === 'entregada') return res.status(400).json({ error: 'La solicitud ya fue entregada' });
+
+    const { key, nombre } = req.body;
+    if (!key || !nombre) return res.status(400).json({ error: 'Faltan campos: key, nombre' });
+    const error = validarArchivo(req.body);
+    if (error) return res.status(400).json({ error });
+    if (!key.startsWith(`kernel/captacion_cedula_${lado}s/${v.id}/`))
+      return res.status(400).json({ error: 'Key inválida para esta solicitud' });
+
+    const archivo = await registrarCedula({
+      vinculacionId: v.id, lado, archivo: datosArchivo(req.body), subidoPor: req.user.id, autor: 'asesor',
+    });
+
+    // Trazabilidad: quién cargó el documento en nombre del asociado
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, autor_uuid, ip, payload)
+       VALUES ($1,$2,'documento_subido_asesor','documentos','asesor',$3,$4,$5)`,
+      [v.prospecto_id, v.id, req.user.id, req.ip, JSON.stringify({ lado, archivo_id: archivo.id, nombre: req.body.nombre })]
     );
 
     res.json({ ok: true, archivo_id: archivo.id });

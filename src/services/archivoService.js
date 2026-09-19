@@ -82,14 +82,15 @@ export const generarPresignedDescarga = async (archivoId) => {
   return { url, nombre: archivo.nombre, mime: archivo.mime_type, id: archivo.id };
 };
 
-export const eliminarArchivo = async (archivoId) => {
+// `omitirS3`: solo borra la fila (tests, o cuando el objeto ya no existe en el bucket).
+export const eliminarArchivo = async (archivoId, { omitirS3 = false } = {}) => {
   const { rows: [archivo] } = await pool.query(
     'SELECT * FROM archivos WHERE id = $1',
     [archivoId]
   );
   if (!archivo) return false;
 
-  await s3.send(new DeleteObjectCommand({ Bucket: env.S3_BUCKET, Key: archivo.s3_key }));
+  if (!omitirS3) await s3.send(new DeleteObjectCommand({ Bucket: env.S3_BUCKET, Key: archivo.s3_key }));
   await pool.query('DELETE FROM archivos WHERE id = $1', [archivoId]);
   return true;
 };

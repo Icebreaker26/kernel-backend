@@ -294,14 +294,14 @@ const detectarSprayPortal = async () => {
 // Mutaciones en módulos financieros fuera de L-V 06:00-21:00 hora Bogotá (UTC-5, sin DST)
 const detectarActividadFueraHorario = async () => {
   const { rows } = await pool.query(`
-    SELECT a.usuario_id, u.nombre AS usuario, a.endpoint, a.method,
+    SELECT a.usuario_id, u.nombre AS usuario, a.endpoint, a.metodo,
            a.created_at,
            EXTRACT(DOW  FROM a.created_at AT TIME ZONE 'America/Bogota') AS dow,
            EXTRACT(HOUR FROM a.created_at AT TIME ZONE 'America/Bogota') AS hora
       FROM global_actividad a
       JOIN global_usuarios u ON u.id = a.usuario_id
      WHERE a.created_at > ${VENTANA}
-       AND a.method IN ('POST', 'PUT', 'DELETE', 'PATCH')
+       AND a.metodo IN ('POST', 'PUT', 'DELETE', 'PATCH')
        AND a.status_code BETWEEN 200 AND 299
        AND a.endpoint ~* '/(facturas|movimientos|conciliar|causar|pagos?|aporte|proveedores|extracto)'
        AND (
@@ -323,10 +323,10 @@ const detectarActividadFueraHorario = async () => {
       regla: 'actividad_fuera_horario', tipo: 'Actividad financiera fuera de horario',
       severidad, usuario_uuid: r.usuario_id,
       dedupe_key: `fuera_horario:${r.usuario_id}:${r.endpoint}:${ventana}`,
-      titulo: `${r.usuario} ejecutó ${r.method} ${r.endpoint} a las ${String(Math.floor(Number(r.hora))).padStart(2,'0')}:xx${esFinDeSemana ? ' (fin de semana)' : ''}`,
+      titulo: `${r.usuario} ejecutó ${r.metodo} ${r.endpoint} a las ${String(Math.floor(Number(r.hora))).padStart(2,'0')}:xx${esFinDeSemana ? ' (fin de semana)' : ''}`,
       detalle: {
         endpoint: r.endpoint,
-        method: r.method,
+        method: r.metodo,
         hora: Number(r.hora),
         fin_de_semana: esFinDeSemana,
         created_at: r.created_at,

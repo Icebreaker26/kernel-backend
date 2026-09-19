@@ -58,6 +58,7 @@ router.get ('/valores/:uuid',                  checkPermission('captacion', 'REA
 router.get ('/vinculaciones',                  checkPermission('captacion', 'READ'),     ctrl.listarVinculaciones);
 router.get ('/vinculaciones/:id',              checkPermission('captacion', 'READ'),     ctrl.getVinculacion);
 router.get ('/vinculaciones/:id/documentos',   checkPermission('captacion', 'READ'),     ctrl.getDocumentosVinculacion);
+router.get ('/vinculaciones/:id/formato',      checkPermission('captacion', 'READ'),     ctrl.descargarFormato);
 router.post ('/vinculaciones/:id/documentos/:lado/solicitar', checkPermission('captacion', 'WRITE'), ctrl.solicitarDocumentoAsesor);
 router.patch('/vinculaciones/:id/documentos/:lado/confirmar', checkPermission('captacion', 'WRITE'), ctrl.confirmarDocumentoAsesor);
 router.put ('/vinculaciones/:id/aportes',      checkPermission('captacion', 'WRITE'),    ctrl.asesorSeccionAportes);

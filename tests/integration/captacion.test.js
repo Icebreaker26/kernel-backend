@@ -667,6 +667,34 @@ describe('Captacion — Vinculaciones internas', () => {
     }
   });
 
+  describe('formato de vinculación en PDF', () => {
+    test('GET /vinculaciones/:id/formato — PDF de 2 páginas con auditoría', async () => {
+      const ag = agent();
+      await loginAsesor(ag);
+      const res = await ag.get(`/api/captacion/vinculaciones/${vinculacionId}/formato`)
+        .buffer(true).parse((r, cb) => { const c = []; r.on('data', (d) => c.push(d)); r.on('end', () => cb(null, Buffer.concat(c))); });
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toMatch(/application\/pdf/);
+      expect(res.headers['content-disposition']).toMatch(/attachment; filename="formato-vinculacion-.+\.pdf"/);
+      expect(res.headers['cache-control']).toMatch(/no-store/);
+      expect(res.body.subarray(0, 5).toString()).toBe('%PDF-');
+      const { PDFDocument } = await import('pdf-lib');
+      expect((await PDFDocument.load(res.body)).getPageCount()).toBe(2);
+
+      const { rows } = await pool.query(
+        `SELECT 1 FROM captacion_eventos WHERE vinculacion_id = $1 AND tipo = 'formato_descargado'`, [vinculacionId]);
+      expect(rows.length).toBeGreaterThan(0);
+    });
+
+    test('GET /vinculaciones/:id/formato — sin sesión → 401 y id inexistente → 404', async () => {
+      expect((await request(app).get(`/api/captacion/vinculaciones/${vinculacionId}/formato`)).status).toBe(401);
+      const ag = agent();
+      await loginAsesor(ag);
+      const res = await ag.get('/api/captacion/vinculaciones/00000000-0000-0000-0000-000000000000/formato');
+      expect(res.status).toBe(404);
+    });
+  });
+
   describe('cédula cargada por el asesor', () => {
     const base = () => `/api/captacion/vinculaciones/${vinculacionId}/documentos`;
     const meta = (nombre = 'cedula.jpg', mime = 'image/jpeg') => ({ nombre, mime, size: 500000 });

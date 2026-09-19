@@ -6,6 +6,7 @@ import { notificarUsuario } from '../../../services/notificationService.js';
 import { validarArchivo, generarPresignedUpload, guardarArchivo, generarPresignedDescarga, eliminarArchivo } from '../../../services/archivoService.js';
 import logger from '../../../config/logger.js';
 import { TARIFAS } from '../tarifas.js';
+import { generarFormatoVinculacion } from '../services/formatoVinculacionPdf.js';
 import { SQL_SIN_IDENTIFICAR } from '../services/captacionService.js';
 import {
   crearProspectoSchema, toqueSchema, updateProspectoSchema,
@@ -287,6 +288,47 @@ export const getVinculacion = async (req, res, next) => {
     );
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
     res.json({ ...v, tarifas: TARIFAS });
+  } catch (err) { next(err); }
+};
+
+// Formato No. 5 (PDF oficial) lleno con los datos de la solicitud. Contiene datos personales y la
+// firma: solo el asesor dueño, sin caché, y cada descarga queda en captacion_eventos.
+export const descargarFormato = async (req, res, next) => {
+  try {
+    const { rows: [v] } = await pool.query(
+      `SELECT v.*,
+              p.nombres, p.apellidos, p.cedula, p.celular, p.correo,
+              e.nombre AS empresa_nombre,
+              u.nombre AS asesor_nombre
+         FROM captacion_vinculaciones v
+         JOIN captacion_prospectos p ON p.id = v.prospecto_id
+         JOIN empresas e ON e.codigo = p.empresa_codigo
+         LEFT JOIN global_usuarios u ON u.id = p.asesor_uuid
+        WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true`,
+      [req.params.id, req.user.id]
+    );
+    if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
+
+    const [{ rows: beneficiarios }, { rows: referencias }] = await Promise.all([
+      pool.query('SELECT * FROM captacion_beneficiarios WHERE vinculacion_id = $1 ORDER BY orden', [v.id]),
+      pool.query('SELECT * FROM captacion_referencias WHERE vinculacion_id = $1 ORDER BY created_at', [v.id]),
+    ]);
+
+    const pdf = await generarFormatoVinculacion({ ...v, beneficiarios, referencias });
+
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, autor_uuid, ip, payload)
+       VALUES ($1,$2,'formato_descargado','formato','asesor',$3,$4,$5)`,
+      [v.prospecto_id, v.id, req.user.id, req.ip, JSON.stringify({ estado: v.estado })]
+    );
+
+    const nombre = `formato-vinculacion-${String(v.cedula || v.id).replace(/[^A-Za-z0-9_-]/g, '')}.pdf`;
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${nombre}"`,
+      'Cache-Control': 'no-store',
+    });
+    res.send(Buffer.from(pdf));
   } catch (err) { next(err); }
 };
 

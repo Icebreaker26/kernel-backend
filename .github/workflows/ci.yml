@@ -33,6 +33,12 @@ jobs:
       NODE_ENV: test
       FRONTEND_URL: http://localhost:5173
       PORTAL_URL: http://localhost:5173/portal/login
+      # S3: valores ficticios. Las URLs firmadas se calculan localmente (sin red), pero el SDK exige
+      # credenciales y bucket; los tests nunca suben ni leen nada de S3 real.
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: AKIAFAKEFAKEFAKE1234
+      AWS_SECRET_ACCESS_KEY: fakefakefakefakefakefakefakefakefake12
+      S3_BUCKET: bucket-ci-ficticio
 
     steps:
       - uses: actions/checkout@v4

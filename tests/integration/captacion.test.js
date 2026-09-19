@@ -255,6 +255,29 @@ describe('Captacion — Endpoints públicos', () => {
     expect(p.estado).toBe('vio_landing');
   });
 
+  describe('prueba social: compañeros de la misma empresa', () => {
+    const codigos = Array.from({ length: 10 }, (_, i) => `99999970${String(i).padStart(2, '0')}`);
+    const insertar = (lista) => pool.query(
+      `INSERT INTO asociados (codigo, nombre, apellido, empresa_dsto, nombre_empresa, email, is_active)
+       SELECT c, 'Social', 'Test', $2, 'Empresa Captacion Test', c || '@social.kernel.test', true FROM unnest($1::text[]) c
+       ON CONFLICT (codigo) DO UPDATE SET empresa_dsto = EXCLUDED.empresa_dsto, is_active = true`, [lista, empresaCodigo]);
+    afterAll(async () => { await pool.query('DELETE FROM asociados WHERE codigo = ANY($1)', [codigos]); });
+
+    test('la cifra solo se muestra desde 10 asociados de la empresa y no expone nada más', async () => {
+      await insertar(codigos.slice(0, 9));
+      const con9 = await request(app).get(`/api/captacion/pub/${rawToken}`);
+      expect(con9.body.asociados_empresa).toBeNull();
+
+      await insertar(codigos);
+      const con10 = await request(app).get(`/api/captacion/pub/${rawToken}`);
+      expect(con10.body.asociados_empresa).toBe(10);
+      expect(JSON.stringify(con10.body)).not.toContain('social.kernel.test');
+
+      await pool.query('UPDATE asociados SET is_active = false WHERE codigo = $1', [codigos[0]]); // los inactivos no cuentan
+      expect((await request(app).get(`/api/captacion/pub/${rawToken}`)).body.asociados_empresa).toBeNull();
+    });
+  });
+
   describe('autorización de tratamiento de datos (Ley 1581)', () => {
     const url = () => `/api/captacion/pub/${rawToken}`;
 
@@ -1466,7 +1489,8 @@ describe('Captacion — Enlace público para grupos', () => {
     expect(res.body).toMatchObject({ empresa_nombre: 'Empresa Captacion Test', asesor_nombre: 'Asesor Test' });
     // Los valores de la presentación salen de las tarifas del servidor, no de texto fijo en el frontend
     expect(res.body.tarifas).toMatchObject({ aporte_minimo: 74000, fondo_bienestar: 5300, cuota_admision: 35000 });
-    expect(Object.keys(res.body).sort()).toEqual(['asesor_nombre', 'empresa_nombre', 'tarifas']); // nada sensible más
+    expect(Object.keys(res.body).sort()).toEqual(['asesor_nombre', 'asociados_empresa', 'empresa_nombre', 'tarifas']); // nada sensible más
+    expect(res.body.asociados_empresa).toBeNull(); // la empresa de prueba no llega al mínimo para mostrar la cifra
   });
 
   test('token inexistente → 404 al consultar y al iniciar', async () => {

@@ -521,7 +521,7 @@ export const pubGetStandSession = async (req, res, next) => {
     );
     if (!s) return res.status(404).json({ error: 'Sesión de stand no válida' });
     if (new Date(s.expira_at) < new Date()) return res.status(410).json({ error: 'Sesión expirada' });
-    res.json({ ...s, tarifas: TARIFAS });
+    res.json({ ...s, asociados_empresa: await asociadosDeEmpresa(s.empresa_codigo), tarifas: TARIFAS });
   } catch (err) { next(err); }
 };
 
@@ -624,7 +624,7 @@ export const pubGetEnlace = async (req, res, next) => {
   try {
     const e = await enlacePublicoVigente(req.params.token);
     if (!e) return res.status(404).json({ error: 'Enlace no válido' });
-    res.json({ empresa_nombre: e.empresa_nombre, asesor_nombre: e.asesor_nombre, tarifas: TARIFAS });
+    res.json({ empresa_nombre: e.empresa_nombre, asesor_nombre: e.asesor_nombre, asociados_empresa: await asociadosDeEmpresa(e.empresa_codigo), tarifas: TARIFAS });
   } catch (err) { next(err); }
 };
 
@@ -725,6 +725,25 @@ export const pubIniciarDesdeWeb = async (req, res, next) => {
 
     const p = await crearProspectoSinIdentificar({ empresaCodigo: e.codigo, asesorUuid, ip: req.ip, evento: 'web_init' });
     res.status(201).json({ token: p.token });
+  } catch (err) { next(err); }
+};
+
+// ── Presencia de la cooperativa (diapositiva del mapa en la presentación pública) ──
+// Solo los nombres de las ciudades donde hay asociados activos: sin conteos ni datos de personas.
+// Se cachea unos minutos porque es público y la lista casi no cambia.
+let presenciaCache = { hasta: 0, ciudades: [] };
+
+export const pubPresencia = async (_req, res, next) => {
+  try {
+    if (Date.now() > presenciaCache.hasta || env.NODE_ENV === 'test') {
+      const { rows } = await pool.query(
+        `SELECT DISTINCT UPPER(TRIM(ciudad)) AS ciudad FROM asociados
+          WHERE is_active = true AND ciudad IS NOT NULL AND TRIM(ciudad) <> '' ORDER BY 1`
+      );
+      presenciaCache = { hasta: Date.now() + 10 * 60 * 1000, ciudades: rows.map((r) => r.ciudad) };
+    }
+    res.set('Cache-Control', 'public, max-age=600');
+    res.json({ ciudades: presenciaCache.ciudades });
   } catch (err) { next(err); }
 };
 
@@ -833,6 +852,16 @@ const respuesta410 = async (p, req, res) => {
   });
 };
 
+// Prueba social: cuántos compañeros de la misma empresa ya son asociados. Es un dato agregado (sin nombres) y solo
+// se muestra si son al menos MIN_PRUEBA_SOCIAL, para no exponer conteos pequeños.
+const MIN_PRUEBA_SOCIAL = 10;
+const asociadosDeEmpresa = async (empresaCodigo) => {
+  if (!empresaCodigo) return null;
+  const { rows: [r] } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM asociados WHERE empresa_dsto = $1 AND is_active = true`, [empresaCodigo]);
+  return r.n >= MIN_PRUEBA_SOCIAL ? r.n : null;
+};
+
 export const pubGetProspecto = async (req, res, next) => {
   try {
     const p = await resolverToken(req.params.token);
@@ -863,6 +892,7 @@ export const pubGetProspecto = async (req, res, next) => {
       requiere_celular: !p.celular,
       requiere_correo:  !p.correo,
       empresa_codigo: p.empresa_codigo,
+      asociados_empresa: await asociadosDeEmpresa(p.empresa_codigo),
       asesor: { nombre: asesor?.nombre, avatar_url: asesor?.avatar_url, celular: p.celular },
       version_consentimiento: VERSION_CONSENTIMIENTO,
       version_firma_electronica: VERSION_FIRMA_ELECTRONICA,

@@ -141,6 +141,11 @@ export const seccionFirmaSchema = z.object({
 });
 
 // Código de un solo uso que se envía al correo del asociado
+// Inicio desde la página pública /asociate: la persona elige su empresa
+export const iniciarWebSchema = z.object({
+  empresa_codigo: z.string().min(1, 'Elige tu empresa').max(50),
+}).strict();
+
 // Autorización de tratamiento de datos aceptada por el titular en el formulario
 export const habeasDataSchema = z.object({
   acepta : z.literal(true),

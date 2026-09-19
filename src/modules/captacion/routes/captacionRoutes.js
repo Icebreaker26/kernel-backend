@@ -25,6 +25,10 @@ router.post('/pub/enlace/:token/iniciar',                  enlacePublicoLimiter,
 
 router.get ('/pub/empresas',                              ctrl.pubListarEmpresas);
 
+// Página pública /asociate (enlace único para el sitio web de la cooperativa)
+router.get ('/pub/web',                                   ctrl.pubGetWeb);
+router.post('/pub/web/iniciar',                           enlacePublicoLimiter, ctrl.pubIniciarDesdeWeb);
+
 router.use('/pub/:token', privacyHeaders, captacionPublicLimiter);
 
 router.get ('/pub/:token',                                ctrl.pubGetProspecto);

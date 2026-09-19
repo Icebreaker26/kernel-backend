@@ -13,7 +13,7 @@ import {
   crearProspectoSchema, toqueSchema, updateProspectoSchema,
   seccionPersonalSchema, seccionLaboralSchema, seccionPepSchema,
   seccionFinancieraSchema, seccionAportesSchema, seccionBeneficiariosSchema, seccionReferenciasSchema,
-  seccionFirmaSchema, stepUpSchema, valoresAsesorSchema, habeasDataSchema,
+  seccionFirmaSchema, stepUpSchema, valoresAsesorSchema, habeasDataSchema, iniciarWebSchema,
 } from '../schemas/captacionSchema.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -113,6 +113,7 @@ export const listarProspectos = async (req, res, next) => {
               ${SQL_SIN_IDENTIFICAR} AS sin_identificar,
               CASE WHEN EXISTS (SELECT 1 FROM captacion_eventos ev WHERE ev.prospecto_id = p.id AND ev.tipo = 'stand_init') THEN 'stand'
                    WHEN EXISTS (SELECT 1 FROM captacion_eventos ev WHERE ev.prospecto_id = p.id AND ev.tipo = 'enlace_publico_init') THEN 'grupo'
+                   WHEN EXISTS (SELECT 1 FROM captacion_eventos ev WHERE ev.prospecto_id = p.id AND ev.tipo = 'web_init') THEN 'web'
                    ELSE 'enlace' END AS origen,
               v.id AS vinculacion_id, v.estado AS vinculacion_estado,
               v.seccion_personal_at, v.seccion_laboral_at, v.seccion_pep_at,
@@ -624,6 +625,43 @@ export const pubGetEnlace = async (req, res, next) => {
     const e = await enlacePublicoVigente(req.params.token);
     if (!e) return res.status(404).json({ error: 'Enlace no válido' });
     res.json({ empresa_nombre: e.empresa_nombre, asesor_nombre: e.asesor_nombre, tarifas: TARIFAS });
+  } catch (err) { next(err); }
+};
+
+// ── Página pública /asociate (enlace único y estático para el sitio web de la cooperativa) ──
+// Muestra la presentación y el botón "Quiero asociarme". No hay asesor ni empresa previos: la persona elige
+// su empresa y la solicitud se asigna al asesor definido en CAPTACION_ASESOR_WEB_UUID.
+const asesorWebActivo = async () => {
+  if (!env.CAPTACION_ASESOR_WEB_UUID) return null;
+  const { rows: [u] } = await pool.query(
+    `SELECT id FROM global_usuarios WHERE id = $1 AND is_active = true`, [env.CAPTACION_ASESOR_WEB_UUID]
+  );
+  return u?.id ?? null;
+};
+
+export const pubGetWeb = async (_req, res, next) => {
+  try {
+    if (!(await asesorWebActivo())) return res.json({ disponible: false });
+    const { rows: empresas } = await pool.query(
+      `SELECT codigo, nombre FROM empresas WHERE is_active = true ORDER BY nombre ASC`
+    );
+    res.json({ disponible: true, empresas, tarifas: TARIFAS });
+  } catch (err) { next(err); }
+};
+
+export const pubIniciarDesdeWeb = async (req, res, next) => {
+  try {
+    const { empresa_codigo } = iniciarWebSchema.parse(req.body);
+    const asesorUuid = await asesorWebActivo();
+    if (!asesorUuid) return res.status(503).json({ error: 'Este servicio no está disponible por ahora', code: 'WEB_NO_DISPONIBLE' });
+
+    const { rows: [e] } = await pool.query(
+      `SELECT codigo FROM empresas WHERE codigo = $1 AND is_active = true`, [empresa_codigo]
+    );
+    if (!e) return res.status(400).json({ error: 'Elige tu empresa de la lista' });
+
+    const p = await crearProspectoSinIdentificar({ empresaCodigo: e.codigo, asesorUuid, ip: req.ip, evento: 'web_init' });
+    res.status(201).json({ token: p.token });
   } catch (err) { next(err); }
 };
 

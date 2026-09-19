@@ -3,6 +3,7 @@ import logger from '../config/logger.js';
 import { notificarAdmins } from './notificationService.js';
 import { runAnomalyDetector } from './anomalyDetector.js';
 import { resetearVencidos } from './lockdownService.js';
+import { limpiarProspectosSinIdentificar } from '../modules/captacion/services/captacionService.js';
 
 let _timer = null;
 let _dailyTimer = null;
@@ -153,6 +154,18 @@ const startDiarioTesoreria = () => {
     startDiarioTesoreria(); // reprogramar para el siguiente día
   }, msHastaMedioNoche());
   logger.info(`Scheduler tesorería: vencimientos programados en ${Math.round(msHastaMedioNoche() / 60000)} min`);
+};
+
+// ── Captación: prospectos del stand que nadie identificó ───────────────────────
+
+const HORA_MS = 60 * 60_000;
+
+export const startSchedulerCaptacion = async () => {
+  const limpiar = () => limpiarProspectosSinIdentificar().catch((err) => logger.error(`Scheduler captación: ${err.message}`));
+  await limpiar(); // al arrancar
+  const timer = setInterval(limpiar, HORA_MS);
+  timer.unref?.(); // no impide que el proceso termine
+  logger.info('Scheduler captación: limpieza de prospectos sin identificar cada hora');
 };
 
 export const startSchedulerTesoreria = async () => {

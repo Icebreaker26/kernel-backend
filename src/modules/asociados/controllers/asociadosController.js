@@ -1175,6 +1175,21 @@ export const importarCSV = async (req, res, next) => {
       }
     }
 
+    // Auto-detectar prospectos que aparecen en el padrón (conversión por canal tradicional)
+    if (codigosCSV.length > 0) {
+      await client.query(
+        `UPDATE captacion_prospectos
+            SET estado             = 'convertido_por_sync',
+                convertido_at      = NOW(),
+                sincronizacion_id  = $1,
+                updated_at         = NOW()
+          WHERE cedula              = ANY($2::text[])
+            AND is_active           = true
+            AND estado NOT IN ('convertido', 'convertido_por_sync')`,
+        [sincId, codigosCSV]
+      );
+    }
+
     await client.query('COMMIT');
 
     const msgSync = `${nuevos} nuevos · ${actualizados} actualizados · ${retirados} retirados · ${boletosLiberados} boletos liberados`;

@@ -37,6 +37,9 @@ PORT=4000
 NODE_ENV=development
 FRONTEND_URL=http://localhost:5173
 
+# Circuit breaker de seguridad — false=enforcing (producción), true=solo observa
+LOCKDOWN_SHADOW_MODE=false
+
 # Solo para script de migración desde Railway
 PLATINUM_DATABASE_URL=...  # nunca commitear
 ```

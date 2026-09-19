@@ -82,14 +82,35 @@ export const generarPresignedDescarga = async (archivoId) => {
   return { url, nombre: archivo.nombre, mime: archivo.mime_type, id: archivo.id };
 };
 
-export const eliminarArchivo = async (archivoId) => {
+// `omitirS3`: solo borra la fila (tests, o cuando el objeto ya no existe en el bucket).
+export const eliminarArchivo = async (archivoId, { omitirS3 = false } = {}) => {
   const { rows: [archivo] } = await pool.query(
     'SELECT * FROM archivos WHERE id = $1',
     [archivoId]
   );
   if (!archivo) return false;
 
-  await s3.send(new DeleteObjectCommand({ Bucket: env.S3_BUCKET, Key: archivo.s3_key }));
+  if (!omitirS3) await s3.send(new DeleteObjectCommand({ Bucket: env.S3_BUCKET, Key: archivo.s3_key }));
   await pool.query('DELETE FROM archivos WHERE id = $1', [archivoId]);
   return true;
+};
+
+// ── Archivos generados por el servidor (p. ej. PDF sellado al firmar) ─────────
+// En tests no se toca S3: los objetos viven en memoria (mismo contrato, sin red).
+const memoriaTest = env.NODE_ENV === 'test' ? new Map() : null;
+
+export const subirBuffer = async (entidadTipo, entidadId, buffer, { nombre, mime }, subioPor = null) => {
+  const ext = nombre.split('.').pop().toLowerCase();
+  const key = `kernel/${entidadTipo}s/${entidadId}/${randomUUID()}.${ext}`;
+  if (memoriaTest) memoriaTest.set(key, Buffer.from(buffer));
+  else await s3.send(new PutObjectCommand({ Bucket: env.S3_BUCKET, Key: key, Body: buffer, ContentType: mime }));
+  return guardarArchivo(entidadTipo, entidadId, { key, nombre, mime, size: buffer.length }, subioPor);
+};
+
+export const leerBuffer = async (archivoId) => {
+  const { rows: [archivo] } = await pool.query('SELECT s3_key FROM archivos WHERE id = $1', [archivoId]);
+  if (!archivo) return null;
+  if (memoriaTest) return memoriaTest.get(archivo.s3_key) ?? null;
+  const out = await s3.send(new GetObjectCommand({ Bucket: env.S3_BUCKET, Key: archivo.s3_key }));
+  return Buffer.from(await out.Body.transformToByteArray());
 };

@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { RedisStore } from 'rate-limit-redis';
 import { redisClient } from '../config/redis.js';
@@ -79,4 +80,39 @@ export const registerLimiter = isTest
       store: makeStore('register'),
       handler: (_req, res) =>
         res.status(429).json({ error: 'Demasiados intentos. Intenta de nuevo en una hora.' }),
+    });
+
+// ── Captación pública: por token (no por IP — varios prospectos comparten red de empresa) ──
+export const captacionPublicLimiter = isTest
+  ? (_req, _res, next) => next()
+  : rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 60,
+      standardHeaders: true,
+      legacyHeaders: false,
+      store: makeStore('captacion_pub'),
+      keyGenerator: (req) => {
+        const token = req.params?.token;
+        return token
+          ? createHash('sha256').update(token).digest('hex')
+          : ipKeyGenerator(req);
+      },
+      handler: (_req, res) =>
+        res.status(429).json({ error: 'Demasiadas solicitudes para este formulario. Intenta en 15 minutos.' }),
+    });
+
+// ── Enlace público de presentación: crear prospectos desde un grupo ────────
+// Por IP. Es amplio (40 cada 15 min) porque los empleados de una misma empresa comparten IP,
+// pero frena a quien intente inundar de prospectos el enlace que se compartió en un grupo.
+export const enlacePublicoLimiter = isTest
+  ? (_req, _res, next) => next()
+  : rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 40,
+      standardHeaders: true,
+      legacyHeaders: false,
+      store: makeStore('captacion_enlace'),
+      keyGenerator: (req) => ipKeyGenerator(req),
+      handler: (_req, res) =>
+        res.status(429).json({ error: 'Demasiados intentos desde esta conexión. Inténtalo de nuevo en unos minutos.' }),
     });

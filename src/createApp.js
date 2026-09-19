@@ -33,6 +33,8 @@ export const createApp = async () => {
     if (safe.includes(req.method)) return next();
     // El endpoint de presigned upload solo muta metadata vía API (no CSRF relevante por S3)
     if (req.headers['x-requested-with'] === 'XMLHttpRequest') return next();
+    // Webhook de Amazon SNS (rebotes/quejas de SES): no puede mandar headers custom; se autentica con la firma de SNS
+    if (req.path === '/api/email/ses-eventos') return next();
     // Permitir peticiones internas (tests, cron)
     if (env.NODE_ENV === 'test') return next();
     return res.status(403).json({ error: 'Petición no permitida: falta el header X-Requested-With' });

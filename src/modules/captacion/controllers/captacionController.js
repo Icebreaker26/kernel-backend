@@ -168,7 +168,7 @@ export const registrarToque = async (req, res, next) => {
 export const whatsappUrl = async (req, res, next) => {
   try {
     const { rows: [p] } = await pool.query(
-      `SELECT p.nombres, p.apellidos, p.celular, p.token_hash, p.estado,
+      `SELECT p.nombres, p.apellidos, p.celular, p.token, p.estado,
               u.nombre AS asesor_nombre
          FROM captacion_prospectos p
          JOIN global_usuarios u ON u.id = p.asesor_uuid

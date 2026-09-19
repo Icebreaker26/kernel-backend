@@ -26,7 +26,7 @@ export const pubListar = async (_req, res, next) => {
     const { rows } = await pool.query(
       `${SQL_DOC} WHERE d.is_active AND d.publicado AND d.archivo_id IS NOT NULL
         ORDER BY d.categoria, d.anio DESC NULLS LAST, d.titulo`);
-    res.set('Cache-Control', 'public, max-age=300');
+    res.set('Cache-Control', 'public, max-age=60');
     res.json({
       categorias: CATEGORIAS,
       documentos: rows.map((d) => ({

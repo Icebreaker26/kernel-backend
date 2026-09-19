@@ -1,5 +1,7 @@
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import pool from '../../../db/database.js';
+import { env } from '../../../config/env.js';
 import { notificarUsuario } from '../../../services/notificationService.js';
 import { validarArchivo, generarPresignedUpload, guardarArchivo } from '../../../services/archivoService.js';
 import {
@@ -51,11 +53,14 @@ export const crearProspecto = async (req, res, next) => {
 
     const { rows: [p] } = await pool.query(
       `INSERT INTO captacion_prospectos
-         (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular, correo, token_hash, token)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       RETURNING id, nombres, apellidos, cedula, celular, correo, empresa_codigo, estado, created_at`,
+         (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular, correo,
+          token_hash, token, acepta_habeas_data, habeas_data_at, interes_principal)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, true, NOW(), $10)
+       RETURNING id, nombres, apellidos, cedula, celular, correo, empresa_codigo,
+                 estado, interes_principal, created_at`,
       [data.empresa_codigo, req.user.id, data.nombres, data.apellidos,
-       data.cedula, data.celular, data.correo || null, tokenHash, rawToken]
+       data.cedula, data.celular, data.correo || null, tokenHash, rawToken,
+       data.interes_principal || null]
     );
 
     await pool.query(
@@ -316,11 +321,32 @@ const resolverToken = async (rawToken) => {
   return p || null;
 };
 
+// Construye respuesta 410 con info suficiente para que el frontend genere un CTA accionable
+const respuesta410 = async (p, req, res) => {
+  await pool.query(
+    `INSERT INTO captacion_eventos (prospecto_id, tipo, autor_tipo, ip)
+     VALUES ($1,'link_expirado_visto','prospecto',$2)
+     ON CONFLICT DO NOTHING`,
+    [p.id, req.ip]
+  ).catch(() => {});
+
+  const { rows: [asesor] } = await pool.query(
+    `SELECT nombre FROM global_usuarios WHERE id = $1`, [p.asesor_uuid]
+  ).catch(() => ({ rows: [] }));
+
+  return res.status(410).json({
+    error       : 'Este link ha expirado',
+    nombres     : p.nombres,
+    asesor_nombre: asesor?.nombre || null,
+    empresa_codigo: p.empresa_codigo,
+  });
+};
+
 export const pubGetProspecto = async (req, res, next) => {
   try {
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido o expirado' });
-    if (new Date(p.token_expira_at) < new Date()) return res.status(410).json({ error: 'Este link ha expirado' });
+    if (new Date(p.token_expira_at) < new Date()) return respuesta410(p, req, res);
 
     // Devolver solo info pública + datos del asesor para WhatsApp flotante
     const { rows: [asesor] } = await pool.query(
@@ -377,9 +403,27 @@ export const pubStepUp = async (req, res, next) => {
     if (!p) return res.status(404).json({ error: 'Link no válido' });
 
     const ultimosCuatro = p.cedula.slice(-4);
-    if (digitos !== ultimosCuatro) return res.status(403).json({ error: 'Verificación incorrecta' });
+    if (digitos !== ultimosCuatro) {
+      await pool.query(
+        `INSERT INTO captacion_eventos (prospecto_id, tipo, autor_tipo, ip) VALUES ($1,'stepup_fallido','prospecto',$2)`,
+        [p.id, req.ip]
+      );
+      return res.status(403).json({ error: 'Verificación incorrecta' });
+    }
 
-    res.json({ ok: true });
+    // Emitir JWT de corta duración para autorizar acciones sensibles (firma)
+    const stepupToken = jwt.sign(
+      { sub: 'captacion_stepup', pid: p.id },
+      env.JWT_SECRET,
+      { expiresIn: '8h' }
+    );
+
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, tipo, autor_tipo, ip) VALUES ($1,'stepup_ok','prospecto',$2)`,
+      [p.id, req.ip]
+    );
+
+    res.json({ ok: true, stepup_token: stepupToken });
   } catch (err) { next(err); }
 };
 
@@ -388,7 +432,7 @@ const guardarSeccion = (seccion, schema, camposExtra) => async (req, res, next) 
   try {
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido' });
-    if (new Date(p.token_expira_at) < new Date()) return res.status(410).json({ error: 'Link expirado' });
+    if (new Date(p.token_expira_at) < new Date()) return respuesta410(p, req, res);
 
     const data = schema.parse(req.body);
 
@@ -450,6 +494,7 @@ export const pubSeccionPepHandler = async (req, res, next) => {
   try {
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido' });
+    if (new Date(p.token_expira_at) < new Date()) return respuesta410(p, req, res);
 
     const data = seccionPepSchema.parse(req.body);
     const esAmpliada = data.pep_maneja_recursos_publicos || data.pep_reconocimiento_publico ||
@@ -497,6 +542,7 @@ export const pubSeccionBeneficiarios = async (req, res, next) => {
   try {
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido' });
+    if (new Date(p.token_expira_at) < new Date()) return respuesta410(p, req, res);
 
     const { beneficiarios } = seccionBeneficiariosSchema.parse(req.body);
     const total = beneficiarios.reduce((s, b) => s + b.porcentaje, 0);
@@ -533,6 +579,7 @@ export const pubSeccionReferencias = async (req, res, next) => {
   try {
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido' });
+    if (new Date(p.token_expira_at) < new Date()) return respuesta410(p, req, res);
 
     const { referencias } = seccionReferenciasSchema.parse(req.body);
 
@@ -567,6 +614,17 @@ export const pubFirmar = async (req, res, next) => {
   try {
     const p = await resolverToken(req.params.token);
     if (!p) return res.status(404).json({ error: 'Link no válido' });
+
+    // Exigir step-up: la firma tiene validez legal y requiere identidad verificada
+    const stepupToken = req.headers['x-stepup-token'];
+    if (!stepupToken) return res.status(403).json({ error: 'Se requiere verificación de identidad para firmar', code: 'STEPUP_REQUIRED' });
+    try {
+      const decoded = jwt.verify(stepupToken, env.JWT_SECRET);
+      if (decoded.sub !== 'captacion_stepup' || decoded.pid !== p.id)
+        return res.status(403).json({ error: 'Token de verificación no corresponde a este formulario', code: 'STEPUP_MISMATCH' });
+    } catch {
+      return res.status(403).json({ error: 'Verificación expirada — realiza el paso de identidad nuevamente', code: 'STEPUP_EXPIRED' });
+    }
 
     const data = seccionFirmaSchema.parse(req.body);
 

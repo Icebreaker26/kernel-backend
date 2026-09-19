@@ -14,6 +14,7 @@ let empresaCodigo  = 'EMP-CAP-TEST';
 let prospectoId;
 let rawToken;
 let vinculacionId;
+let stepupToken;
 
 const agent      = () => request.agent(app);
 const loginAsesor = (ag) => ag.post('/api/auth/login').send({ email: asesorEmail, password: asesorPass });
@@ -95,8 +96,19 @@ describe('Captacion — Prospectos', () => {
     const ag = agent();
     await loginAsesor(ag);
     const res = await ag.post('/api/captacion/prospectos').send({
-      empresa_codigo: 'NO-EXISTE',
+      empresa_codigo: 'NO-EXISTE', acepta_habeas_data: true,
       nombres: 'Juan', apellidos: 'Pérez', cedula: '11111111', celular: '3001234567',
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test('POST /prospectos — sin habeas_data → 400', async () => {
+    const ag = agent();
+    await loginAsesor(ag);
+    const res = await ag.post('/api/captacion/prospectos').send({
+      empresa_codigo: empresaCodigo,
+      nombres: 'Juan', apellidos: 'Pérez', cedula: '11111111', celular: '3001234567',
+      // acepta_habeas_data omitido
     });
     expect(res.status).toBe(400);
   });
@@ -108,21 +120,24 @@ describe('Captacion — Prospectos', () => {
     expect(res.status).toBe(400);
   });
 
-  test('POST /prospectos — crea correctamente y devuelve token', async () => {
+  test('POST /prospectos — crea correctamente con habeas_data e interés', async () => {
     const ag = agent();
     await loginAsesor(ag);
     const res = await ag.post('/api/captacion/prospectos').send({
-      empresa_codigo: empresaCodigo,
-      nombres  : 'Juan',
-      apellidos: 'Pérez',
-      cedula   : '11111111',
-      celular  : '3001234567',
-      correo   : 'juan@test.com',
+      empresa_codigo    : empresaCodigo,
+      nombres           : 'Juan',
+      apellidos         : 'Pérez',
+      cedula            : '11111111',
+      celular           : '3001234567',
+      correo            : 'juan@test.com',
+      acepta_habeas_data: true,
+      interes_principal : 'credito',
     });
     expect(res.status).toBe(201);
     expect(res.body).toHaveProperty('id');
     expect(res.body).toHaveProperty('token');
     expect(res.body.token).toHaveLength(43); // base64url 32 bytes
+    expect(res.body.interes_principal).toBe('credito');
     prospectoId = res.body.id;
     rawToken    = res.body.token;
   });
@@ -131,7 +146,7 @@ describe('Captacion — Prospectos', () => {
     const ag = agent();
     await loginAsesor(ag);
     const res = await ag.post('/api/captacion/prospectos').send({
-      empresa_codigo: empresaCodigo,
+      empresa_codigo: empresaCodigo, acepta_habeas_data: true,
       nombres: 'Juan', apellidos: 'Pérez', cedula: '11111111', celular: '3001234567',
     });
     expect(res.status).toBe(409);
@@ -190,6 +205,29 @@ describe('Captacion — Endpoints públicos', () => {
     expect(res.status).toBe(404);
   });
 
+  test('GET /pub/:token — link expirado → 410 con datos accionables', async () => {
+    // Crear prospecto con token ya expirado
+    const { rows: [exp] } = await pool.query(
+      `INSERT INTO captacion_prospectos
+         (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular,
+          token_hash, token, acepta_habeas_data, habeas_data_at,
+          token_expira_at)
+       VALUES ($1,$2,'Vencido','Test','99999999','3000000000',
+               'hash-exp-test','token-exp-test', true, NOW(),
+               NOW() - INTERVAL '1 day')
+       RETURNING id`,
+      [empresaCodigo, asesorUuid]
+    );
+    const res = await request(app).get('/api/captacion/pub/token-exp-test');
+    expect(res.status).toBe(410);
+    expect(res.body).toHaveProperty('nombres', 'Vencido');
+    expect(res.body).toHaveProperty('asesor_nombre');
+    expect(res.body.error).toMatch(/expirado/i);
+    // Cleanup
+    await pool.query(`DELETE FROM captacion_eventos WHERE prospecto_id = $1`, [exp.id]);
+    await pool.query(`DELETE FROM captacion_prospectos WHERE id = $1`, [exp.id]);
+  });
+
   test('GET /pub/:token — token válido devuelve datos básicos', async () => {
     const res = await request(app).get(`/api/captacion/pub/${rawToken}`);
     expect(res.status).toBe(200);
@@ -218,12 +256,15 @@ describe('Captacion — Endpoints públicos', () => {
     expect(res.status).toBe(403);
   });
 
-  test('POST /pub/:token/step-up — últimos 4 dígitos correctos → 200', async () => {
+  test('POST /pub/:token/step-up — últimos 4 dígitos correctos → devuelve stepup_token', async () => {
     const res = await request(app)
       .post(`/api/captacion/pub/${rawToken}/step-up`)
       .send({ digitos: '1111' }); // cedula = '11111111'
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+    expect(res.body).toHaveProperty('stepup_token');
+    expect(typeof res.body.stepup_token).toBe('string');
+    stepupToken = res.body.stepup_token; // guardar para usar en firma
   });
 
   test('PUT /pub/:token/personal — guarda sección y crea vinculación', async () => {
@@ -331,13 +372,25 @@ describe('Captacion — Endpoints públicos', () => {
     expect(res.status).toBe(200);
   });
 
+  test('POST /pub/:token/firmar — sin step-up token → 403', async () => {
+    const res = await request(app)
+      .post(`/api/captacion/pub/${rawToken}/firmar`)
+      .send({
+        firma_png: 'data:image/png;base64,iVBORw0KGgo=',
+        firma_trazos: [{ x: 10, y: 20, t: 100 }],
+        version_consentimiento: 'v1.0', acepta_terminos: true,
+      });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('STEPUP_REQUIRED');
+  });
+
   test('POST /pub/:token/firmar — sin PEP respondido → 400', async () => {
-    // Limpiar PEP para forzar el error
     await pool.query(
       `UPDATE captacion_vinculaciones SET seccion_pep_at = NULL WHERE id = $1`, [vinculacionId]
     );
     const res = await request(app)
       .post(`/api/captacion/pub/${rawToken}/firmar`)
+      .set('x-stepup-token', stepupToken)
       .send({
         firma_png             : 'data:image/png;base64,iVBORw0KGgo=',
         firma_trazos          : [{ x: 10, y: 20, t: 100 }],
@@ -347,13 +400,14 @@ describe('Captacion — Endpoints públicos', () => {
     expect(res.status).toBe(400);
   });
 
-  test('POST /pub/:token/firmar — con PEP → solicitud_completa', async () => {
+  test('POST /pub/:token/firmar — con PEP y step-up → solicitud_completa', async () => {
     // Restaurar PEP
     await pool.query(
       `UPDATE captacion_vinculaciones SET seccion_pep_at = NOW() WHERE id = $1`, [vinculacionId]
     );
     const res = await request(app)
       .post(`/api/captacion/pub/${rawToken}/firmar`)
+      .set('x-stepup-token', stepupToken)
       .send({
         firma_png             : 'data:image/png;base64,iVBORw0KGgo=',
         firma_trazos          : [{ x: 10, y: 20, t: 100 }, { x: 15, y: 25, t: 150 }],
@@ -454,8 +508,10 @@ describe('Captacion — Sync cross-check', () => {
     );
     const { rows: [p] } = await pool.query(
       `INSERT INTO captacion_prospectos
-         (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular, token_hash, token)
-       VALUES ($1, $2, 'Test', 'Sync', '77777777', '3000000000', 'hash-sync-test', 'token-sync-test')
+         (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular,
+          token_hash, token, acepta_habeas_data, habeas_data_at)
+       VALUES ($1, $2, 'Test', 'Sync', '77777777', '3000000000',
+               'hash-sync-test', 'token-sync-test', true, NOW())
        RETURNING id`,
       [syncEmpresa, asesorUuid]
     );

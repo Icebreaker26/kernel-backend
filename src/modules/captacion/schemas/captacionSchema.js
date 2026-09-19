@@ -1,12 +1,14 @@
 import { z } from 'zod';
 
 export const crearProspectoSchema = z.object({
-  empresa_codigo : z.string().min(1),
-  nombres        : z.string().min(1),
-  apellidos      : z.string().min(1),
-  cedula         : z.string().min(3),
-  celular        : z.string().min(7),
-  correo         : z.string().email().optional().or(z.literal('')),
+  empresa_codigo    : z.string().min(1),
+  nombres           : z.string().min(1),
+  apellidos         : z.string().min(1),
+  cedula            : z.string().min(3),
+  celular           : z.string().min(7),
+  correo            : z.string().email().optional().or(z.literal('')),
+  acepta_habeas_data: z.literal(true, { errorMap: () => ({ message: 'Debe aceptar el tratamiento de datos personales' }) }),
+  interes_principal : z.enum(['credito','ahorro','seguros','sorteos','otro']).optional(),
 });
 
 export const toqueSchema = z.object({

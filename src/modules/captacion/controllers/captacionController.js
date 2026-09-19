@@ -672,7 +672,9 @@ export const getConfigWeb = async (req, res, next) => {
       puedeConfigurar(req.user),
     ]);
     let candidatos = [];
+    let embudo = null;
     if (editable) {
+      embudo = await embudoWeb();
       ({ rows: candidatos } = await pool.query(
         `SELECT u.id, u.nombre, u.email FROM global_usuarios u WHERE ${SQL_PUEDE_CAPTAR} ORDER BY u.nombre`));
     }
@@ -681,6 +683,7 @@ export const getConfigWeb = async (req, res, next) => {
       asesor: asesor ?? null,
       puede_configurar: editable,
       candidatos,
+      embudo,   // solo para quien puede configurar
     });
   } catch (err) { next(err); }
 };
@@ -710,6 +713,30 @@ export const pubGetWeb = async (_req, res, next) => {
     );
     res.json({ disponible: true, empresas, tarifas: TARIFAS });
   } catch (err) { next(err); }
+};
+
+// Cuenta una visita a /asociate (una por sesión del navegador; el frontend lo pide una sola vez). Solo la fecha.
+export const pubVisitaWeb = async (_req, res, next) => {
+  try {
+    await pool.query('INSERT INTO captacion_web_visitas DEFAULT VALUES');
+    res.status(204).end();
+  } catch (err) { next(err); }
+};
+
+// Embudo de los últimos 30 días de la página web: visitas -> inician -> se identifican -> firman
+const embudoWeb = async (dias = 30) => {
+  const [{ rows: [v] }, { rows: [e] }] = await Promise.all([
+    pool.query(`SELECT COUNT(*)::int AS visitas FROM captacion_web_visitas WHERE created_at > NOW() - make_interval(days => $1)`, [dias]),
+    pool.query(
+      `SELECT COUNT(*)::int AS iniciados,
+              COUNT(*) FILTER (WHERE NOT (p.cedula LIKE 'STAND_%' AND p.nombres = ''))::int AS identificados,
+              COUNT(*) FILTER (WHERE vi.seccion_firma_at IS NOT NULL)::int AS firmados
+         FROM captacion_eventos ev
+         JOIN captacion_prospectos p ON p.id = ev.prospecto_id
+         LEFT JOIN captacion_vinculaciones vi ON vi.prospecto_id = p.id AND vi.is_active = true
+        WHERE ev.tipo = 'web_init' AND ev.created_at > NOW() - make_interval(days => $1)`, [dias]),
+  ]);
+  return { dias, ...v, ...e };
 };
 
 export const pubIniciarDesdeWeb = async (req, res, next) => {

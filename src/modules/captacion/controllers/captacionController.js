@@ -13,7 +13,7 @@ import {
   crearProspectoSchema, toqueSchema, updateProspectoSchema,
   seccionPersonalSchema, seccionLaboralSchema, seccionPepSchema,
   seccionFinancieraSchema, seccionAportesSchema, seccionBeneficiariosSchema, seccionReferenciasSchema,
-  seccionFirmaSchema, stepUpSchema, valoresAsesorSchema,
+  seccionFirmaSchema, stepUpSchema, valoresAsesorSchema, habeasDataSchema,
 } from '../schemas/captacionSchema.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -30,6 +30,8 @@ const calcScore = `(
 const VERSION_CONSENTIMIENTO = 'v1.0';
 // Texto del consentimiento a firmar electrónicamente; súbelo si cambia la redacción en el formulario.
 const VERSION_FIRMA_ELECTRONICA = 'fe-v1.0';
+// Texto de la autorización de tratamiento de datos (Ley 1581 de 2012); súbelo si cambia la redacción.
+const VERSION_HABEAS_DATA = 'hd-v1.0';
 
 // Tras la entrega la solicitud está en procesamiento: ni el asociado ni el asesor pueden modificarla.
 // Antes de la entrega SÍ se puede completar o corregir (subsanar) aunque ya esté firmada.
@@ -71,8 +73,8 @@ export const crearProspecto = async (req, res, next) => {
     const { rows: [p] } = await pool.query(
       `INSERT INTO captacion_prospectos
          (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular, correo,
-          token_hash, token, acepta_habeas_data, habeas_data_at, interes_principal)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, true, NOW(), $10)
+          token_hash, token, acepta_habeas_data, habeas_data_at, habeas_data_origen, interes_principal)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, true, NOW(), 'asesor', $10)
        RETURNING id, nombres, apellidos, cedula, celular, correo, empresa_codigo,
                  estado, interes_principal, created_at`,
       [data.empresa_codigo, req.user.id, data.nombres, data.apellidos,
@@ -526,8 +528,8 @@ const crearProspectoSinIdentificar = async ({ empresaCodigo, asesorUuid, ip, eve
   const { rows: [p] } = await pool.query(
     `INSERT INTO captacion_prospectos
        (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular,
-        token_hash, token, acepta_habeas_data, habeas_data_at)
-     VALUES ($1, $2, '', '', $3, '', $4, $5, true, NOW())
+        token_hash, token)
+     VALUES ($1, $2, '', '', $3, '', $4, $5)
      RETURNING id, token`,
     [empresaCodigo, asesorUuid, placeholderCedula, hashToken(rawToken), rawToken]
   );
@@ -641,9 +643,9 @@ export const initStandProspecto = async (req, res, next) => {
     const { rows: [p] } = await pool.query(
       `INSERT INTO captacion_prospectos
          (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular,
-          token_hash, token, acepta_habeas_data, habeas_data_at)
+          token_hash, token)
        VALUES ($1, $2, '', '', $3, '',
-               $4, $5, true, NOW())
+               $4, $5)
        RETURNING id, token`,
       [req.body.empresa_codigo || null, req.user.id, placeholderCedula, tokenHash, rawToken]
     );
@@ -660,6 +662,8 @@ export const initStandProspecto = async (req, res, next) => {
 
 export const getValoresAsesor = async (req, res, next) => {
   try {
+    // Cada asesor solo ve sus propios valores (antes bastaba con cambiar el UUID de la URL)
+    if (req.params.uuid !== req.user.id) return res.status(403).json({ error: 'Solo puedes ver tus propios valores' });
     const asesor_uuid = req.params.uuid;
     const { rows: [r] } = await pool.query(`
       SELECT
@@ -694,7 +698,7 @@ export const getValoresAsesor = async (req, res, next) => {
 const resolverToken = async (rawToken) => {
   const { rows: [p] } = await pool.query(
     `SELECT id, nombres, apellidos, cedula, celular, correo, empresa_codigo,
-            estado, ping_count, token_expira_at, asesor_uuid
+            estado, ping_count, token_expira_at, asesor_uuid, habeas_data_origen
        FROM captacion_prospectos
       WHERE token = $1 AND is_active = true`,
     [rawToken]
@@ -756,6 +760,9 @@ export const pubGetProspecto = async (req, res, next) => {
       asesor: { nombre: asesor?.nombre, avatar_url: asesor?.avatar_url, celular: p.celular },
       version_consentimiento: VERSION_CONSENTIMIENTO,
       version_firma_electronica: VERSION_FIRMA_ELECTRONICA,
+      // La autorización de datos la tiene que aceptar la propia persona antes de darnos los suyos
+      requiere_habeas_data: p.habeas_data_origen !== 'titular',
+      version_habeas_data: VERSION_HABEAS_DATA,
       tarifas: TARIFAS,
       vinculacion: v || null,
     });
@@ -783,6 +790,46 @@ export const pubPing = async (req, res, next) => {
     );
 
     res.json({ ok: true });
+  } catch (err) { next(err); }
+};
+
+// ── Autorización de tratamiento de datos (Ley 1581 de 2012) ─────────────────
+// La acepta el titular en el formulario. Queda con versión del texto, fecha, IP y user agent.
+export const pubAceptarHabeasData = async (req, res, next) => {
+  try {
+    const p = await resolverToken(req.params.token);
+    if (!p) return res.status(404).json({ error: 'Link no válido' });
+    const data = habeasDataSchema.parse(req.body);
+    if (data.version !== VERSION_HABEAS_DATA) {
+      return res.status(400).json({ error: 'El texto de la autorización cambió: recarga el formulario', code: 'HABEAS_VERSION' });
+    }
+    if (p.habeas_data_origen === 'titular') return res.json({ ok: true, ya_aceptada: true });
+
+    await pool.query(
+      `UPDATE captacion_prospectos
+          SET acepta_habeas_data = true, habeas_data_at = NOW(), habeas_data_origen = 'titular',
+              habeas_data_version = $2, habeas_data_ip = $3, updated_at = NOW()
+        WHERE id = $1`,
+      [p.id, data.version, req.ip]
+    );
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, tipo, autor_tipo, ip, user_agent, payload)
+       VALUES ($1,'habeas_data_aceptado','prospecto',$2,$3,$4)`,
+      [p.id, req.ip, req.headers['user-agent'] || null, JSON.stringify({ version: data.version })]
+    );
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+};
+
+// Middleware: no se reciben datos personales ni se firma mientras el titular no haya aceptado la autorización
+export const exigirHabeasData = async (req, res, next) => {
+  try {
+    const p = await resolverToken(req.params.token);
+    if (!p) return res.status(404).json({ error: 'Link no válido' });
+    if (p.habeas_data_origen !== 'titular') {
+      return res.status(403).json({ error: 'Antes de continuar debes aceptar la autorización de tratamiento de datos', code: 'HABEAS_DATA_REQUERIDO' });
+    }
+    next();
   } catch (err) { next(err); }
 };
 

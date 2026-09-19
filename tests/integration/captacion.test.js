@@ -255,6 +255,55 @@ describe('Captacion — Endpoints públicos', () => {
     expect(p.estado).toBe('vio_landing');
   });
 
+  describe('autorización de tratamiento de datos (Ley 1581)', () => {
+    const url = () => `/api/captacion/pub/${rawToken}`;
+
+    test('el GET público la pide aunque el asesor la haya declarado, y sin ella no se reciben datos ni se firma', async () => {
+      const get = await request(app).get(url());
+      expect(get.body.requiere_habeas_data).toBe(true);
+      expect(get.body.version_habeas_data).toBe('hd-v1.0');
+
+      const bloqueados = [
+        request(app).put(`${url()}/personal`).send({ celular: '3109998877' }),
+        request(app).put(`${url()}/laboral`).send({ cargo: 'X' }),
+        request(app).post(`${url()}/otp`),
+        request(app).post(`${url()}/step-up`).send({ codigo: '123456' }),
+        request(app).post(`${url()}/firmar`).send({}),
+        request(app).post(`${url()}/documentos/frente/solicitar`).send({ nombre: 'a.jpg', mime: 'image/jpeg', size: 1000 }),
+      ];
+      for (const r of await Promise.all(bloqueados)) {
+        expect(r.status).toBe(403);
+        expect(r.body.code).toBe('HABEAS_DATA_REQUERIDO');
+      }
+    });
+
+    test('POST /habeas-data — exige aceptar y la versión vigente del texto', async () => {
+      expect((await request(app).post(`${url()}/habeas-data`).send({ acepta: false, version: 'hd-v1.0' })).status).toBe(400);
+      expect((await request(app).post(`${url()}/habeas-data`).send({ version: 'hd-v1.0' })).status).toBe(400);
+      const vieja = await request(app).post(`${url()}/habeas-data`).send({ acepta: true, version: 'hd-v0.1' });
+      expect(vieja.status).toBe(400);
+      expect(vieja.body.code).toBe('HABEAS_VERSION');
+      expect((await request(app).post('/api/captacion/pub/no-existe/habeas-data').send({ acepta: true, version: 'hd-v1.0' })).status).toBe(404);
+    });
+
+    test('al aceptarla queda con versión, fecha, IP y evento; aceptar de nuevo no la cambia', async () => {
+      const res = await request(app).post(`${url()}/habeas-data`).send({ acepta: true, version: 'hd-v1.0' });
+      expect(res.status).toBe(200);
+      const { rows: [p] } = await pool.query(
+        `SELECT acepta_habeas_data, habeas_data_origen, habeas_data_version, habeas_data_at, habeas_data_ip
+           FROM captacion_prospectos WHERE id = $1`, [prospectoId]);
+      expect(p).toMatchObject({ acepta_habeas_data: true, habeas_data_origen: 'titular', habeas_data_version: 'hd-v1.0' });
+      expect(p.habeas_data_at).toBeTruthy();
+      expect(p.habeas_data_ip).toBeTruthy();
+      expect((await pool.query(`SELECT 1 FROM captacion_eventos WHERE prospecto_id = $1 AND tipo = 'habeas_data_aceptado'`, [prospectoId])).rowCount).toBe(1);
+
+      const otra = await request(app).post(`${url()}/habeas-data`).send({ acepta: true, version: 'hd-v1.0' });
+      expect(otra.body.ya_aceptada).toBe(true);
+      expect((await pool.query(`SELECT 1 FROM captacion_eventos WHERE prospecto_id = $1 AND tipo = 'habeas_data_aceptado'`, [prospectoId])).rowCount).toBe(1);
+      expect((await request(app).get(url())).body.requiere_habeas_data).toBe(false);
+    });
+  });
+
   describe('verificación por código (OTP) al correo', () => {
     const otpUrl    = () => `/api/captacion/pub/${rawToken}/otp`;
     const stepupUrl = () => `/api/captacion/pub/${rawToken}/step-up`;
@@ -1313,6 +1362,33 @@ describe('Captacion — Prospectos del stand sin identificar', () => {
     expect(res.body.total_prospectos).toBe(Number(n));
   });
 
+  test('GET /valores/:uuid — un asesor no puede ver los valores de otro (IDOR) → 403', async () => {
+    const otroEmail = 'captacion-test-idor@kernel.test';
+    const hash = await bcrypt.hash(asesorPass, 4);
+    const { rows: [otro] } = await pool.query(
+      `INSERT INTO global_usuarios (nombre, email, password_hash, rol, is_active, is_approved)
+       VALUES ('Otro Asesor Idor', $1, $2, 'asesor', true, true)
+       ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash
+       RETURNING id`, [otroEmail, hash]
+    );
+    await pool.query(
+      `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id)
+       SELECT $1, m.id, a.id FROM modulos m, acciones a
+        WHERE m.nombre = 'captacion' AND a.nombre = 'READ' ON CONFLICT DO NOTHING`, [otro.id]
+    );
+    try {
+      const ag = agent();
+      await ag.post('/api/auth/login').send({ email: otroEmail, password: asesorPass });
+      const ajeno = await ag.get(`/api/captacion/valores/${asesorUuid}`);
+      expect(ajeno.status).toBe(403);
+      expect(ajeno.body).not.toHaveProperty('total_prospectos');
+      expect((await ag.get(`/api/captacion/valores/${otro.id}`)).status).toBe(200); // los propios sí
+    } finally {
+      await pool.query(`DELETE FROM permisos WHERE usuario_uuid = $1`, [otro.id]);
+      await pool.query(`DELETE FROM global_usuarios WHERE id = $1`, [otro.id]);
+    }
+  });
+
   test('limpieza: solo da de baja los sin identificar viejos y sin vinculación', async () => {
     const bajas = await limpiarProspectosSinIdentificar({ horas: 24, asesorUuid });
     expect(bajas).toBe(1);
@@ -1325,6 +1401,10 @@ describe('Captacion — Prospectos del stand sin identificar', () => {
   });
 
   test('al escribir su nombre y documento en el paso 1, el prospecto deja de ser fantasma y aparece en la lista', async () => {
+    // Un prospecto del kiosco nace SIN autorización de datos: hay que aceptarla antes del paso 1
+    const sin = await request(app).put(`/api/captacion/pub/${ids.reciente.token}/personal`).send({ nombres: 'Luisa', apellidos: 'Del Stand', cedula: '88888888' });
+    expect(sin.status).toBe(403);
+    expect((await request(app).post(`/api/captacion/pub/${ids.reciente.token}/habeas-data`).send({ acepta: true, version: 'hd-v1.0' })).status).toBe(200);
     const res = await request(app)
       .put(`/api/captacion/pub/${ids.reciente.token}/personal`)
       .send({ nombres: 'Luisa', apellidos: 'Del Stand', cedula: '88888888' });
@@ -1384,7 +1464,10 @@ describe('Captacion — Enlace público para grupos', () => {
     expect(res.body.token).toHaveLength(43);
 
     const { rows: [p] } = await pool.query(
-      `SELECT id, asesor_uuid, empresa_codigo, nombres, cedula FROM captacion_prospectos WHERE token = $1`, [res.body.token]);
+      `SELECT id, asesor_uuid, empresa_codigo, nombres, cedula, acepta_habeas_data, habeas_data_origen
+         FROM captacion_prospectos WHERE token = $1`, [res.body.token]);
+    // Nadie ha aceptado nada todavía: la autorización la da la persona en el formulario
+    expect(p).toMatchObject({ acepta_habeas_data: false, habeas_data_origen: null });
     expect(p.asesor_uuid).toBe(asesorUuid);
     expect(p.empresa_codigo).toBe(empresaCodigo);
     expect(p.nombres).toBe('');
@@ -1401,6 +1484,7 @@ describe('Captacion — Enlace público para grupos', () => {
     const get = await request(app).get(`/api/captacion/pub/${res.body.token}`);
     expect(get.status).toBe(200);
     expect(get.body.requiere_identificacion).toBe(true);
+    expect(get.body.requiere_habeas_data).toBe(true);
   });
 
   test('renovar genera un enlace nuevo e invalida el anterior', async () => {

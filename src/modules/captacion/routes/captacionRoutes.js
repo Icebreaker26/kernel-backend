@@ -6,6 +6,7 @@ import * as ctrl from '../controllers/captacionController.js';
 
 const router = Router();
 const auditarPub = ctrl.auditarCambioPosteriorAFirma('prospecto');
+const exigirHabeas = ctrl.exigirHabeasData;
 const auditarAsesor = ctrl.auditarCambioPosteriorAFirma('asesor');
 
 // Headers de privacidad para todos los endpoints públicos
@@ -28,18 +29,19 @@ router.use('/pub/:token', privacyHeaders, captacionPublicLimiter);
 
 router.get ('/pub/:token',                                ctrl.pubGetProspecto);
 router.post('/pub/:token/ping',                           ctrl.pubPing);
-router.post('/pub/:token/otp',                            ctrl.pubSolicitarOtp);
-router.post('/pub/:token/step-up',                        ctrl.pubStepUp);
-router.put ('/pub/:token/personal',                       auditarPub, ctrl.pubSeccionPersonal);
-router.put ('/pub/:token/laboral',                        auditarPub, ctrl.pubSeccionLaboral);
-router.put ('/pub/:token/pep',                            auditarPub, ctrl.pubSeccionPepHandler);
-router.put ('/pub/:token/financiera',                     auditarPub, ctrl.pubSeccionFinanciera);
-router.put ('/pub/:token/aportes',                        auditarPub, ctrl.pubSeccionAportes);
-router.put ('/pub/:token/beneficiarios',                  auditarPub, ctrl.pubSeccionBeneficiarios);
-router.put ('/pub/:token/referencias',                    auditarPub, ctrl.pubSeccionReferencias);
-router.post('/pub/:token/firmar',                         ctrl.pubFirmar);
-router.post('/pub/:token/documentos/:lado/solicitar',     ctrl.pubSolicitarUploadCedula);
-router.patch('/pub/:token/documentos/:lado/confirmar',    auditarPub, ctrl.pubConfirmarUploadCedula);
+router.post('/pub/:token/habeas-data',                    ctrl.pubAceptarHabeasData);
+router.post('/pub/:token/otp',                            exigirHabeas, ctrl.pubSolicitarOtp);
+router.post('/pub/:token/step-up',                        exigirHabeas, ctrl.pubStepUp);
+router.put ('/pub/:token/personal',                       exigirHabeas, auditarPub, ctrl.pubSeccionPersonal);
+router.put ('/pub/:token/laboral',                        exigirHabeas, auditarPub, ctrl.pubSeccionLaboral);
+router.put ('/pub/:token/pep',                            exigirHabeas, auditarPub, ctrl.pubSeccionPepHandler);
+router.put ('/pub/:token/financiera',                     exigirHabeas, auditarPub, ctrl.pubSeccionFinanciera);
+router.put ('/pub/:token/aportes',                        exigirHabeas, auditarPub, ctrl.pubSeccionAportes);
+router.put ('/pub/:token/beneficiarios',                  exigirHabeas, auditarPub, ctrl.pubSeccionBeneficiarios);
+router.put ('/pub/:token/referencias',                    exigirHabeas, auditarPub, ctrl.pubSeccionReferencias);
+router.post('/pub/:token/firmar',                         exigirHabeas, ctrl.pubFirmar);
+router.post('/pub/:token/documentos/:lado/solicitar',     exigirHabeas, ctrl.pubSolicitarUploadCedula);
+router.patch('/pub/:token/documentos/:lado/confirmar',    exigirHabeas, auditarPub, ctrl.pubConfirmarUploadCedula);
 
 // ── Endpoints internos (auth + ACL) ──────────────────────────────────────────
 router.use(verifyToken);

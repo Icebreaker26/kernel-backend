@@ -141,6 +141,12 @@ export const seccionFirmaSchema = z.object({
 });
 
 // Código de un solo uso que se envía al correo del asociado
+// Autorización de tratamiento de datos aceptada por el titular en el formulario
+export const habeasDataSchema = z.object({
+  acepta : z.literal(true),
+  version: z.string().min(1),
+});
+
 export const stepUpSchema = z.object({
   codigo: z.string().regex(/^\d{6}$/, 'El código tiene 6 dígitos'),
 });

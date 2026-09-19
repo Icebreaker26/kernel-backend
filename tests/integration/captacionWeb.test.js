@@ -4,6 +4,7 @@ import { createApp } from '../../src/createApp.js';
 import pool from '../../src/db/database.js';
 
 let app;
+const INICIO = new Date();   // las visitas de prueba se borran al terminar
 const pass = 'testpass123';
 const empresa = 'EMP-WEB-TEST';
 const usuarios = {
@@ -39,6 +40,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   const ids = Object.values(usuarios).map((u) => u.id);
+  await pool.query(`DELETE FROM captacion_web_visitas WHERE created_at >= $1`, [INICIO]);
   await pool.query(`DELETE FROM captacion_config WHERE clave = 'web_asesor_uuid'`);
   await pool.query(`DELETE FROM captacion_eventos WHERE prospecto_id IN (SELECT id FROM captacion_prospectos WHERE asesor_uuid = ANY($1))`, [ids]);
   await pool.query(`DELETE FROM captacion_vinculaciones WHERE prospecto_id IN (SELECT id FROM captacion_prospectos WHERE asesor_uuid = ANY($1))`, [ids]);
@@ -144,6 +146,30 @@ describe('Captación — configuración de la página /asociate (desde la interf
     expect(fila.origen).toBe('web');
   });
 
+  test('embudo: cuenta visitas, prospectos que inician, se identifican y firman; solo lo ve quien puede configurar', async () => {
+    const ag = await login('configurador');
+    const antes = (await ag.get('/api/captacion/config/web')).body.embudo;
+    expect(Object.keys(antes).sort()).toEqual(['dias', 'firmados', 'identificados', 'iniciados', 'visitas']);
+
+    expect((await request(app).post('/api/captacion/pub/web/visita')).status).toBe(204);
+    expect((await request(app).post('/api/captacion/pub/web/visita')).status).toBe(204);
+    await request(app).post('/api/captacion/pub/web/iniciar').send({ empresa_codigo: empresa });   // inicia y no se identifica
+
+    const despues = (await ag.get('/api/captacion/config/web')).body.embudo;
+    expect(despues.visitas - antes.visitas).toBe(2);
+    expect(despues.iniciados - antes.iniciados).toBe(1);
+    expect(despues.identificados - antes.identificados).toBe(0);   // el nuevo no escribió su nombre
+    expect(despues.identificados).toBeGreaterThanOrEqual(1);       // Ana Web (test anterior) sí
+    expect(despues.firmados).toBe(antes.firmados);
+
+    // Lo que se guarda de una visita es solo la fecha
+    const { rows } = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'captacion_web_visitas' ORDER BY 1`);
+    expect(rows.map((r) => r.column_name)).toEqual(['created_at', 'id']);
+
+    // Un lector no ve el embudo
+    expect((await (await login('lector')).get('/api/captacion/config/web')).body.embudo).toBeNull();
+  });
+
   test('si el asesor elegido se desactiva, la página avisa que no está disponible y el panel no lo muestra', async () => {
     await pool.query(`UPDATE global_usuarios SET is_active = false WHERE id = $1`, [usuarios.asesor.id]);
     try {
@@ -186,5 +212,18 @@ describe('Captación — presencia para el mapa de la presentación', () => {
     expect(res.body.ciudades).toContain(CIUDAD);                       // activo, con espacios y minúsculas → normalizado
     expect(res.body.ciudades).not.toContain('CIUDAD INACTIVA DE PRUEBA'); // los inactivos no cuentan
     expect(JSON.stringify(res.body)).not.toMatch(/kernel\.test|9999996/); // nada de asociados
+  });
+});
+
+describe('Captación — cifras para la página de inicio', () => {
+  test('GET /pub/sitio — público, solo agregados y tarifas oficiales; los inactivos no cuentan', async () => {
+    const res = await request(app).get('/api/captacion/pub/sitio');
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(['asociados', 'empresas', 'tarifas']);
+    const { rows: [r] } = await pool.query(
+      `SELECT COUNT(*)::int AS a, COUNT(DISTINCT empresa_dsto)::int AS e FROM asociados WHERE is_active = true`);
+    expect(res.body).toMatchObject({ asociados: r.a, empresas: r.e });
+    expect(res.body.tarifas).toMatchObject({ aporte_minimo: 74000, fondo_bienestar: 5300, cuota_admision: 35000 });
+    expect(res.headers['cache-control']).toMatch(/public/);
   });
 });

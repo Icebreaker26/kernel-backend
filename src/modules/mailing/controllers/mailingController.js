@@ -18,6 +18,7 @@ const getDestinatarios = async (segmento = {}) => {
       SELECT codigo, nombre, apellido, email
       FROM asociados
       WHERE is_active = true AND email IS NOT NULL AND email <> ''
+        AND NOT EXISTS (SELECT 1 FROM email_bajas eb WHERE eb.is_active AND lower(eb.email) = lower(asociados.email))
       ORDER BY apellido, nombre
     `);
     return rows;
@@ -28,6 +29,7 @@ const getDestinatarios = async (segmento = {}) => {
     FROM asociados a
     WHERE a.is_active = true
       AND a.email IS NOT NULL AND a.email <> ''
+      AND NOT EXISTS (SELECT 1 FROM email_bajas eb WHERE eb.is_active AND lower(eb.email) = lower(a.email))
       AND (
         ($1::text[]  <> '{}'::text[]  AND a.empresa_dsto = ANY($1::text[]))
         OR

@@ -116,3 +116,17 @@ export const enlacePublicoLimiter = isTest
       handler: (_req, res) =>
         res.status(429).json({ error: 'Demasiados intentos desde esta conexión. Inténtalo de nuevo en unos minutos.' }),
     });
+
+// ── Baja de avisos por enlace (público): por IP ─────────────────────────────
+export const bajaLimiter = isTest
+  ? (_req, _res, next) => next()
+  : rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 30,
+      standardHeaders: true,
+      legacyHeaders: false,
+      store: makeStore('email_baja'),
+      keyGenerator: (req) => ipKeyGenerator(req),
+      handler: (_req, res) =>
+        res.status(429).json({ error: 'Demasiados intentos. Inténtalo de nuevo en unos minutos.' }),
+    });

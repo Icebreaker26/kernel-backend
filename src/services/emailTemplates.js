@@ -126,7 +126,8 @@ export const buildCredencialesHtml = (codigo, password) => {
 
 // ── Template: campaña de mailing ──────────────────────────────────────────────
 // cuerpoHtml: fragmento HTML generado por plantillaHtml.js (frontend) o escrito a mano
-export const buildCampanaHtml = (asunto, cuerpoHtml) => {
+// urlBaja: enlace personal para dejar de recibir avisos (se agrega un pie con el enlace)
+export const buildCampanaHtml = (asunto, cuerpoHtml, urlBaja = null) => {
   const url = portalUrl();
   const body = `
     ${header()}
@@ -141,7 +142,13 @@ export const buildCampanaHtml = (asunto, cuerpoHtml) => {
           IR AL PORTAL &rarr;
         </a>
       </td>
-    </tr>`;
+    </tr>
+    ${urlBaja ? `<tr>
+      <td align="center" style="padding:0 32px 24px;color:#94a3b8;font-size:11px;line-height:1.6;font-family:Arial,sans-serif;">
+        Recibes este mensaje porque eres asociado de la Cooperativa Progresemos.<br>
+        Si no deseas recibir m&aacute;s avisos, <a href="${esc(urlBaja)}" style="color:#64748b;text-decoration:underline;">deja de recibirlos aqu&iacute;</a>.
+      </td>
+    </tr>` : ''}`;
 
   return wrapper(asunto, body);
 };

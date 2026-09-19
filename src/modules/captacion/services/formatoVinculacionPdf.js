@@ -266,6 +266,23 @@ const pagina2 = (p, d, firmaImg) => {
     p.page.drawImage(firmaImg, { x: 252 + (caja.ancho - w) / 2, y: p.y(696) , width: w, height: h });
   }
 
+  // Recuadro de huella: la vinculación se firma electrónicamente (Ley 527 de 1999), así que en lugar
+  // de huella se deja la constancia con el hash SHA-256 del documento firmado. Sin firma, queda en blanco.
+  if (d.firma_doc_hash && d.firma_at) {
+    const cx = 575.5;
+    const cuando = new Date(d.firma_at);
+    const fecha = Number.isNaN(cuando.getTime()) ? '' : cuando.toLocaleString('es-CO', { timeZone: 'America/Bogota', dateStyle: 'short', timeStyle: 'short' });
+    let top = 606;
+    const linea = (t, size, font) => { texto(t, cx, top, { size, centrar: true, font, ancho: 78 }); top += size + 3; };
+    linea('FIRMADO', 7.5, p.negrita);
+    linea('ELECTRÓNICAMENTE', 6.5, p.negrita);
+    linea('Ley 527 de 1999', 5.5);
+    linea(fecha, 5.5);
+    top += 5;
+    linea('Hash SHA-256:', 5.5);
+    (String(d.firma_doc_hash).match(/.{1,16}/g) || []).forEach((t) => linea(t, 5.5));
+  }
+
   // Entrevista: quién atendió y cuándo
   texto(d.asesor_nombre, 82, 745.5, { ancho: 228 });
   texto(fechaCorta(d.firma_at || new Date()), 222, 772.5, { ancho: 88 });

@@ -728,6 +728,25 @@ export const pubIniciarDesdeWeb = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── Presencia de la cooperativa (diapositiva del mapa en la presentación pública) ──
+// Solo los nombres de las ciudades donde hay asociados activos: sin conteos ni datos de personas.
+// Se cachea unos minutos porque es público y la lista casi no cambia.
+let presenciaCache = { hasta: 0, ciudades: [] };
+
+export const pubPresencia = async (_req, res, next) => {
+  try {
+    if (Date.now() > presenciaCache.hasta || env.NODE_ENV === 'test') {
+      const { rows } = await pool.query(
+        `SELECT DISTINCT UPPER(TRIM(ciudad)) AS ciudad FROM asociados
+          WHERE is_active = true AND ciudad IS NOT NULL AND TRIM(ciudad) <> '' ORDER BY 1`
+      );
+      presenciaCache = { hasta: Date.now() + 10 * 60 * 1000, ciudades: rows.map((r) => r.ciudad) };
+    }
+    res.set('Cache-Control', 'public, max-age=600');
+    res.json({ ciudades: presenciaCache.ciudades });
+  } catch (err) { next(err); }
+};
+
 export const pubIniciarDesdeEnlace = async (req, res, next) => {
   try {
     const e = await enlacePublicoVigente(req.params.token);

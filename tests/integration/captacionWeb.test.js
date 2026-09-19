@@ -161,3 +161,30 @@ describe('Captación — configuración de la página /asociate (desde la interf
     expect((await request(app).get('/api/captacion/pub/web')).body).toEqual({ disponible: false });
   });
 });
+
+describe('Captación — presencia para el mapa de la presentación', () => {
+  const CIUDAD = 'CIUDAD DE PRUEBA MAPA';
+  const codigos = ['9999996001', '9999996002'];
+
+  beforeAll(async () => {
+    await pool.query(
+      `INSERT INTO asociados (codigo, nombre, apellido, empresa_dsto, nombre_empresa, email, ciudad, is_active)
+       VALUES ($1, 'Mapa', 'Activo', 'EMP_TEST', 'Empresa Test', 'mapa-a@kernel.test', $3, true),
+              ($2, 'Mapa', 'Inactivo', 'EMP_TEST', 'Empresa Test', 'mapa-b@kernel.test', 'CIUDAD INACTIVA DE PRUEBA', false)
+       ON CONFLICT (codigo) DO UPDATE SET ciudad = EXCLUDED.ciudad, is_active = EXCLUDED.is_active`,
+      [codigos[0], codigos[1], `  ${CIUDAD.toLowerCase()} `]
+    );
+  });
+  afterAll(async () => { await pool.query('DELETE FROM asociados WHERE codigo = ANY($1)', [codigos]); });
+
+  test('GET /pub/presencia — público, solo nombres de ciudades (normalizados, sin repetir) y sin datos de personas', async () => {
+    const res = await request(app).get('/api/captacion/pub/presencia');
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body)).toEqual(['ciudades']);
+    expect(res.body.ciudades.every((c) => typeof c === 'string' && c === c.toUpperCase() && c === c.trim())).toBe(true);
+    expect(new Set(res.body.ciudades).size).toBe(res.body.ciudades.length);
+    expect(res.body.ciudades).toContain(CIUDAD);                       // activo, con espacios y minúsculas → normalizado
+    expect(res.body.ciudades).not.toContain('CIUDAD INACTIVA DE PRUEBA'); // los inactivos no cuentan
+    expect(JSON.stringify(res.body)).not.toMatch(/kernel\.test|9999996/); // nada de asociados
+  });
+});

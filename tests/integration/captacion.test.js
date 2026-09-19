@@ -853,6 +853,19 @@ describe('Captacion — Vinculaciones internas', () => {
     expect(Array.isArray(res.body.referencias)).toBe(true);
   });
 
+  test('GET /vinculaciones/:id — trae la evidencia de la firma electrónica para el panel', async () => {
+    const ag = agent();
+    await loginAsesor(ag);
+    const { body: v } = await ag.get(`/api/captacion/vinculaciones/${vinculacionId}`);
+    expect(v.firma_electronica_version).toBe('fe-v1.0');
+    expect(v.firma_verificacion).toMatchObject({ canal: 'correo', destino: 'ju**@test.com' });
+    expect(v.firma_pdf_hash).toHaveLength(64);
+    expect(v.habeas_data_origen).toBe('titular');
+    expect(v.habeas_data_version).toBe('hd-v1.0');
+    expect(v.cambios_posteriores.map((c) => c.seccion)).toEqual(expect.arrayContaining(['aportes', 'laboral', 'valores']));
+    expect(v.cambios_posteriores.find((c) => c.seccion === 'valores').autor_tipo).toBe('asesor');
+  });
+
   test('GET /vinculaciones/:id/documentos — sin cédula cargada → frente y reverso null', async () => {
     const ag = agent();
     await loginAsesor(ag);

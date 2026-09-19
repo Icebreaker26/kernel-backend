@@ -271,7 +271,12 @@ export const getVinculacion = async (req, res, next) => {
     const { rows: [v] } = await pool.query(
       `SELECT v.*,
               p.nombres, p.apellidos, p.cedula, p.celular, p.correo, p.empresa_codigo,
+              p.habeas_data_at, p.habeas_data_origen, p.habeas_data_version,
               e.nombre AS empresa_nombre,
+              (SELECT json_agg(json_build_object('seccion', ev.seccion, 'autor_tipo', ev.autor_tipo, 'created_at', ev.created_at)
+                               ORDER BY ev.created_at DESC)
+                 FROM captacion_eventos ev
+                WHERE ev.vinculacion_id = v.id AND ev.tipo = 'cambio_posterior_a_firma') AS cambios_posteriores,
               json_agg(DISTINCT jsonb_build_object(
                 'id',b.id,'orden',b.orden,'identificacion',b.identificacion,
                 'nombres',b.nombres,'porcentaje',b.porcentaje,
@@ -288,7 +293,7 @@ export const getVinculacion = async (req, res, next) => {
          LEFT JOIN captacion_referencias r ON r.vinculacion_id = v.id
         WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true
         GROUP BY v.id, p.nombres, p.apellidos, p.cedula, p.celular, p.correo,
-                 p.empresa_codigo, e.nombre`,
+                 p.empresa_codigo, p.habeas_data_at, p.habeas_data_origen, p.habeas_data_version, e.nombre`,
       [req.params.id, req.user.id]
     );
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });

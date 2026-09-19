@@ -29,9 +29,6 @@ const envSchema = z.object({
   SES_ACCESS_KEY_ID:     z.string().min(16).optional(),
   SES_SECRET_ACCESS_KEY: z.string().min(32).optional(),
   REDIS_URL:             z.string().url().optional(),
-  // Asesor al que se asignan las solicitudes que llegan por la página pública /asociate (sin asesor previo).
-  // Si no se define, la página muestra que el servicio no está disponible.
-  CAPTACION_ASESOR_WEB_UUID: z.string().uuid().optional(),
   // true = lockdown middleware loguea pero NO bloquea (modo observación 2 semanas)
   LOCKDOWN_SHADOW_MODE:  z.string().optional().transform((v) => v === 'true'),
 });

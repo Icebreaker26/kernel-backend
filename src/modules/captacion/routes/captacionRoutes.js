@@ -64,6 +64,10 @@ router.get ('/prospectos/:id/whatsapp',        checkPermission('captacion', 'WRI
 
 router.get ('/valores/:uuid',                  checkPermission('captacion', 'READ'),     ctrl.getValoresAsesor);
 
+// Configuración de la página pública /asociate (el asesor se elige aquí, no en variables de entorno)
+router.get ('/config/web',                     checkPermission('captacion', 'READ'),       ctrl.getConfigWeb);
+router.put ('/config/web',                     checkPermission('captacion', 'CONFIGURAR'), ctrl.actualizarConfigWeb);
+
 router.get ('/vinculaciones',                  checkPermission('captacion', 'READ'),     ctrl.listarVinculaciones);
 router.get ('/vinculaciones/:id',              checkPermission('captacion', 'READ'),     ctrl.getVinculacion);
 router.get ('/vinculaciones/:id/documentos',   checkPermission('captacion', 'READ'),     ctrl.getDocumentosVinculacion);

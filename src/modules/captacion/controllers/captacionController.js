@@ -13,7 +13,7 @@ import {
   crearProspectoSchema, toqueSchema, updateProspectoSchema,
   seccionPersonalSchema, seccionLaboralSchema, seccionPepSchema,
   seccionFinancieraSchema, seccionAportesSchema, seccionBeneficiariosSchema, seccionReferenciasSchema,
-  seccionFirmaSchema, stepUpSchema, valoresAsesorSchema, habeasDataSchema, iniciarWebSchema,
+  seccionFirmaSchema, stepUpSchema, valoresAsesorSchema, habeasDataSchema, iniciarWebSchema, configWebSchema,
 } from '../schemas/captacionSchema.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -631,12 +631,75 @@ export const pubGetEnlace = async (req, res, next) => {
 // ── Página pública /asociate (enlace único y estático para el sitio web de la cooperativa) ──
 // Muestra la presentación y el botón "Quiero asociarme". No hay asesor ni empresa previos: la persona elige
 // su empresa y la solicitud se asigna al asesor definido en CAPTACION_ASESOR_WEB_UUID.
+// El asesor se elige en la interfaz (captacion_config, clave 'web_asesor_uuid'), no en variables de entorno.
+const CLAVE_ASESOR_WEB = 'web_asesor_uuid';
+
 const asesorWebActivo = async () => {
-  if (!env.CAPTACION_ASESOR_WEB_UUID) return null;
   const { rows: [u] } = await pool.query(
-    `SELECT id FROM global_usuarios WHERE id = $1 AND is_active = true`, [env.CAPTACION_ASESOR_WEB_UUID]
+    `SELECT u.id FROM captacion_config c
+       JOIN global_usuarios u ON u.id::text = c.valor
+      WHERE c.clave = $1 AND u.is_active = true`, [CLAVE_ASESOR_WEB]
   );
   return u?.id ?? null;
+};
+
+// Quien puede recibir solicitudes de la web: usuario activo con acceso de escritura a captación (o admin)
+const SQL_PUEDE_CAPTAR = `
+  u.is_active = true AND u.is_approved = true AND (
+    u.rol = 'admin' OR EXISTS (
+      SELECT 1 FROM permisos p
+        JOIN modulos m ON m.id = p.modulo_id
+        JOIN acciones a ON a.id = p.accion_id
+       WHERE p.usuario_uuid = u.id AND m.nombre = 'captacion' AND a.nombre = 'WRITE'))`;
+
+const puedeConfigurar = async (user) => {
+  if (user.rol === 'admin') return true;
+  const { rowCount } = await pool.query(
+    `SELECT 1 FROM permisos p JOIN modulos m ON m.id = p.modulo_id JOIN acciones a ON a.id = p.accion_id
+      WHERE p.usuario_uuid = $1 AND m.nombre = 'captacion' AND a.nombre = 'CONFIGURAR'`, [user.id]
+  );
+  return rowCount > 0;
+};
+
+// Panel "Página web" de la pestaña de prospectos: enlace para el sitio y asesor asignado
+export const getConfigWeb = async (req, res, next) => {
+  try {
+    const [{ rows: [asesor] }, editable] = await Promise.all([
+      pool.query(
+        `SELECT u.id, u.nombre, u.email FROM captacion_config c
+           JOIN global_usuarios u ON u.id::text = c.valor
+          WHERE c.clave = $1 AND u.is_active = true`, [CLAVE_ASESOR_WEB]),
+      puedeConfigurar(req.user),
+    ]);
+    let candidatos = [];
+    if (editable) {
+      ({ rows: candidatos } = await pool.query(
+        `SELECT u.id, u.nombre, u.email FROM global_usuarios u WHERE ${SQL_PUEDE_CAPTAR} ORDER BY u.nombre`));
+    }
+    res.json({
+      enlace: `${env.FRONTEND_URL.replace(/\/$/, '')}/asociate`,
+      asesor: asesor ?? null,
+      puede_configurar: editable,
+      candidatos,
+    });
+  } catch (err) { next(err); }
+};
+
+export const actualizarConfigWeb = async (req, res, next) => {
+  try {
+    const { asesor_uuid } = configWebSchema.parse(req.body);
+    if (asesor_uuid) {
+      const { rowCount } = await pool.query(`SELECT 1 FROM global_usuarios u WHERE u.id = $1 AND ${SQL_PUEDE_CAPTAR}`, [asesor_uuid]);
+      if (!rowCount) return res.status(400).json({ error: 'Ese usuario no puede recibir solicitudes de captación (debe estar activo y tener permiso de escritura en el módulo)' });
+    }
+    await pool.query(
+      `INSERT INTO captacion_config (clave, valor, actualizado_por) VALUES ($1, $2, $3)
+       ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor, actualizado_por = EXCLUDED.actualizado_por, updated_at = NOW()`,
+      [CLAVE_ASESOR_WEB, asesor_uuid, req.user.id]
+    );
+    logger.info(`captacion: asesor de la página web ${asesor_uuid ? `= ${asesor_uuid}` : 'quitado'} por ${req.user.id}`);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
 };
 
 export const pubGetWeb = async (_req, res, next) => {

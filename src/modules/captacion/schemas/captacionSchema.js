@@ -146,6 +146,11 @@ export const iniciarWebSchema = z.object({
   empresa_codigo: z.string().min(1, 'Elige tu empresa').max(50),
 }).strict();
 
+// Asesor al que se asignan las solicitudes de la página pública /asociate (null = página no disponible)
+export const configWebSchema = z.object({
+  asesor_uuid: z.string().uuid().nullable(),
+}).strict();
+
 // Autorización de tratamiento de datos aceptada por el titular en el formulario
 export const habeasDataSchema = z.object({
   acepta : z.literal(true),

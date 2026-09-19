@@ -103,7 +103,18 @@ export const enviarConRespaldo = async (principal, respaldo, args) => {
   }
 };
 
+// Direcciones que rebotaron de forma permanente o se quejaron (llegan de SES por SNS): no se les escribe más
+export const estaSuprimido = async (email) => {
+  const { rowCount } = await pool.query(
+    'SELECT 1 FROM email_supresiones WHERE lower(email) = lower($1) AND is_active = true', [email]
+  );
+  return rowCount > 0;
+};
+
 export const enviarEmail = async (to, subject, html, text = '') => {
+  if (await estaSuprimido(to)) {
+    throw Object.assign(new Error('La dirección está en la lista de supresión (rebote o queja previa)'), { code: 'EMAIL_SUPRIMIDO' });
+  }
   if (process.env.NODE_ENV === 'test') {
     if (simulacionDePrueba.fallar) throw new Error('Correo no disponible (simulado)');
     emailsDePrueba.push({ to, subject, html, text });

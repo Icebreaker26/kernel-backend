@@ -828,6 +828,9 @@ export const pubSolicitarOtp = async (req, res, next) => {
     try {
       await enviarCodigoFirma(p.correo, p.nombres || 'asociado', codigo, OTP_MINUTOS);
     } catch (err) {
+      if (err.code === 'EMAIL_SUPRIMIDO') {
+        return res.status(400).json({ error: 'Ese correo no puede recibir mensajes (rebotó antes). Revisa que esté bien escrito o usa otro.', code: 'CORREO_INVALIDO' });
+      }
       logger.error(`captacion: no se pudo enviar el código de firma a prospecto ${p.id}: ${err.message}`);
       await pool.query(
         `INSERT INTO captacion_eventos (prospecto_id, tipo, autor_tipo, ip, payload) VALUES ($1,'otp_envio_fallido','sistema',$2,$3)`,

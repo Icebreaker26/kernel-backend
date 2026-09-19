@@ -274,6 +274,19 @@ describe('Captacion — Endpoints públicos', () => {
       }
     });
 
+    test('correo en la lista de supresión (rebotó antes) → 400 CORREO_INVALIDO y no se gasta el cupo', async () => {
+      await pool.query(`INSERT INTO email_supresiones (email, motivo) VALUES ('juan@test.com', 'rebote') ON CONFLICT (lower(email)) DO UPDATE SET is_active = true`);
+      try {
+        const antes = (await pool.query('SELECT COUNT(*)::int AS n FROM captacion_otp WHERE prospecto_id = $1', [prospectoId])).rows[0].n;
+        const res = await request(app).post(otpUrl());
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('CORREO_INVALIDO');
+        expect((await pool.query('SELECT COUNT(*)::int AS n FROM captacion_otp WHERE prospecto_id = $1', [prospectoId])).rows[0].n).toBe(antes);
+      } finally {
+        await pool.query(`DELETE FROM email_supresiones WHERE lower(email) = 'juan@test.com'`);
+      }
+    });
+
     test('pedir el código envía un correo de 6 dígitos y no expone el correo completo ni el código', async () => {
       const antes = emailsDePrueba.length;
       const res = await request(app).post(otpUrl());

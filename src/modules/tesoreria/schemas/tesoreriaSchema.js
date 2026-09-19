@@ -151,10 +151,13 @@ export const confirmarExtractoSchema = z.object({
   cuenta_id:    z.string().uuid(),
   periodo_id:   z.string().uuid().nullable().optional().or(z.literal('')),
   categoria_id: z.string().uuid().nullable().optional().or(z.literal('')),
+  // C-4: referencias son claves compuestas "ref|fecha|monto" para distinguir
+  // transacciones del banco que reutilizan el mismo código de referencia.
   referencias:  z.array(z.string().min(1)).min(1, 'Debe seleccionar al menos una transacción'),
-  // Vínculos factura ↔ transacción: [{referencia_bancaria, factura_id}]
   vinculos:     z.array(z.object({
     referencia_bancaria: z.string().min(1),
+    fecha:               z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    monto:               z.preprocess((v) => Number(v), z.number().positive()),
     factura_id:          z.string().uuid(),
   })).optional().default([]),
 });
@@ -179,5 +182,10 @@ export const crearMovimientoSchema = z.object({
   }
   if (data.tipo === 'traslado' && data.cuenta_destino_id && data.cuenta_id === data.cuenta_destino_id) {
     ctx.addIssue({ code: 'custom', path: ['cuenta_destino_id'], message: 'Origen y destino deben ser distintos' });
+  }
+  // C-3: cuenta_destino_id solo tiene sentido en traslados; rechazar en ingreso/egreso
+  // para evitar que saldoActual cuente el monto dos veces (una por cuenta_id y otra por cuenta_destino_id).
+  if (data.tipo !== 'traslado' && data.cuenta_destino_id && data.cuenta_destino_id !== '') {
+    ctx.addIssue({ code: 'custom', path: ['cuenta_destino_id'], message: 'cuenta_destino_id solo aplica para traslados' });
   }
 });

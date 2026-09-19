@@ -1,12 +1,14 @@
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import { randomInt } from 'crypto';
 import { parse } from 'csv-parse/sync';
 import iconv from 'iconv-lite';
 import pool from '../../../db/database.js';
 import { env } from '../../../config/env.js';
 import { loginAsociadoSchema, importarFilaSchema, solicitarPortalSchema, registroPortalSchema, cambiarPasswordSchema, subsanarSchema, pagoEfectivoSchema, guardarEmailSchema } from '../schemas/asociadosSchema.js';
-import { notificarUsuario, notificarAdmins } from '../../../services/notificationService.js';
+import { notificarUsuario, notificarAdmins, desconectarSockets } from '../../../services/notificationService.js';
 import { enviarCredencialesPortal } from '../../../services/emailService.js';
+import { redisClient } from '../../../config/redis.js';
 
 const cookieOpts = () => ({
   httpOnly: true,
@@ -18,7 +20,7 @@ const cookieOpts = () => ({
 // Genera una contraseña legible sin caracteres ambiguos (0/O, 1/l/I)
 export const generarPassword = () => {
   const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
-  return Array.from({ length: 10 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  return Array.from({ length: 12 }, () => chars[randomInt(chars.length)]).join('');
 };
 
 // ── Portal: auth ──────────────────────────────────────────────────────────────
@@ -27,22 +29,66 @@ export const loginAsociado = async (req, res, next) => {
   try {
     const { codigo, password } = loginAsociadoSchema.parse(req.body);
 
+    const ip = req.ip ?? req.socket?.remoteAddress ?? null;
+    const ua = (req.get('user-agent') ?? '').slice(0, 255);
+
+    const registrarIntento = (exitoso, motivo) =>
+      pool.query(
+        `INSERT INTO auth_intentos (email, exitoso, motivo, ip, user_agent, contexto, identificador)
+         VALUES ($1, $2, $3, $4, $5, 'asociado', $6)`,
+        [codigo, exitoso, motivo, ip, ua, codigo]
+      ).catch(() => {});
+
     const { rows } = await pool.query(
-      `SELECT codigo, nombre, apellido, password_hash, portal_activo, primer_login
+      `SELECT codigo, nombre, apellido, password_hash, portal_activo, primer_login,
+              failed_attempts, locked_until
        FROM asociados WHERE codigo = $1 AND is_active = true`,
       [codigo]
     );
 
     const asociado = rows[0];
 
-    // Mismo mensaje para usuario no encontrado y contraseña incorrecta — no revelar si existe
-    if (!asociado || !asociado.password_hash || !(await bcrypt.compare(password, asociado.password_hash))) {
+    if (!asociado) {
+      await registrarIntento(false, 'no_existe');
+      return res.status(401).json({ error: 'Código o contraseña incorrectos' });
+    }
+
+    if (asociado.locked_until && new Date(asociado.locked_until) > new Date()) {
+      await registrarIntento(false, 'bloqueado');
+      return res.status(429).json({ error: 'Cuenta bloqueada temporalmente. Intenta en 15 minutos.' });
+    }
+
+    if (!asociado.password_hash || !(await bcrypt.compare(password, asociado.password_hash))) {
+      await pool.query(
+        `UPDATE asociados
+            SET failed_attempts = CASE
+                  WHEN locked_until IS NOT NULL AND locked_until < NOW() THEN 1
+                  ELSE failed_attempts + 1
+                END,
+                locked_until = CASE
+                  WHEN locked_until IS NOT NULL AND locked_until < NOW() THEN NULL
+                  WHEN failed_attempts + 1 >= 5 THEN NOW() + INTERVAL '15 minutes'
+                  ELSE locked_until
+                END
+          WHERE codigo = $1`,
+        [codigo]
+      );
+      await registrarIntento(false, 'password');
       return res.status(401).json({ error: 'Código o contraseña incorrectos' });
     }
 
     if (!asociado.portal_activo) {
+      await registrarIntento(false, 'inactivo');
       return res.status(403).json({ error: 'Tu acceso al portal no está activado. Contacta a la cooperativa.' });
     }
+
+    if (asociado.failed_attempts > 0) {
+      pool.query(
+        `UPDATE asociados SET failed_attempts = 0, locked_until = NULL WHERE codigo = $1`,
+        [codigo]
+      ).catch(() => {});
+    }
+    await registrarIntento(true, 'ok');
 
     const token = jwt.sign(
       { id: asociado.codigo, nombre: asociado.nombre, tipo: 'asociado', primer_login: asociado.primer_login },
@@ -50,9 +96,7 @@ export const loginAsociado = async (req, res, next) => {
       { expiresIn: '8h' }
     );
 
-    res.cookie('token_asociado', token, {
-      ...cookieOpts(),
-    });
+    res.cookie('token_asociado', token, cookieOpts());
 
     res.json({
       codigo:       asociado.codigo,
@@ -171,61 +215,97 @@ export const solicitarPortal = async (req, res, next) => {
 // ── Portal: registro autogestión ──────────────────────────────────────────────
 
 export const registroPortal = async (req, res, next) => {
+  // Respuesta única para todos los caminos — nunca revela qué falló
+  const RESPUESTA_GENERICA = {
+    ok: true,
+    mensaje: 'Si los datos coinciden con nuestros registros, recibirás tus credenciales de acceso por correo.',
+  };
+
+  let client;
+  let committed = false;
   try {
     const { codigo, fecha_nacimiento, email } = registroPortalSchema.parse(req.body);
 
-    const { rows } = await pool.query(
-      `SELECT codigo, nombre, fecha_nacimiento, portal_activo, is_active
-       FROM asociados WHERE codigo = $1`,
-      [codigo]
-    );
-
-    // Mismo mensaje para cédula no encontrada y fecha incorrecta — no revelar cuál falló
-    const asociado = rows[0];
-    if (!asociado || !asociado.is_active) {
-      return res.status(401).json({ error: 'Los datos ingresados no coinciden con nuestros registros.' });
+    // Rate-limit por cédula (además del límite por IP en la ruta)
+    if (redisClient) {
+      const key = `rl:registro-portal:${codigo}`;
+      const n = await redisClient.incr(key);
+      if (n === 1) await redisClient.expire(key, 3600);
+      if (n > 5) return res.status(429).json({ error: 'Demasiadas solicitudes. Intenta de nuevo en una hora.' });
     }
 
-    if (asociado.portal_activo) {
-      return res.status(409).json({ error: 'Esta cédula ya tiene acceso al portal.' });
-    }
-
-    const fechaBD = asociado.fecha_nacimiento
-      ? new Date(asociado.fecha_nacimiento).toISOString().slice(0, 10)
-      : null;
-
-    if (!fechaBD || fechaBD !== fecha_nacimiento) {
-      return res.status(401).json({ error: 'Los datos ingresados no coinciden con nuestros registros.' });
-    }
-
-    // Verificar que el email no esté en uso por otro asociado
-    const { rows: emailRows } = await pool.query(
-      `SELECT codigo FROM asociados WHERE LOWER(email) = LOWER($1) AND codigo != $2`,
-      [email, codigo]
-    );
-    if (emailRows.length) {
-      return res.status(409).json({ error: 'Este correo ya está registrado. Contacta a la cooperativa si crees que es un error.' });
-    }
-
+    // Hash fuera de la transacción: no retener FOR UPDATE durante bcrypt (~100ms)
+    // y todos los caminos pagan el mismo costo para evitar timing oracle
     const password = generarPassword();
     const hash     = await bcrypt.hash(password, 10);
 
-    await pool.query(
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    // Identidad verificada en SQL — fecha comparada como DATE, no como string JS
+    const { rows } = await client.query(
+      `SELECT codigo, email, portal_activo
+         FROM asociados
+        WHERE codigo = $1
+          AND is_active = true
+          AND fecha_nacimiento = $2::date
+        FOR UPDATE`,
+      [codigo, fecha_nacimiento]
+    );
+    const asociado = rows[0];
+
+    // No existe / inactivo / fecha incorrecta / ya activo → misma respuesta genérica
+    if (!asociado || asociado.portal_activo) {
+      await client.query('ROLLBACK');
+      return res.json(RESPUESTA_GENERICA);
+    }
+
+    // El correo de la ficha manda — solo se acepta el del body si la ficha no tiene
+    const emailFicha = asociado.email?.trim().toLowerCase() || null;
+    const emailFinal = emailFicha ?? email.trim().toLowerCase();
+
+    // Verificar unicidad dentro de la transacción
+    const { rows: dup } = await client.query(
+      `SELECT 1 FROM asociados WHERE LOWER(email) = $1 AND codigo <> $2 LIMIT 1`,
+      [emailFinal, codigo]
+    );
+    if (dup.length) {
+      await client.query('ROLLBACK');
+      return res.json(RESPUESTA_GENERICA);
+    }
+
+    await client.query(
       `UPDATE asociados
-       SET email = $1, password_hash = $2, portal_activo = true, primer_login = true,
-           solicitud_portal_at = NULL, portal_activado_at = COALESCE(portal_activado_at, NOW()),
-           updated_at = NOW()
-       WHERE codigo = $3`,
-      [email.toLowerCase(), hash, codigo]
+          SET email = $1, password_hash = $2, portal_activo = true, primer_login = true,
+              solicitud_portal_at = NULL,
+              portal_activado_at  = COALESCE(portal_activado_at, NOW()),
+              updated_at = NOW()
+        WHERE codigo = $3`,
+      [emailFinal, hash, codigo]
     );
 
-    // Fire-and-forget: el email se envía en segundo plano para no bloquear la respuesta.
-    // Si falla, queda registrado en email_logs y el monitor lo reintenta.
-    enviarCredencialesPortal(email, codigo, password).catch(() => {});
+    await client.query('COMMIT');
+    committed = true;
 
-    res.json({ ok: true, mensaje: 'En breve recibirás tus credenciales de acceso por correo.' });
+    // Alerta si el body email difiere del de la ficha (posible intento de toma de cuenta)
+    if (emailFicha && email.trim().toLowerCase() !== emailFicha) {
+      notificarAdmins({
+        tipo: 'registro_portal_email_distinto',
+        mensaje: `Asociado ${codigo} intentó registrarse con correo distinto al de su ficha`,
+        modulo: 'asociados',
+      }).catch(() => {});
+    }
+
+    // Fire-and-forget: queda en email_logs para reintento si falla
+    enviarCredencialesPortal(emailFinal, codigo, password).catch(() => {});
+    return res.json(RESPUESTA_GENERICA);
   } catch (err) {
-    next(err);
+    if (client && !committed) await client.query('ROLLBACK').catch(() => {});
+    // 23505 puede llegar si la carrera pasa el check de unicidad — no filtrar err.detail
+    if (err.code === '23505') return res.json(RESPUESTA_GENERICA);
+    return next(err);
+  } finally {
+    client?.release();
   }
 };
 
@@ -247,11 +327,15 @@ export const activarPortal = async (req, res, next) => {
     await pool.query(
       `UPDATE asociados
        SET password_hash = $1, portal_activo = true, primer_login = true,
+           sessions_valid_from = NULL,
            solicitud_portal_at = NULL, portal_activado_at = COALESCE(portal_activado_at, NOW()),
            updated_at = NOW()
        WHERE codigo = $2`,
       [hash, codigo]
     );
+    if (redisClient) {
+      await redisClient.del(`uvf_a:${codigo}`).catch(() => {});
+    }
 
     res.json({
       password,
@@ -298,10 +382,15 @@ export const desactivarPortal = async (req, res, next) => {
     const { codigo } = req.params;
     await pool.query(
       `UPDATE asociados
-       SET password_hash = NULL, portal_activo = false, primer_login = false, updated_at = NOW()
+       SET password_hash = NULL, portal_activo = false, primer_login = false,
+           sessions_valid_from = NOW() + INTERVAL '1 second', updated_at = NOW()
        WHERE codigo = $1`,
       [codigo]
     );
+    if (redisClient) {
+      await redisClient.del(`uvf_a:${codigo}`).catch(() => {});
+    }
+    desconectarSockets(codigo, 'asociado');
     res.json({ ok: true });
   } catch (err) {
     next(err);

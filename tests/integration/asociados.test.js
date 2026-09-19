@@ -1335,30 +1335,36 @@ describe('Asociados — registro-portal (autogestión)', () => {
   });
 
   describe('Verificación de identidad', () => {
-    test('CC inexistente → 401 (mismo mensaje que fecha incorrecta)', async () => {
+    // Oracle elimination (B3-6): todos los caminos de error retornan 200 + mensaje genérico
+    // para no revelar si el código existe o no en la base de datos.
+    test('CC inexistente → 200 + mensaje genérico (no revela que el código no existe)', async () => {
       const res = await request(app).post('/api/asociados/registro-portal').send({
         codigo: 'CC_NO_EXISTE', fecha_nacimiento: fechaNac, email: emailReg,
       });
-      expect(res.status).toBe(401);
-      expect(res.body.error).toMatch(/no coinciden/i);
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      expect(res.body.mensaje).toBeDefined();
     });
 
-    test('CC válida pero fecha incorrecta → 401', async () => {
+    test('CC válida pero fecha incorrecta → 200 + mismo mensaje genérico', async () => {
       const res = await request(app).post('/api/asociados/registro-portal').send({
         codigo: codigoReg, fecha_nacimiento: '1990-06-16', email: emailReg,
       });
-      expect(res.status).toBe(401);
-      expect(res.body.error).toMatch(/no coinciden/i);
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
     });
 
-    test('Mensaje de error idéntico para CC inválida y fecha incorrecta (no revela cuál falló)', async () => {
+    test('Respuesta idéntica para CC inválida y fecha incorrecta (oracle elimination)', async () => {
       const r1 = await request(app).post('/api/asociados/registro-portal').send({
         codigo: 'CC_FALSA', fecha_nacimiento: fechaNac, email: emailReg,
       });
       const r2 = await request(app).post('/api/asociados/registro-portal').send({
         codigo: codigoReg, fecha_nacimiento: '2000-01-01', email: emailReg,
       });
-      expect(r1.body.error).toBe(r2.body.error);
+      // Ambos deben retornar 200 con el mismo mensaje genérico
+      expect(r1.status).toBe(200);
+      expect(r2.status).toBe(200);
+      expect(r1.body.mensaje).toBe(r2.body.mensaje);
     });
   });
 
@@ -1397,17 +1403,17 @@ describe('Asociados — registro-portal (autogestión)', () => {
   });
 
   describe('Casos borde', () => {
-    test('Doble registro (portal ya activo) → 409', async () => {
+    // Oracle elimination: portal ya activo / email duplicado / inactivo → todos retornan 200 genérico
+    test('Doble registro (portal ya activo) → 200 genérico (no confirma que el portal ya existe)', async () => {
       const res = await request(app).post('/api/asociados/registro-portal').send({
         codigo: codigoReg, fecha_nacimiento: fechaNac, email: emailReg2,
       });
-      expect(res.status).toBe(409);
-      expect(res.body.error).toMatch(/ya tiene acceso/i);
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
     });
 
-    test('Email ya en uso por otro asociado → 409', async () => {
+    test('Email ya en uso por otro asociado → 200 genérico (no revela colisión)', async () => {
       await reset();
-      // Registrar el email en otro asociado de test existente
       await pool.query(
         `UPDATE asociados SET email = $1 WHERE codigo = $2`,
         [emailReg, testCodigo]
@@ -1416,21 +1422,21 @@ describe('Asociados — registro-portal (autogestión)', () => {
       const res = await request(app).post('/api/asociados/registro-portal').send({
         codigo: codigoReg, fecha_nacimiento: fechaNac, email: emailReg,
       });
-      expect(res.status).toBe(409);
-      expect(res.body.error).toMatch(/correo ya está registrado/i);
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
 
-      // Limpiar
       await pool.query(`UPDATE asociados SET email = NULL WHERE codigo = $1`, [testCodigo]);
     });
 
-    test('Asociado inactivo (retirado) → 401', async () => {
+    test('Asociado inactivo (retirado) → 200 genérico (no revela estado de la cuenta)', async () => {
       await reset();
       await pool.query(`UPDATE asociados SET is_active = false WHERE codigo = $1`, [codigoReg]);
 
       const res = await request(app).post('/api/asociados/registro-portal').send({
         codigo: codigoReg, fecha_nacimiento: fechaNac, email: emailReg,
       });
-      expect(res.status).toBe(401);
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
 
       await pool.query(`UPDATE asociados SET is_active = true WHERE codigo = $1`, [codigoReg]);
     });

@@ -19,6 +19,15 @@ export const emitirAlertaSeguridad = (alerta) => {
   _io.to('role:admin').emit('alerta_seguridad', alerta);
 };
 
+// Desconectar todos los sockets activos de un usuario (empleado o asociado)
+// Llamar siempre que se revoque una sesión para que el token inválido no siga
+// recibiendo eventos en tiempo real (especialmente en role:admin)
+export const desconectarSockets = (id, tipo = 'usuario') => {
+  if (!_io) return;
+  const room = tipo === 'asociado' ? `asociado:${id}` : `user:${id}`;
+  _io.in(room).disconnectSockets(true);
+};
+
 // Notificar a un empleado específico
 export const notificarUsuario = async (usuario_uuid, { tipo, mensaje, modulo }) => {
   const { rows: [notif] } = await pool.query(

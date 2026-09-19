@@ -2,21 +2,24 @@ import pool from '../db/database.js';
 import logger from '../config/logger.js';
 import { notificarAdmins } from './notificationService.js';
 import { runAnomalyDetector } from './anomalyDetector.js';
+import { resetearVencidos } from './lockdownService.js';
 
 let _timer = null;
 let _dailyTimer = null;
 let _anomalyTimer = null;
 
-// Job de detección de anomalías cada 5 min (reprogramado con setTimeout para evitar solapamiento)
+// Job de detección de anomalías + limpieza de lockdowns vencidos cada 5 min
 const scheduleAnomaly = () => {
   _anomalyTimer = setTimeout(async () => {
     await runAnomalyDetector();
+    await resetearVencidos().catch((err) => logger.error('Error resetearVencidos', err));
     scheduleAnomaly();
   }, 5 * 60_000);
 };
 
 export const startAnomalyDetector = async () => {
   await runAnomalyDetector(); // ejecución inicial al arrancar
+  await resetearVencidos().catch(() => {});
   scheduleAnomaly();
   logger.info('Monitor de anomalías de seguridad iniciado (cada 5 min)');
 };

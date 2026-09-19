@@ -17,9 +17,10 @@ export const errorHandler = (err, req, res, next) => {
     });
   }
 
-  // Error general de unique constraint
+  // Error general de unique constraint — sin detalle para no filtrar valores de columnas
   if (err.code === '23505') {
-    return res.status(409).json({ error: 'Registro duplicado', detalle: err.detail || '' });
+    logger.warn(`23505 unique violation: ${err.detail || ''}`, { path: req.path });
+    return res.status(409).json({ error: 'Registro duplicado' });
   }
 
   // Archivo inválido o demasiado grande (multer)

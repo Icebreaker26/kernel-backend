@@ -1,7 +1,9 @@
 import bcrypt from 'bcrypt';
 import pool from '../../../db/database.js';
-import { crearUsuarioSchema, cambiarRolSchema, asignarPermisosSchema, resetearPasswordSchema } from '../schemas/adminSchema.js';
+import { crearUsuarioSchema, editarUsuarioSchema, cambiarRolSchema, asignarPermisosSchema, resetearPasswordSchema } from '../schemas/adminSchema.js';
 import { emitirAlertaSeguridad } from '../../../services/notificationService.js';
+import { revocarSesiones } from '../../../services/sessionService.js';
+import { redisClient } from '../../../config/redis.js';
 
 const logAdmin = (usuario_uuid, accion, objetivo_tipo, objetivo_id, objetivo_nombre, detalle = null) =>
   pool.query(
@@ -30,8 +32,11 @@ export const crearUsuario = async (req, res, next) => {
 
 export const editarUsuario = async (req, res, next) => {
   try {
-    const { nombre, email, rol } = req.body;
-    if (!nombre && !email && !rol) return res.status(400).json({ error: 'Nada que actualizar' });
+    const { nombre, email, rol } = editarUsuarioSchema.parse(req.body);
+
+    // Nadie puede cambiar su propio rol — la elevación requiere otro admin
+    if (rol && req.params.id === req.user.id)
+      return res.status(403).json({ error: 'No puedes modificar tu propio rol' });
 
     // Verificar email duplicado si se cambia
     if (email) {
@@ -57,6 +62,10 @@ export const editarUsuario = async (req, res, next) => {
       values
     );
     if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    // Revocar sesiones activas si cambió el rol
+    if (rol) await revocarSesiones(req.params.id);
+
     logAdmin(req.user.id, 'EDITAR_USUARIO', 'usuario', rows[0].id, rows[0].nombre,
       [nombre && `nombre:${nombre}`, email && `email:${email}`, rol && `rol:${rol}`].filter(Boolean).join(' | ')
     );
@@ -95,11 +104,15 @@ export const aprobarUsuario = async (req, res, next) => {
 
 export const desactivarUsuario = async (req, res, next) => {
   try {
+    if (req.params.id === req.user.id)
+      return res.status(400).json({ error: 'No puedes desactivar tu propia cuenta' });
+
     const { rows } = await pool.query(
       `UPDATE global_usuarios SET is_active = false WHERE id = $1 RETURNING id, nombre, email`,
       [req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+    await revocarSesiones(req.params.id);
     logAdmin(req.user.id, 'DESACTIVAR_USUARIO', 'usuario', rows[0].id, rows[0].nombre);
     res.json(rows[0]);
   } catch (err) {
@@ -123,12 +136,16 @@ export const reactivarUsuario = async (req, res, next) => {
 
 export const cambiarRol = async (req, res, next) => {
   try {
+    if (req.params.id === req.user.id)
+      return res.status(403).json({ error: 'No puedes modificar tu propio rol' });
+
     const { rol } = cambiarRolSchema.parse(req.body);
     const { rows } = await pool.query(
       `UPDATE global_usuarios SET rol = $1 WHERE id = $2 RETURNING id, nombre, email, rol`,
       [rol, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+    await revocarSesiones(req.params.id);
     logAdmin(req.user.id, 'CAMBIAR_ROL', 'usuario', rows[0].id, rows[0].nombre, `Nuevo rol: ${rows[0].rol}`);
     res.json(rows[0]);
   } catch (err) {
@@ -204,6 +221,7 @@ export const resetearPassword = async (req, res, next) => {
       [hash, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+    await revocarSesiones(req.params.id);
     logAdmin(req.user.id, 'RESET_PASSWORD', 'usuario', rows[0].id, rows[0].nombre);
     res.json(rows[0]);
   } catch (err) {
@@ -216,10 +234,15 @@ export const resetearPasswordAsociado = async (req, res, next) => {
     const { nueva_password } = resetearPasswordSchema.parse(req.body);
     const hash = await bcrypt.hash(nueva_password, 10);
     const { rows } = await pool.query(
-      `UPDATE asociados SET password_hash = $1 WHERE codigo = $2 RETURNING codigo, nombre, apellido`,
+      `UPDATE asociados
+          SET password_hash = $1,
+              sessions_valid_from = NOW() + INTERVAL '1 second'
+        WHERE codigo = $2
+        RETURNING codigo, nombre, apellido`,
       [hash, req.params.codigo]
     );
     if (!rows.length) return res.status(404).json({ error: 'Asociado no encontrado' });
+    if (redisClient) await redisClient.del(`uvf_a:${req.params.codigo}`).catch(() => {});
     logAdmin(req.user.id, 'RESET_PASSWORD', 'asociado', rows[0].codigo, `${rows[0].nombre} ${rows[0].apellido}`);
     res.json(rows[0]);
   } catch (err) {

@@ -21,6 +21,8 @@ const envSchema = z.object({
   AWS_SECRET_ACCESS_KEY: z.string().min(32).optional(),
   S3_BUCKET:             z.string().min(3).optional(),
   REDIS_URL:             z.string().url().optional(),
+  // true = lockdown middleware loguea pero NO bloquea (modo observación 2 semanas)
+  LOCKDOWN_SHADOW_MODE:  z.string().optional().transform((v) => v === 'true'),
 });
 
 const _env = envSchema.safeParse(process.env);

@@ -1,15 +1,25 @@
 import { z } from 'zod';
 
+export const ROLES = ['admin', 'usuario', 'comercial', 'financiero', 'control_interno'];
+const rolEnum = z.enum(ROLES);
+
 export const crearUsuarioSchema = z.object({
   nombre:   z.string().min(2, 'El nombre es obligatorio'),
   email:    z.string().email('Email inválido'),
   password: z.string().min(8, 'Mínimo 8 caracteres'),
-  rol:      z.enum(['admin', 'usuario', 'comercial', 'financiero', 'control_interno']),
+  rol:      rolEnum,
 });
 
-export const cambiarRolSchema = z.object({
-  rol: z.enum(['admin', 'usuario', 'comercial', 'financiero', 'control_interno']),
-});
+export const cambiarRolSchema = z.object({ rol: rolEnum });
+
+export const editarUsuarioSchema = z.object({
+  nombre: z.string().min(2, 'El nombre es obligatorio').optional(),
+  email:  z.string().email('Email inválido').optional(),
+  rol:    rolEnum.optional(),
+}).strict().refine(
+  (d) => d.nombre !== undefined || d.email !== undefined || d.rol !== undefined,
+  { message: 'Nada que actualizar' }
+);
 
 export const resetearPasswordSchema = z.object({
   nueva_password: z.string().min(8, 'La contraseña debe tener al menos 8 caracteres'),

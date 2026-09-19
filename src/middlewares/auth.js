@@ -10,7 +10,12 @@ export const verifyToken = async (req, res, next) => {
 
   try {
     const payload = jwt.verify(token, env.JWT_SECRET);
-    if (payload.tipo === 'asociado') return res.status(403).json({ error: 'Token no válido para este contexto' });
+    // A-6: rechazar explícitamente tokens de contextos ajenos (empresa, asociado).
+    // Sin esto, un token_empresa copiado a la cookie 'token' pasaría verifyToken
+    // porque solo se filtraba 'asociado', no 'empresa'.
+    if (payload.tipo && payload.tipo !== 'empleado') {
+      return res.status(403).json({ error: 'Token no válido para este contexto' });
+    }
 
     // Blacklist por jti (logout individual)
     if (payload.jti && redisClient) {

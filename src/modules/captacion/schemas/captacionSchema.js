@@ -141,6 +141,22 @@ export const seccionFirmaSchema = z.object({
 });
 
 // Código de un solo uso que se envía al correo del asociado
+// Inicio desde la página pública /asociate: la persona elige su empresa
+export const iniciarWebSchema = z.object({
+  empresa_codigo: z.string().min(1, 'Elige tu empresa').max(50),
+}).strict();
+
+// Asesor al que se asignan las solicitudes de la página pública /asociate (null = página no disponible)
+export const configWebSchema = z.object({
+  asesor_uuid: z.string().uuid().nullable(),
+}).strict();
+
+// Autorización de tratamiento de datos aceptada por el titular en el formulario
+export const habeasDataSchema = z.object({
+  acepta : z.literal(true),
+  version: z.string().min(1),
+});
+
 export const stepUpSchema = z.object({
   codigo: z.string().regex(/^\d{6}$/, 'El código tiene 6 dígitos'),
 });

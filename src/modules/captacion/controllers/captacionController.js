@@ -13,7 +13,7 @@ import {
   crearProspectoSchema, toqueSchema, updateProspectoSchema,
   seccionPersonalSchema, seccionLaboralSchema, seccionPepSchema,
   seccionFinancieraSchema, seccionAportesSchema, seccionBeneficiariosSchema, seccionReferenciasSchema,
-  seccionFirmaSchema, stepUpSchema, valoresAsesorSchema,
+  seccionFirmaSchema, stepUpSchema, valoresAsesorSchema, habeasDataSchema, iniciarWebSchema, configWebSchema,
 } from '../schemas/captacionSchema.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -30,6 +30,8 @@ const calcScore = `(
 const VERSION_CONSENTIMIENTO = 'v1.0';
 // Texto del consentimiento a firmar electrónicamente; súbelo si cambia la redacción en el formulario.
 const VERSION_FIRMA_ELECTRONICA = 'fe-v1.0';
+// Texto de la autorización de tratamiento de datos (Ley 1581 de 2012); súbelo si cambia la redacción.
+const VERSION_HABEAS_DATA = 'hd-v1.0';
 
 // Tras la entrega la solicitud está en procesamiento: ni el asociado ni el asesor pueden modificarla.
 // Antes de la entrega SÍ se puede completar o corregir (subsanar) aunque ya esté firmada.
@@ -71,8 +73,8 @@ export const crearProspecto = async (req, res, next) => {
     const { rows: [p] } = await pool.query(
       `INSERT INTO captacion_prospectos
          (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular, correo,
-          token_hash, token, acepta_habeas_data, habeas_data_at, interes_principal)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, true, NOW(), $10)
+          token_hash, token, acepta_habeas_data, habeas_data_at, habeas_data_origen, interes_principal)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, true, NOW(), 'asesor', $10)
        RETURNING id, nombres, apellidos, cedula, celular, correo, empresa_codigo,
                  estado, interes_principal, created_at`,
       [data.empresa_codigo, req.user.id, data.nombres, data.apellidos,
@@ -111,6 +113,7 @@ export const listarProspectos = async (req, res, next) => {
               ${SQL_SIN_IDENTIFICAR} AS sin_identificar,
               CASE WHEN EXISTS (SELECT 1 FROM captacion_eventos ev WHERE ev.prospecto_id = p.id AND ev.tipo = 'stand_init') THEN 'stand'
                    WHEN EXISTS (SELECT 1 FROM captacion_eventos ev WHERE ev.prospecto_id = p.id AND ev.tipo = 'enlace_publico_init') THEN 'grupo'
+                   WHEN EXISTS (SELECT 1 FROM captacion_eventos ev WHERE ev.prospecto_id = p.id AND ev.tipo = 'web_init') THEN 'web'
                    ELSE 'enlace' END AS origen,
               v.id AS vinculacion_id, v.estado AS vinculacion_estado,
               v.seccion_personal_at, v.seccion_laboral_at, v.seccion_pep_at,
@@ -269,7 +272,12 @@ export const getVinculacion = async (req, res, next) => {
     const { rows: [v] } = await pool.query(
       `SELECT v.*,
               p.nombres, p.apellidos, p.cedula, p.celular, p.correo, p.empresa_codigo,
+              p.habeas_data_at, p.habeas_data_origen, p.habeas_data_version,
               e.nombre AS empresa_nombre,
+              (SELECT json_agg(json_build_object('seccion', ev.seccion, 'autor_tipo', ev.autor_tipo, 'created_at', ev.created_at)
+                               ORDER BY ev.created_at DESC)
+                 FROM captacion_eventos ev
+                WHERE ev.vinculacion_id = v.id AND ev.tipo = 'cambio_posterior_a_firma') AS cambios_posteriores,
               json_agg(DISTINCT jsonb_build_object(
                 'id',b.id,'orden',b.orden,'identificacion',b.identificacion,
                 'nombres',b.nombres,'porcentaje',b.porcentaje,
@@ -286,7 +294,7 @@ export const getVinculacion = async (req, res, next) => {
          LEFT JOIN captacion_referencias r ON r.vinculacion_id = v.id
         WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true
         GROUP BY v.id, p.nombres, p.apellidos, p.cedula, p.celular, p.correo,
-                 p.empresa_codigo, e.nombre`,
+                 p.empresa_codigo, p.habeas_data_at, p.habeas_data_origen, p.habeas_data_version, e.nombre`,
       [req.params.id, req.user.id]
     );
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
@@ -513,7 +521,7 @@ export const pubGetStandSession = async (req, res, next) => {
     );
     if (!s) return res.status(404).json({ error: 'Sesión de stand no válida' });
     if (new Date(s.expira_at) < new Date()) return res.status(410).json({ error: 'Sesión expirada' });
-    res.json(s);
+    res.json({ ...s, tarifas: TARIFAS });
   } catch (err) { next(err); }
 };
 
@@ -526,8 +534,8 @@ const crearProspectoSinIdentificar = async ({ empresaCodigo, asesorUuid, ip, eve
   const { rows: [p] } = await pool.query(
     `INSERT INTO captacion_prospectos
        (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular,
-        token_hash, token, acepta_habeas_data, habeas_data_at)
-     VALUES ($1, $2, '', '', $3, '', $4, $5, true, NOW())
+        token_hash, token)
+     VALUES ($1, $2, '', '', $3, '', $4, $5)
      RETURNING id, token`,
     [empresaCodigo, asesorUuid, placeholderCedula, hashToken(rawToken), rawToken]
   );
@@ -616,7 +624,107 @@ export const pubGetEnlace = async (req, res, next) => {
   try {
     const e = await enlacePublicoVigente(req.params.token);
     if (!e) return res.status(404).json({ error: 'Enlace no válido' });
-    res.json({ empresa_nombre: e.empresa_nombre, asesor_nombre: e.asesor_nombre });
+    res.json({ empresa_nombre: e.empresa_nombre, asesor_nombre: e.asesor_nombre, tarifas: TARIFAS });
+  } catch (err) { next(err); }
+};
+
+// ── Página pública /asociate (enlace único y estático para el sitio web de la cooperativa) ──
+// Muestra la presentación y el botón "Quiero asociarme". No hay asesor ni empresa previos: la persona elige
+// su empresa y la solicitud se asigna al asesor definido en CAPTACION_ASESOR_WEB_UUID.
+// El asesor se elige en la interfaz (captacion_config, clave 'web_asesor_uuid'), no en variables de entorno.
+const CLAVE_ASESOR_WEB = 'web_asesor_uuid';
+
+const asesorWebActivo = async () => {
+  const { rows: [u] } = await pool.query(
+    `SELECT u.id FROM captacion_config c
+       JOIN global_usuarios u ON u.id::text = c.valor
+      WHERE c.clave = $1 AND u.is_active = true`, [CLAVE_ASESOR_WEB]
+  );
+  return u?.id ?? null;
+};
+
+// Quien puede recibir solicitudes de la web: usuario activo con acceso de escritura a captación (o admin)
+const SQL_PUEDE_CAPTAR = `
+  u.is_active = true AND u.is_approved = true AND (
+    u.rol = 'admin' OR EXISTS (
+      SELECT 1 FROM permisos p
+        JOIN modulos m ON m.id = p.modulo_id
+        JOIN acciones a ON a.id = p.accion_id
+       WHERE p.usuario_uuid = u.id AND m.nombre = 'captacion' AND a.nombre = 'WRITE'))`;
+
+const puedeConfigurar = async (user) => {
+  if (user.rol === 'admin') return true;
+  const { rowCount } = await pool.query(
+    `SELECT 1 FROM permisos p JOIN modulos m ON m.id = p.modulo_id JOIN acciones a ON a.id = p.accion_id
+      WHERE p.usuario_uuid = $1 AND m.nombre = 'captacion' AND a.nombre = 'CONFIGURAR'`, [user.id]
+  );
+  return rowCount > 0;
+};
+
+// Panel "Página web" de la pestaña de prospectos: enlace para el sitio y asesor asignado
+export const getConfigWeb = async (req, res, next) => {
+  try {
+    const [{ rows: [asesor] }, editable] = await Promise.all([
+      pool.query(
+        `SELECT u.id, u.nombre, u.email FROM captacion_config c
+           JOIN global_usuarios u ON u.id::text = c.valor
+          WHERE c.clave = $1 AND u.is_active = true`, [CLAVE_ASESOR_WEB]),
+      puedeConfigurar(req.user),
+    ]);
+    let candidatos = [];
+    if (editable) {
+      ({ rows: candidatos } = await pool.query(
+        `SELECT u.id, u.nombre, u.email FROM global_usuarios u WHERE ${SQL_PUEDE_CAPTAR} ORDER BY u.nombre`));
+    }
+    res.json({
+      enlace: `${env.FRONTEND_URL.replace(/\/$/, '')}/asociate`,
+      asesor: asesor ?? null,
+      puede_configurar: editable,
+      candidatos,
+    });
+  } catch (err) { next(err); }
+};
+
+export const actualizarConfigWeb = async (req, res, next) => {
+  try {
+    const { asesor_uuid } = configWebSchema.parse(req.body);
+    if (asesor_uuid) {
+      const { rowCount } = await pool.query(`SELECT 1 FROM global_usuarios u WHERE u.id = $1 AND ${SQL_PUEDE_CAPTAR}`, [asesor_uuid]);
+      if (!rowCount) return res.status(400).json({ error: 'Ese usuario no puede recibir solicitudes de captación (debe estar activo y tener permiso de escritura en el módulo)' });
+    }
+    await pool.query(
+      `INSERT INTO captacion_config (clave, valor, actualizado_por) VALUES ($1, $2, $3)
+       ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor, actualizado_por = EXCLUDED.actualizado_por, updated_at = NOW()`,
+      [CLAVE_ASESOR_WEB, asesor_uuid, req.user.id]
+    );
+    logger.info(`captacion: asesor de la página web ${asesor_uuid ? `= ${asesor_uuid}` : 'quitado'} por ${req.user.id}`);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+};
+
+export const pubGetWeb = async (_req, res, next) => {
+  try {
+    if (!(await asesorWebActivo())) return res.json({ disponible: false });
+    const { rows: empresas } = await pool.query(
+      `SELECT codigo, nombre FROM empresas WHERE is_active = true ORDER BY nombre ASC`
+    );
+    res.json({ disponible: true, empresas, tarifas: TARIFAS });
+  } catch (err) { next(err); }
+};
+
+export const pubIniciarDesdeWeb = async (req, res, next) => {
+  try {
+    const { empresa_codigo } = iniciarWebSchema.parse(req.body);
+    const asesorUuid = await asesorWebActivo();
+    if (!asesorUuid) return res.status(503).json({ error: 'Este servicio no está disponible por ahora', code: 'WEB_NO_DISPONIBLE' });
+
+    const { rows: [e] } = await pool.query(
+      `SELECT codigo FROM empresas WHERE codigo = $1 AND is_active = true`, [empresa_codigo]
+    );
+    if (!e) return res.status(400).json({ error: 'Elige tu empresa de la lista' });
+
+    const p = await crearProspectoSinIdentificar({ empresaCodigo: e.codigo, asesorUuid, ip: req.ip, evento: 'web_init' });
+    res.status(201).json({ token: p.token });
   } catch (err) { next(err); }
 };
 
@@ -641,9 +749,9 @@ export const initStandProspecto = async (req, res, next) => {
     const { rows: [p] } = await pool.query(
       `INSERT INTO captacion_prospectos
          (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular,
-          token_hash, token, acepta_habeas_data, habeas_data_at)
+          token_hash, token)
        VALUES ($1, $2, '', '', $3, '',
-               $4, $5, true, NOW())
+               $4, $5)
        RETURNING id, token`,
       [req.body.empresa_codigo || null, req.user.id, placeholderCedula, tokenHash, rawToken]
     );
@@ -660,6 +768,8 @@ export const initStandProspecto = async (req, res, next) => {
 
 export const getValoresAsesor = async (req, res, next) => {
   try {
+    // Cada asesor solo ve sus propios valores (antes bastaba con cambiar el UUID de la URL)
+    if (req.params.uuid !== req.user.id) return res.status(403).json({ error: 'Solo puedes ver tus propios valores' });
     const asesor_uuid = req.params.uuid;
     const { rows: [r] } = await pool.query(`
       SELECT
@@ -694,7 +804,7 @@ export const getValoresAsesor = async (req, res, next) => {
 const resolverToken = async (rawToken) => {
   const { rows: [p] } = await pool.query(
     `SELECT id, nombres, apellidos, cedula, celular, correo, empresa_codigo,
-            estado, ping_count, token_expira_at, asesor_uuid
+            estado, ping_count, token_expira_at, asesor_uuid, habeas_data_origen
        FROM captacion_prospectos
       WHERE token = $1 AND is_active = true`,
     [rawToken]
@@ -756,6 +866,9 @@ export const pubGetProspecto = async (req, res, next) => {
       asesor: { nombre: asesor?.nombre, avatar_url: asesor?.avatar_url, celular: p.celular },
       version_consentimiento: VERSION_CONSENTIMIENTO,
       version_firma_electronica: VERSION_FIRMA_ELECTRONICA,
+      // La autorización de datos la tiene que aceptar la propia persona antes de darnos los suyos
+      requiere_habeas_data: p.habeas_data_origen !== 'titular',
+      version_habeas_data: VERSION_HABEAS_DATA,
       tarifas: TARIFAS,
       vinculacion: v || null,
     });
@@ -783,6 +896,46 @@ export const pubPing = async (req, res, next) => {
     );
 
     res.json({ ok: true });
+  } catch (err) { next(err); }
+};
+
+// ── Autorización de tratamiento de datos (Ley 1581 de 2012) ─────────────────
+// La acepta el titular en el formulario. Queda con versión del texto, fecha, IP y user agent.
+export const pubAceptarHabeasData = async (req, res, next) => {
+  try {
+    const p = await resolverToken(req.params.token);
+    if (!p) return res.status(404).json({ error: 'Link no válido' });
+    const data = habeasDataSchema.parse(req.body);
+    if (data.version !== VERSION_HABEAS_DATA) {
+      return res.status(400).json({ error: 'El texto de la autorización cambió: recarga el formulario', code: 'HABEAS_VERSION' });
+    }
+    if (p.habeas_data_origen === 'titular') return res.json({ ok: true, ya_aceptada: true });
+
+    await pool.query(
+      `UPDATE captacion_prospectos
+          SET acepta_habeas_data = true, habeas_data_at = NOW(), habeas_data_origen = 'titular',
+              habeas_data_version = $2, habeas_data_ip = $3, updated_at = NOW()
+        WHERE id = $1`,
+      [p.id, data.version, req.ip]
+    );
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, tipo, autor_tipo, ip, user_agent, payload)
+       VALUES ($1,'habeas_data_aceptado','prospecto',$2,$3,$4)`,
+      [p.id, req.ip, req.headers['user-agent'] || null, JSON.stringify({ version: data.version })]
+    );
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+};
+
+// Middleware: no se reciben datos personales ni se firma mientras el titular no haya aceptado la autorización
+export const exigirHabeasData = async (req, res, next) => {
+  try {
+    const p = await resolverToken(req.params.token);
+    if (!p) return res.status(404).json({ error: 'Link no válido' });
+    if (p.habeas_data_origen !== 'titular') {
+      return res.status(403).json({ error: 'Antes de continuar debes aceptar la autorización de tratamiento de datos', code: 'HABEAS_DATA_REQUERIDO' });
+    }
+    next();
   } catch (err) { next(err); }
 };
 

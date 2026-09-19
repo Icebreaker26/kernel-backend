@@ -755,6 +755,23 @@ export const pubIniciarDesdeWeb = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── Cifras y tarifas para la página pública de inicio (landing) ──────────────────────────
+// Solo agregados: cuántos asociados activos y cuántas empresas con asociados, más las tarifas oficiales.
+let sitioCache = { hasta: 0, datos: null };
+
+export const pubSitio = async (_req, res, next) => {
+  try {
+    if (Date.now() > sitioCache.hasta || env.NODE_ENV === 'test') {
+      const { rows: [r] } = await pool.query(
+        `SELECT COUNT(*)::int AS asociados, COUNT(DISTINCT empresa_dsto)::int AS empresas
+           FROM asociados WHERE is_active = true`);
+      sitioCache = { hasta: Date.now() + 10 * 60 * 1000, datos: { asociados: r.asociados, empresas: r.empresas } };
+    }
+    res.set('Cache-Control', 'public, max-age=600');
+    res.json({ ...sitioCache.datos, tarifas: TARIFAS });
+  } catch (err) { next(err); }
+};
+
 // ── Presencia de la cooperativa (diapositiva del mapa en la presentación pública) ──
 // Solo los nombres de las ciudades donde hay asociados activos: sin conteos ni datos de personas.
 // Se cachea unos minutos porque es público y la lista casi no cambia.

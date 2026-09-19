@@ -214,3 +214,16 @@ describe('Captación — presencia para el mapa de la presentación', () => {
     expect(JSON.stringify(res.body)).not.toMatch(/kernel\.test|9999996/); // nada de asociados
   });
 });
+
+describe('Captación — cifras para la página de inicio', () => {
+  test('GET /pub/sitio — público, solo agregados y tarifas oficiales; los inactivos no cuentan', async () => {
+    const res = await request(app).get('/api/captacion/pub/sitio');
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(['asociados', 'empresas', 'tarifas']);
+    const { rows: [r] } = await pool.query(
+      `SELECT COUNT(*)::int AS a, COUNT(DISTINCT empresa_dsto)::int AS e FROM asociados WHERE is_active = true`);
+    expect(res.body).toMatchObject({ asociados: r.a, empresas: r.e });
+    expect(res.body.tarifas).toMatchObject({ aporte_minimo: 74000, fondo_bienestar: 5300, cuota_admision: 35000 });
+    expect(res.headers['cache-control']).toMatch(/public/);
+  });
+});

@@ -2,6 +2,7 @@ import pool from '../db/database.js';
 import logger from '../config/logger.js';
 import { enviarEmail } from './emailService.js';
 import { buildCampanaHtml } from './emailTemplates.js';
+import { estaDeBaja, urlBaja } from './emailBajaService.js';
 
 // ── Ritmo de envío ────────────────────────────────────────────────────────────
 // El relay tiene límite de 500 emails/hora (global).
@@ -11,7 +12,7 @@ const EMAILS_POR_TICK = 4;
 
 let timer = null;
 
-const tick = async () => {
+export const tick = async () => {
   // Tomar los próximos N pendientes de la cola (cualquier campaña, FIFO)
   const { rows: trabajos } = await pool.query(`
     SELECT cm.id, cm.campana_id, cm.email, cm.asociado_codigo,
@@ -28,7 +29,14 @@ const tick = async () => {
 
   await Promise.allSettled(trabajos.map(async (j) => {
     try {
-      const html = buildCampanaHtml(j.asunto, j.cuerpo_html);
+      // Baja voluntaria posterior al encolado: no se envía y no cuenta como error
+      if (await estaDeBaja(j.email)) {
+        await pool.query(
+          `UPDATE cola_mailing SET estado = 'omitido', error_msg = 'Baja voluntaria', procesado_at = NOW() WHERE id = $1`, [j.id]
+        );
+        return;
+      }
+      const html = buildCampanaHtml(j.asunto, j.cuerpo_html, urlBaja(j.email));
       await enviarEmail(j.email, j.asunto, html, j.cuerpo_texto ?? '');
 
       await pool.query(`

@@ -2,6 +2,7 @@ import pool from '../../../db/database.js';
 import logger from '../../../config/logger.js';
 import { env } from '../../../config/env.js';
 import { verificarMensajeSns, confirmarSuscripcion } from '../../../services/snsService.js';
+import { leerTokenBaja, estaDeBaja, enmascararCorreo } from '../../../services/emailBajaService.js';
 
 // Suprime (o reactiva la supresión de) una dirección tras un rebote permanente o una queja.
 const suprimir = async (email, motivo, detalle) => {
@@ -102,5 +103,37 @@ export const reactivarDireccion = async (req, res, next) => {
     );
     if (!rowCount) return res.status(404).json({ error: 'Supresión no encontrada' });
     res.json({ ok: true });
+  } catch (err) { next(err); }
+};
+
+// ── Baja voluntaria de avisos (público, por enlace firmado) ───────────────────
+// GET solo consulta: los antivirus de correo abren los enlaces y no deben dar de baja a nadie.
+
+export const consultarBaja = async (req, res, next) => {
+  try {
+    const email = leerTokenBaja(req.params.token);
+    if (!email) return res.status(404).json({ error: 'Enlace no válido' });
+    res.json({ correo: enmascararCorreo(email), de_baja: await estaDeBaja(email) });
+  } catch (err) { next(err); }
+};
+
+export const darDeBaja = async (req, res, next) => {
+  try {
+    const email = leerTokenBaja(req.params.token);
+    if (!email) return res.status(404).json({ error: 'Enlace no válido' });
+    await pool.query(
+      `INSERT INTO email_bajas (email) VALUES (lower($1))
+       ON CONFLICT (lower(email)) DO UPDATE SET is_active = true, updated_at = NOW()`, [email]
+    );
+    res.json({ ok: true, correo: enmascararCorreo(email), de_baja: true });
+  } catch (err) { next(err); }
+};
+
+export const volverASuscribir = async (req, res, next) => {
+  try {
+    const email = leerTokenBaja(req.params.token);
+    if (!email) return res.status(404).json({ error: 'Enlace no válido' });
+    await pool.query(`UPDATE email_bajas SET is_active = false, updated_at = NOW() WHERE lower(email) = lower($1)`, [email]);
+    res.json({ ok: true, correo: enmascararCorreo(email), de_baja: false });
   } catch (err) { next(err); }
 };

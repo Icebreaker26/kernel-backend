@@ -20,8 +20,20 @@ export const createApp = async () => {
   app.set('trust proxy', env.NODE_ENV === 'production' ? 1 : false);
 
   app.use(helmet());
-  const allowedOrigins = [env.FRONTEND_URL, env.PORTAL_URL, env.SITIO_URL].filter(Boolean).map((u) => u.replace(/\/$/, ''));
-  app.use(cors({ origin: allowedOrigins, credentials: true }));
+  const sinBarra = (u) => u.replace(/\/$/, '');
+  const origenesKernel = [env.FRONTEND_URL, env.PORTAL_URL].filter(Boolean).map(sinBarra);
+  const origenSitio = env.SITIO_URL ? sinBarra(env.SITIO_URL) : null;
+  // Endpoints públicos (sin sesión): /api/<módulo>/pub/...
+  const esPublico = (url) => /^\/api\/[a-z_]+\/pub(\/|\?|$)/.test(url);
+  app.use(cors((req, cb) => {
+    const origin = req.headers.origin;
+    // Kernel (panel, portal): con cookies
+    if (origin && origenesKernel.includes(origin)) return cb(null, { origin: true, credentials: true });
+    // Sitio público (otro dominio): SOLO endpoints públicos y SIN cookies. Así, aunque el sitio tuviera un fallo (XSS), su código no
+    // puede actuar como un usuario de Kernel: el navegador no le envía la sesión y las rutas privadas no le responden.
+    if (origin && origenSitio === origin && esPublico(req.originalUrl)) return cb(null, { origin: true, credentials: false });
+    return cb(null, { origin: false });
+  }));
   app.use(express.json({ limit: '2mb' }));
   app.use(cookieParser());
   app.use(globalLimiter);

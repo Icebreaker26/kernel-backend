@@ -12,6 +12,8 @@ const envSchema = z.object({
   // Origen del sitio público de la cooperativa cuando vive en otro dominio (p. ej. https://cooperativaprogresemos.coop):
   // se agrega a los orígenes permitidos por CORS para que ese sitio lea la API pública.
   SITIO_URL:    z.string().url().optional(),
+  // Clave con la que se protege el código de seguimiento de las PQRS (HMAC). Si no se define se usa JWT_SECRET; cambiarla invalida los códigos ya entregados.
+  PQRS_PEPPER:  z.string().min(16).optional(),
   SMTP_HOST:    z.string().optional(),
   SMTP_PORT:    z.string().optional().transform((v) => (v ? Number(v) : 587)),
   SMTP_USER:    z.string().optional(),

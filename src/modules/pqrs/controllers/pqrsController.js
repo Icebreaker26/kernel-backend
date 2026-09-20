@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import pool from '../../../db/database.js';
+import { env } from '../../../config/env.js';
 import logger from '../../../config/logger.js';
 import { notificarPorPermiso } from '../../../services/notificationService.js';
 import { construirConfirmacionPqrs, construirRespuestaPqrs } from '../../../services/emailService.js';
@@ -11,6 +12,10 @@ import {
 // Plazo para responder, en días hábiles (lunes a viernes). Es una estimación: no descuenta festivos.
 // Confirmar con Control Interno el plazo que corresponde a cada tipo de solicitud.
 const PLAZO_DIAS_HABILES = 15;
+
+// Cada radicación envía un correo a la dirección que escribe quien radica: sin tope, alguien podría usar el formulario para
+// llenar de correos a una tercera persona (además del límite por IP, que se evade con varias conexiones). Mutable para las pruebas.
+export const LIMITES = { porCorreoDia: 3 };
 
 // La fecha límite se calcula sobre el calendario de Colombia (no el del servidor): después de las 7 p. m. hora de Bogotá el día
 // ya cambió en UTC y el plazo quedaba corrido un día (o caía en fin de semana).
@@ -25,7 +30,9 @@ export const sumarDiasHabiles = (desdeISO, dias) => {
   return f.toISOString().slice(0, 10);
 };
 
-const hashCodigo = (c) => crypto.createHash('sha256').update(String(c)).digest('hex');
+// HMAC con una clave del servidor: si alguien copiara la base de datos no podría adivinar los códigos (8 caracteres) por fuerza bruta
+// fuera de línea, como sí podría con un hash simple.
+const hashCodigo = (c) => crypto.createHmac('sha256', env.PQRS_PEPPER ?? env.JWT_SECRET).update(String(c)).digest('hex');
 // Sin caracteres ambiguos (0/O, 1/I): el código se lee y se escribe a mano
 const ALFABETO = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const generarCodigo = () => Array.from({ length: 8 }, () => ALFABETO[crypto.randomInt(ALFABETO.length)]).join('');
@@ -60,6 +67,12 @@ export const pubCrear = async (req, res, next) => {
     }
     if (data.version_habeas_data !== VERSION_HABEAS_DATA) {
       return res.status(400).json({ error: 'El texto de la autorización cambió: recarga la página', code: 'HABEAS_VERSION' });
+    }
+
+    const { rows: [{ n: recientes }] } = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM pqrs WHERE lower(email) = $1 AND created_at > NOW() - INTERVAL '24 hours'`, [data.email]);
+    if (recientes >= LIMITES.porCorreoDia) {
+      return res.status(429).json({ error: 'Ya recibimos varias solicitudes con este correo hoy. Si es urgente, escríbenos por WhatsApp o llámanos.', code: 'LIMITE_CORREO' });
     }
 
     const codigo = generarCodigo();

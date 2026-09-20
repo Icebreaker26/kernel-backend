@@ -3,7 +3,8 @@ import bcrypt from 'bcrypt';
 import { createApp } from '../../src/createApp.js';
 import pool from '../../src/db/database.js';
 import { emailsDePrueba, simulacionDePrueba } from '../../src/services/emailService.js';
-import { sumarDiasHabiles } from '../../src/modules/pqrs/controllers/pqrsController.js';
+import crypto from 'crypto';
+import { LIMITES, sumarDiasHabiles } from '../../src/modules/pqrs/controllers/pqrsController.js';
 import { MAX_INTENTOS, procesarCola } from '../../src/services/emailColaService.js';
 
 let app;
@@ -27,6 +28,9 @@ const valida = (extra = {}) => ({
 });
 const radicar = async (extra) => (await request(app).post('/api/pqrs/pub').send(valida(extra)));
 const ids = [];
+const OTRO_CORREO = 'abuso-pqrs@ejemplo.test';
+const TERCERO = 'tercero-pqrs@ejemplo.test';
+LIMITES.porCorreoDia = 1000;   // las pruebas radican muchas solicitudes con el mismo correo; el límite se prueba aparte
 const conFallo = async (fn) => { simulacionDePrueba.fallar = true; try { return await fn(); } finally { simulacionDePrueba.fallar = false; } };
 const yaToca = (id) => pool.query(`UPDATE email_cola SET proximo_intento = NOW() - INTERVAL '1 second' WHERE id = $1`, [id]);
 const colaDe = async (pqrsId) => (await pool.query(`SELECT * FROM email_cola WHERE referencia_id = $1 ORDER BY created_at`, [pqrsId])).rows;
@@ -52,10 +56,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   const uids = Object.values(usuarios).map((u) => u.id);
-  await pool.query(`DELETE FROM pqrs WHERE email = $1`, [CORREO]);                 // los eventos caen por cascada
+  await pool.query(`DELETE FROM pqrs WHERE email = ANY($1)`, [[CORREO, OTRO_CORREO, TERCERO]]);                 // los eventos caen por cascada
   await pool.query(`DELETE FROM email_supresiones WHERE lower(email) = $1`, [CORREO]);
   await pool.query(`DELETE FROM email_logs WHERE destinatario = $1`, [CORREO]);
-  await pool.query(`DELETE FROM email_cola WHERE destinatario = $1`, [CORREO]);
+  await pool.query(`DELETE FROM email_cola WHERE destinatario = ANY($1)`, [[CORREO, OTRO_CORREO, TERCERO]]);
+  await pool.query(`DELETE FROM email_logs WHERE destinatario = ANY($1)`, [[OTRO_CORREO, TERCERO]]);
   await pool.query(`DELETE FROM notificaciones WHERE usuario_uuid = ANY($1)`, [uids]);
   await pool.query(`DELETE FROM permisos WHERE usuario_uuid = ANY($1)`, [uids]);
   await pool.query(`DELETE FROM global_usuarios WHERE id = ANY($1)`, [uids]);
@@ -98,6 +103,8 @@ describe('PQRS — radicación pública', () => {
     expect(p).toMatchObject({ tipo: 'reclamo', estado: 'recibida', email: CORREO, acepta_habeas_data: true, habeas_data_version: 'pqrs-hd-v1.0' });
     expect(p.codigo_hash).toHaveLength(64);
     expect(p.codigo_hash).not.toContain(res.body.codigo);
+    // no es un SHA-256 simple (que se adivinaría por fuerza bruta si se copiara la base): lleva la clave del servidor
+    expect(p.codigo_hash).not.toBe(crypto.createHash('sha256').update(res.body.codigo).digest('hex'));
     expect(p.ip).toBeTruthy();
     const vence = new Date(p.vence_at); const dia = vence.getUTCDay();
     expect([0, 6]).not.toContain(dia);                           // el plazo vence en día hábil
@@ -173,6 +180,24 @@ describe('PQRS — radicación pública', () => {
     expect(rows.map((r) => r.usuario_uuid)).toEqual([usuarios.gestor.id]);   // quien no tiene permiso no recibe nada
     expect(rows[0].mensaje).toContain(body.radicado);
     expect(rows[0].mensaje).not.toContain('Secreta');
+  });
+});
+
+describe('PQRS — abuso del formulario', () => {
+  test('un mismo correo no puede recibir más de N confirmaciones al día (nadie usa el formulario para llenar de correos a otra persona)', async () => {
+    LIMITES.porCorreoDia = 2;
+    try {
+      const enviados = emailsDePrueba.length;
+      expect((await radicar({ email: OTRO_CORREO, asunto: 'Abuso 1' })).status).toBe(201);
+      expect((await radicar({ email: OTRO_CORREO, asunto: 'Abuso 2' })).status).toBe(201);
+      const res = await radicar({ email: OTRO_CORREO.toUpperCase(), asunto: 'Abuso 3' });   // mayúsculas: cuenta como el mismo correo
+      expect(res.status).toBe(429);
+      expect(res.body.code).toBe('LIMITE_CORREO');
+      expect(emailsDePrueba.length).toBe(enviados + 2);                                   // el tercero no envió nada
+      expect((await pool.query('SELECT COUNT(*)::int AS n FROM pqrs WHERE email = $1', [OTRO_CORREO])).rows[0].n).toBe(2);
+      // otra persona no se ve afectada
+      expect((await radicar({ email: TERCERO, asunto: 'Otra persona' })).status).toBe(201);
+    } finally { LIMITES.porCorreoDia = 1000; }
   });
 });
 

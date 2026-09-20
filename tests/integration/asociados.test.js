@@ -2440,6 +2440,13 @@ describe('Asociados — sync de descuentos sin número (fondo de bienestar)', ()
     expect(rows[0].n).toBe(1);
   });
 
+  test('el historial de una cuota sin obligación no llena de "$0 primera vez" (saldo, tasa, valor de obligación)', async () => {
+    const { rows } = await pool.query(
+      `SELECT campo FROM asociado_descuentos_historial
+        WHERE asociado_codigo = $1 AND linea_id = $2 AND campo <> 'valor'`, [COD_A, LINEA_FONDO]);
+    expect(rows).toHaveLength(0);
+  });
+
   test('el estado de cuenta del asociado (ficha) muestra la cuota una sola vez', async () => {
     const ag = agent();
     await loginAdmin(ag);

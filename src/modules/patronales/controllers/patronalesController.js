@@ -100,6 +100,7 @@ const consolidarPeriodo = async (client, periodo, quincena, empresa_codigo = nul
         SELECT asociado_codigo, linea_id, nombre_linea, valor
           FROM asociado_descuentos
          WHERE asociado_codigo = ANY($1)
+           AND is_active = true
            AND valor > 0
          ORDER BY linea_id
       `, [codigos]),

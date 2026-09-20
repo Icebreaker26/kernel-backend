@@ -954,7 +954,11 @@ export const importarCSV = async (req, res, next) => {
       return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
     };
 
-    // Usar 'codigo:numero' como clave — permite múltiples créditos de la misma línea
+    // Clave de un descuento: 'codigo:numero' si tiene número de obligación; si no (fondo de bienestar, seguros...),
+    // 'codigo:linea:valor'. El valor se normaliza con Number(): Postgres devuelve NUMERIC como '5300.00' y el CSV
+    // como 5300, y comparar los textos hacía que ninguna fila sin número coincidiera nunca (se duplicaba en cada sync).
+    const claveDescuento = (codigo, numero, lineaId, valor) =>
+      numero ? `${codigo}:${numero}` : `${codigo}:${lineaId}:${Number(valor)}`;
     const descuentosItems = [];
     const descuentosKeys  = new Set();
     const codigosValidosSet = new Set(validos.map((v) => v.codigo));
@@ -968,7 +972,7 @@ export const importarCSV = async (req, res, next) => {
       if (!valor) continue;
       const numeroRaw = String(r.numero ?? '').trim();
       const numero = (numeroRaw && numeroRaw !== '0') ? numeroRaw : null;
-      const key = numero ? `${codigo}:${numero}` : `${codigo}:${lineaId}:${valor}`;
+      const key = claveDescuento(codigo, numero, lineaId, valor);
       if (descuentosKeys.has(key)) continue;
       descuentosKeys.add(key);
       descuentosItems.push({
@@ -1001,12 +1005,15 @@ export const importarCSV = async (req, res, next) => {
          WHERE asociado_codigo = ANY($1) AND origen = 'csv'`,
         [codigosDesc]
       );
-      // Mapa de estado actual: 'codigo:numero' o 'codigo:lineaId:valor' → fila
+      // Mapa de estado actual → fila. Si hay filas repetidas con la misma clave (datos heredados del error anterior), manda la activa.
       const actualesMap = new Map();
       for (const a of actuales) {
-        const k = a.numero ? `${a.asociado_codigo}:${a.numero}` : `${a.asociado_codigo}:${a.linea_id}:${a.valor}`;
-        actualesMap.set(k, a);
+        const k = claveDescuento(a.asociado_codigo, a.numero, a.linea_id, a.valor);
+        const previa = actualesMap.get(k);
+        if (!previa || (a.is_active && !previa.is_active)) actualesMap.set(k, a);
       }
+      // Filas sin número que ya existen: se ACTUALIZAN (el upsert por número no aplica porque NULL nunca choca en el índice único)
+      const idsSinNumeroExistentes = new Map();   // item → id de la fila existente
 
       // Solo campos numéricos — valor_nuevo es NUMERIC(14,2), fechas no caben
       const todosLosCampos = ['valor', 'valor_obligacion', 'saldo_credito', 'num_cuotas', 'tasa_interes'];
@@ -1014,10 +1021,9 @@ export const importarCSV = async (req, res, next) => {
       const ahora = new Date();
 
       for (const item of descuentosItems) {
-        const k = item.numero
-          ? `${item.asociado_codigo}:${item.numero}`
-          : `${item.asociado_codigo}:${item.linea_id}:${item.valor}`;
+        const k = claveDescuento(item.asociado_codigo, item.numero, item.linea_id, item.valor);
         const prev = actualesMap.get(k);
+        if (prev && !item.numero) idsSinNumeroExistentes.set(item, prev.id);
 
         if (!prev) {
           // Aparición nueva — registrar todos los campos con valor como entrada inicial
@@ -1036,6 +1042,12 @@ export const importarCSV = async (req, res, next) => {
             }
           }
         } else {
+          if (!prev.is_active) {
+            historialEntradas.push({
+              asociado_codigo: item.asociado_codigo, linea_id: item.linea_id, nombre_linea: item.nombre_linea,
+              numero: item.numero, campo: 'is_active', valor_anterior: 0, valor_nuevo: 1,
+            });
+          }
           // Existente — registrar solo los campos que cambiaron
           for (const campo of todosLosCampos) {
             const va = prev[campo] !== undefined ? Number(prev[campo] ?? null) : null;
@@ -1074,9 +1086,52 @@ export const importarCSV = async (req, res, next) => {
         });
       }
 
-      // Upsert de descuentos con borrado lógico para desaparecidos
-      for (let i = 0; i < descuentosItems.length; i += 200) {
-        const lote = descuentosItems.slice(i, i + 200);
+      // Sin número y ya existentes: actualizar la fila (y reactivarla si estaba inactiva) en vez de insertar otra
+      const existentes = [...idsSinNumeroExistentes.entries()];
+      for (let i = 0; i < existentes.length; i += 500) {
+        const lote = existentes.slice(i, i + 500);
+        await client.query(
+          `UPDATE asociado_descuentos ad
+              SET nombre_linea        = t.nombre_linea,
+                  valor               = t.valor,
+                  valor_obligacion    = t.valor_obligacion,
+                  saldo_credito       = t.saldo_credito,
+                  num_cuotas          = t.num_cuotas,
+                  fecha_vencimiento   = t.fecha_vencimiento,
+                  tasa_interes        = t.tasa_interes,
+                  fecha_pri_descuento = t.fecha_pri_descuento,
+                  ultima_vez_en_csv   = $10,
+                  is_active           = true,
+                  updated_at          = NOW()
+             FROM (SELECT unnest($1::uuid[])    AS id,
+                          unnest($2::text[])    AS nombre_linea,
+                          unnest($3::numeric[]) AS valor,
+                          unnest($4::numeric[]) AS valor_obligacion,
+                          unnest($5::numeric[]) AS saldo_credito,
+                          unnest($6::int[])     AS num_cuotas,
+                          unnest($7::date[])    AS fecha_vencimiento,
+                          unnest($8::numeric[]) AS tasa_interes,
+                          unnest($9::date[])    AS fecha_pri_descuento) t
+            WHERE ad.id = t.id`,
+          [
+            lote.map(([, id]) => id),
+            lote.map(([d]) => d.nombre_linea),
+            lote.map(([d]) => d.valor),
+            lote.map(([d]) => d.valor_obligacion),
+            lote.map(([d]) => d.saldo_credito),
+            lote.map(([d]) => d.num_cuotas),
+            lote.map(([d]) => d.fecha_vencimiento),
+            lote.map(([d]) => d.tasa_interes),
+            lote.map(([d]) => d.fecha_pri_descuento),
+            ahora,
+          ]
+        );
+      }
+
+      // Upsert de descuentos con borrado lógico para desaparecidos (solo con número, o sin número que aún no existen)
+      const paraInsertar = descuentosItems.filter((d) => d.numero || !idsSinNumeroExistentes.has(d));
+      for (let i = 0; i < paraInsertar.length; i += 200) {
+        const lote = paraInsertar.slice(i, i + 200);
         const vals = lote.map((_, j) => {
           const b = j * 12;
           return `($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6},$${b+7},$${b+8},$${b+9},$${b+10},$${b+11},$${b+12})`;
@@ -1111,14 +1166,9 @@ export const importarCSV = async (req, res, next) => {
       }
 
       // Marcar como inactivos los que desaparecieron del CSV (borrado lógico)
-      const keysEnCSV = new Set(descuentosItems.map((d) =>
-        d.numero ? `${d.asociado_codigo}:${d.numero}` : `${d.asociado_codigo}:${d.linea_id}:${d.valor}`
-      ));
+      const keysEnCSV = new Set(descuentosItems.map((d) => claveDescuento(d.asociado_codigo, d.numero, d.linea_id, d.valor)));
       const idsDesaparecidos = actuales
-        .filter((a) => {
-          const k = a.numero ? `${a.asociado_codigo}:${a.numero}` : `${a.asociado_codigo}:${a.linea_id}:${a.valor}`;
-          return !keysEnCSV.has(k) && a.is_active;
-        })
+        .filter((a) => !keysEnCSV.has(claveDescuento(a.asociado_codigo, a.numero, a.linea_id, a.valor)) && a.is_active)
         .map((a) => a.id);
 
       if (idsDesaparecidos.length > 0) {
@@ -1229,7 +1279,7 @@ export const descuentosPortal = async (req, res, next) => {
               valor_obligacion, saldo_credito, num_cuotas, fecha_vencimiento, tasa_interes,
               fecha_pri_descuento
        FROM asociado_descuentos
-       WHERE asociado_codigo = $1
+       WHERE asociado_codigo = $1 AND is_active = true
        ORDER BY linea_id, numero NULLS LAST`,
       [req.asociado.id]
     );
@@ -1722,7 +1772,7 @@ export const perfilAsociado = async (req, res, next) => {
               valor_obligacion, saldo_credito, num_cuotas, fecha_vencimiento, tasa_interes,
               fecha_pri_descuento
        FROM asociado_descuentos
-       WHERE asociado_codigo = $1
+       WHERE asociado_codigo = $1 AND is_active = true
        ORDER BY linea_id, numero NULLS LAST`,
       [codigo]
     );

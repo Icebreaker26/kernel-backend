@@ -29,6 +29,29 @@ describe('CORS — el sitio público en otro dominio', () => {
     expect(res.headers['access-control-allow-headers'].toLowerCase()).toContain('x-requested-with');
   });
 
+  test('al sitio se le responde SIN credenciales: el navegador no le enviará la sesión de Kernel', async () => {
+    const res = await request(app).get('/api/transparencia/pub').set('Origin', 'https://sitio-publico.ejemplo.co');
+    expect(res.headers['access-control-allow-credentials']).toBeUndefined();
+  });
+
+  test('el sitio NO tiene permiso CORS en rutas privadas, ni siquiera en el preflight', async () => {
+    for (const ruta of ['/api/pqrs', '/api/asociados', '/api/admin/usuarios', '/api/pqrs/pub/../algo']) {
+      const res = await request(app).get(ruta).set('Origin', 'https://sitio-publico.ejemplo.co');
+      expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    }
+    const pre = await request(app).options('/api/pqrs')
+      .set('Origin', 'https://sitio-publico.ejemplo.co')
+      .set('Access-Control-Request-Method', 'GET');
+    expect(pre.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  test('Kernel (FRONTEND_URL) sigue funcionando con cookies', async () => {
+    const origen = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const res = await request(app).get('/api/transparencia/pub').set('Origin', origen);
+    expect(res.headers['access-control-allow-origin']).toBe(origen);
+    expect(res.headers['access-control-allow-credentials']).toBe('true');
+  });
+
   test('otro origen no recibe permiso CORS', async () => {
     const res = await request(app).get('/api/transparencia/pub').set('Origin', 'https://otro-sitio.ejemplo.co');
     expect(res.headers['access-control-allow-origin']).toBeUndefined();

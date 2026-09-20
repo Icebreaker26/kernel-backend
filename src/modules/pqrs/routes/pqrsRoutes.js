@@ -20,5 +20,6 @@ router.put ('/:id/estado',      checkPermission('pqrs', 'WRITE'), ctrl.cambiarEs
 router.put ('/:id/asignar',     checkPermission('pqrs', 'WRITE'), ctrl.asignar);
 router.post('/:id/notas',       checkPermission('pqrs', 'WRITE'), ctrl.agregarNota);
 router.post('/:id/responder',   checkPermission('pqrs', 'WRITE'), ctrl.responder);
+router.post('/:id/reenviar-respuesta', checkPermission('pqrs', 'WRITE'), ctrl.reenviarRespuesta);
 
 export default router;

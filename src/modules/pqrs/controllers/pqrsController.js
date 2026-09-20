@@ -1,8 +1,10 @@
 import crypto from 'crypto';
 import pool from '../../../db/database.js';
+import { env } from '../../../config/env.js';
 import logger from '../../../config/logger.js';
 import { notificarPorPermiso } from '../../../services/notificationService.js';
-import { enviarConfirmacionPqrs, enviarRespuestaPqrs } from '../../../services/emailService.js';
+import { construirConfirmacionPqrs, construirRespuestaPqrs } from '../../../services/emailService.js';
+import { enviarOEncolar } from '../../../services/emailColaService.js';
 import {
   TIPOS, VERSION_HABEAS_DATA, crearPqrsSchema, consultaSchema, estadoSchema, asignarSchema, responderSchema, notaSchema,
 } from '../schemas/pqrsSchema.js';
@@ -11,21 +13,39 @@ import {
 // Confirmar con Control Interno el plazo que corresponde a cada tipo de solicitud.
 const PLAZO_DIAS_HABILES = 15;
 
-const sumarDiasHabiles = (desde, dias) => {
-  const f = new Date(desde);
+// Cada radicación envía un correo a la dirección que escribe quien radica: sin tope, alguien podría usar el formulario para
+// llenar de correos a una tercera persona (además del límite por IP, que se evade con varias conexiones). Mutable para las pruebas.
+export const LIMITES = { porCorreoDia: 3 };
+
+// La fecha límite se calcula sobre el calendario de Colombia (no el del servidor): después de las 7 p. m. hora de Bogotá el día
+// ya cambió en UTC y el plazo quedaba corrido un día (o caía en fin de semana).
+const hoyBogota = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });   // AAAA-MM-DD
+export const sumarDiasHabiles = (desdeISO, dias) => {
+  const f = new Date(`${desdeISO}T00:00:00Z`);
   let n = 0;
   while (n < dias) {
-    f.setDate(f.getDate() + 1);
-    if (f.getDay() !== 0 && f.getDay() !== 6) n += 1;
+    f.setUTCDate(f.getUTCDate() + 1);
+    if (f.getUTCDay() !== 0 && f.getUTCDay() !== 6) n += 1;
   }
-  return f;
+  return f.toISOString().slice(0, 10);
 };
-const isoFecha = (f) => f.toISOString().slice(0, 10);
 
-const hashCodigo = (c) => crypto.createHash('sha256').update(String(c)).digest('hex');
+// HMAC con una clave del servidor: si alguien copiara la base de datos no podría adivinar los códigos (8 caracteres) por fuerza bruta
+// fuera de línea, como sí podría con un hash simple.
+const hashCodigo = (c) => crypto.createHmac('sha256', env.PQRS_PEPPER ?? env.JWT_SECRET).update(String(c)).digest('hex');
 // Sin caracteres ambiguos (0/O, 1/I): el código se lee y se escribe a mano
 const ALFABETO = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const generarCodigo = () => Array.from({ length: 8 }, () => ALFABETO[crypto.randomInt(ALFABETO.length)]).join('');
+
+// Como enviarOEncolar, pero si ni la cola responde (base de datos caída) devuelve 'error' en vez de lanzar: la solicitud o la
+// respuesta ya quedó guardada y no debe convertirse en un 500 que le oculte el radicado y el código a la persona.
+const enviarSeguro = async (msg) => {
+  try { return await enviarOEncolar(msg); }
+  catch (err) {
+    logger.error(`pqrs: ni el envío ni la cola funcionaron (${msg.tipo} → ${msg.to}): ${err.message}`);
+    return 'error';
+  }
+};
 
 const evento = (pqrsId, tipo, autor, detalle = null) => pool.query(
   `INSERT INTO pqrs_eventos (pqrs_id, tipo, autor_uuid, detalle) VALUES ($1,$2,$3,$4)`, [pqrsId, tipo, autor, detalle]);
@@ -43,14 +63,20 @@ export const pubCrear = async (req, res, next) => {
 
     // Robot: respondemos como si hubiera funcionado, pero no se guarda nada
     if (data.sitio_web) {
-      return res.status(201).json({ radicado: `PQRS-${new Date().getFullYear()}-000000`, codigo: generarCodigo(), correo_enviado: false });
+      return res.status(201).json({ radicado: `PQRS-${new Date().getFullYear()}-000000`, codigo: generarCodigo(), correo_enviado: false, correo_estado: 'en_cola' });
     }
     if (data.version_habeas_data !== VERSION_HABEAS_DATA) {
       return res.status(400).json({ error: 'El texto de la autorización cambió: recarga la página', code: 'HABEAS_VERSION' });
     }
 
+    const { rows: [{ n: recientes }] } = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM pqrs WHERE lower(email) = $1 AND created_at > NOW() - INTERVAL '24 hours'`, [data.email]);
+    if (recientes >= LIMITES.porCorreoDia) {
+      return res.status(429).json({ error: 'Ya recibimos varias solicitudes con este correo hoy. Si es urgente, escríbenos por WhatsApp o llámanos.', code: 'LIMITE_CORREO' });
+    }
+
     const codigo = generarCodigo();
-    const vence = sumarDiasHabiles(new Date(), PLAZO_DIAS_HABILES);
+    const vence = sumarDiasHabiles(hoyBogota(), PLAZO_DIAS_HABILES);
     const { rows: [p] } = await pool.query(
       `INSERT INTO pqrs (radicado, codigo_hash, tipo, nombre, email, telefono, empresa, asunto, mensaje,
                          acepta_habeas_data, habeas_data_version, ip, vence_at)
@@ -58,7 +84,7 @@ export const pubCrear = async (req, res, next) => {
                $1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11)
        RETURNING id, radicado, vence_at`,
       [hashCodigo(codigo), data.tipo, data.nombre, data.email, data.telefono || null, data.empresa || null,
-       data.asunto, data.mensaje, data.version_habeas_data, req.ip, isoFecha(vence)]
+       data.asunto, data.mensaje, data.version_habeas_data, req.ip, vence]
     );
     await evento(p.id, 'creada', null, TIPOS[data.tipo]);
 
@@ -66,16 +92,16 @@ export const pubCrear = async (req, res, next) => {
     notificarPorPermiso('pqrs', { tipo: 'pqrs', mensaje: `Nueva ${TIPOS[data.tipo].toLowerCase()} recibida (${p.radicado})` })
       .catch((err) => logger.error(`pqrs: no se pudo notificar ${p.radicado}: ${err.message}`));
 
-    // El correo de confirmación no debe hacer perder la solicitud si falla: el código se muestra también en pantalla
-    let correoEnviado = true;
-    try {
-      await enviarConfirmacionPqrs({ email: data.email, nombre: data.nombre, radicado: p.radicado, codigo, vence: p.vence_at, tipo: TIPOS[data.tipo] });
-    } catch (err) {
-      correoEnviado = false;
-      logger.warn(`pqrs: no se pudo enviar la confirmación de ${p.radicado}: ${err.message}`);
-    }
+    // El correo nunca debe hacer perder la solicitud: si no hay canal para enviarlo queda en cola y sale solo cuando lo haya.
+    // El código también se muestra en pantalla, así que la persona no depende del correo para consultar su estado.
+    const correoEstado = await enviarSeguro({
+      ...construirConfirmacionPqrs({ nombre: data.nombre, radicado: p.radicado, codigo, vence: p.vence_at, tipo: TIPOS[data.tipo] }),
+      to: data.email, referencia_tipo: 'pqrs', referencia_id: p.id,
+    });
+    if (correoEstado === 'en_cola') await evento(p.id, 'confirmacion_en_cola', null, 'El correo de confirmación saldrá automáticamente cuando haya canal de envío');
+    if (correoEstado === 'suprimido') await evento(p.id, 'correo_suprimido', null, 'No se envió la confirmación: el correo rebotó antes (lista de supresión)');
 
-    res.status(201).json({ radicado: p.radicado, codigo, vence: p.vence_at, correo_enviado: correoEnviado });
+    res.status(201).json({ radicado: p.radicado, codigo, vence: p.vence_at, correo_enviado: correoEstado === 'enviado', correo_estado: correoEstado });
   } catch (err) { next(err); }
 };
 
@@ -155,7 +181,10 @@ export const obtener = async (req, res, next) => {
       `SELECT e.id, e.tipo, e.detalle, e.created_at, u.nombre AS autor
          FROM pqrs_eventos e LEFT JOIN global_usuarios u ON u.id = e.autor_uuid
         WHERE e.pqrs_id = $1 ORDER BY e.created_at, e.id`, [p.id]);
-    res.json({ ...p, eventos, tipo_nombre: TIPOS[p.tipo] });
+    const { rows: correos } = await pool.query(
+      `SELECT tipo, estado, intentos, proximo_intento, ultimo_error, created_at
+         FROM email_cola WHERE referencia_tipo = 'pqrs' AND referencia_id = $1 ORDER BY created_at DESC`, [p.id]);
+    res.json({ ...p, eventos, correos, tipo_nombre: TIPOS[p.tipo] });
   } catch (err) { next(err); }
 };
 
@@ -228,6 +257,17 @@ export const agregarNota = async (req, res, next) => {
 };
 
 // Guarda la respuesta, marca la solicitud como respondida y se la envía por correo a quien radicó
+// Envía la respuesta al ciudadano (o la deja en cola si no hay canal) y lo anota en el historial
+const enviarRespuesta = async (p, respuesta, autor) => {
+  const estado = await enviarSeguro({
+    ...construirRespuestaPqrs({ nombre: p.nombre, radicado: p.radicado, respuesta }),
+    to: p.email, referencia_tipo: 'pqrs', referencia_id: p.id,
+  });
+  if (estado === 'en_cola') await evento(p.id, 'respuesta_en_cola', autor, 'El correo saldrá automáticamente cuando haya canal de envío');
+  if (estado === 'suprimido') await evento(p.id, 'respuesta_sin_correo', autor, 'El correo rebotó antes (lista de supresión)');
+  return estado;
+};
+
 export const responder = async (req, res, next) => {
   try {
     const { respuesta } = responderSchema.parse(req.body);
@@ -240,14 +280,20 @@ export const responder = async (req, res, next) => {
       [p.id, respuesta, req.user.id]);
     await evento(p.id, 'respondida', req.user.id);
 
-    let correoEnviado = true;
-    try {
-      await enviarRespuestaPqrs({ email: p.email, nombre: p.nombre, radicado: p.radicado, respuesta });
-    } catch (err) {
-      correoEnviado = false;
-      await evento(p.id, 'respuesta_sin_correo', req.user.id, err.code === 'EMAIL_SUPRIMIDO' ? 'El correo rebotó antes (lista de supresión)' : 'No se pudo enviar el correo');
-      logger.warn(`pqrs: no se pudo enviar la respuesta de ${p.radicado}: ${err.message}`);
-    }
-    res.json({ ok: true, correo_enviado: correoEnviado });
+    const correoEstado = await enviarRespuesta(p, respuesta, req.user.id);
+    res.json({ ok: true, correo_enviado: correoEstado === 'enviado', correo_estado: correoEstado });
+  } catch (err) { next(err); }
+};
+
+// Vuelve a enviar por correo la última respuesta (p. ej. si el correo estaba mal escrito y se corrigió, o el envío falló)
+export const reenviarRespuesta = async (req, res, next) => {
+  try {
+    const { rows: [p] } = await pool.query(
+      `SELECT id, radicado, nombre, email, estado, respuesta FROM pqrs WHERE id = $1 AND is_active`, [req.params.id]);
+    if (!p) return res.status(404).json({ error: 'Solicitud no encontrada' });
+    if (!p.respuesta) return res.status(400).json({ error: 'Esta solicitud todavía no tiene respuesta' });
+    const correoEstado = await enviarRespuesta(p, p.respuesta, req.user.id);
+    await evento(p.id, 'respuesta_reenviada', req.user.id, `Reenvío a ${p.email}`);
+    res.json({ ok: true, correo_enviado: correoEstado === 'enviado', correo_estado: correoEstado });
   } catch (err) { next(err); }
 };

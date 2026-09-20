@@ -7,6 +7,7 @@ import { env } from './config/env.js';
 import { initNotificationService } from './services/notificationService.js';
 import { startScheduler, startSchedulerTesoreria, startSchedulerCaptacion, startAnomalyDetector } from './services/scheduler.js';
 import { startDispatcher } from './services/mailingDispatcher.js';
+import { iniciarColaEmail } from './services/emailColaService.js';
 import logger from './config/logger.js';
 import pool from './db/database.js';
 import { redisClient } from './config/redis.js';
@@ -99,6 +100,7 @@ startSchedulerTesoreria();
 startSchedulerCaptacion();
 startAnomalyDetector();
 startDispatcher();
+iniciarColaEmail();   // reintenta los correos transaccionales (PQRS) que no pudieron salir
 
 // F-09: retención de actividad extendida a 5 años (1825 días) para auditoría
 const purgarActividad = () => {

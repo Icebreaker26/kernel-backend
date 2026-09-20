@@ -205,10 +205,12 @@ const marcoCorreo = (titulo, cuerpoHtml) => `<!DOCTYPE html><html lang="es"><bod
     </table>
   </td></tr></table></body></html>`;
 
-const fechaLarga = (f) => new Date(f).toLocaleDateString('es-CO', { timeZone: 'America/Bogota', day: 'numeric', month: 'long', year: 'numeric' });
+// Es una fecha de calendario (columna DATE, sin hora): se formatea en UTC para que no cambie de día según la zona del servidor
+const fechaLarga = (f) => new Date(f).toLocaleDateString('es-CO', { timeZone: 'UTC', day: 'numeric', month: 'long', year: 'numeric' });
 
-export const enviarConfirmacionPqrs = async ({ email, nombre, radicado, codigo, vence, tipo }) => {
-  const subject = `Recibimos tu ${tipo.toLowerCase()} — radicado ${radicado}`;
+// Los correos de PQRS solo se CONSTRUYEN aquí; enviarlos (o dejarlos en cola si no hay canal) lo hace emailColaService.
+export const construirConfirmacionPqrs = ({ nombre, radicado, codigo, vence, tipo }) => {
+  const asunto = `Recibimos tu ${tipo.toLowerCase()} — radicado ${radicado}`;
   const html = marcoCorreo('Recibimos tu solicitud', `
     <p style="margin:0 0 14px;">Hola ${escHtml(nombre)}, registramos tu ${escHtml(tipo.toLowerCase())}. Guarda estos datos para consultar su estado en nuestro sitio:</p>
     <table cellpadding="0" cellspacing="0" role="presentation" style="margin:0 0 16px;background:#f1f5f9;border-radius:8px;width:100%;">
@@ -217,29 +219,17 @@ export const enviarConfirmacionPqrs = async ({ email, nombre, radicado, codigo, 
     </table>
     <p style="margin:0 0 8px;">Te responderemos a este correo a más tardar el <strong>${escHtml(fechaLarga(vence))}</strong>.</p>
     <p style="margin:0;color:#94a3b8;font-size:12px;">No compartas el código con nadie: permite ver el estado y la respuesta de tu solicitud.</p>`);
-  const text = [`Hola ${nombre},`, '', `Registramos tu ${tipo.toLowerCase()}.`, `Radicado: ${radicado}`, `Código de seguimiento: ${codigo}`,
+  const texto = [`Hola ${nombre},`, '', `Registramos tu ${tipo.toLowerCase()}.`, `Radicado: ${radicado}`, `Código de seguimiento: ${codigo}`,
     `Te responderemos a más tardar el ${fechaLarga(vence)}.`, '', '— Cooperativa Progresemos'].join('\n');
-  try {
-    await enviarEmail(email, subject, html, text);
-    await logEmail('pqrs_confirmacion', email, null, 'enviado');
-  } catch (err) {
-    await logEmail('pqrs_confirmacion', email, null, 'error', err.message);
-    throw err;
-  }
+  return { tipo: 'pqrs_confirmacion', asunto, html, texto };
 };
 
-export const enviarRespuestaPqrs = async ({ email, nombre, radicado, respuesta }) => {
-  const subject = `Respuesta a tu solicitud — radicado ${radicado}`;
+export const construirRespuestaPqrs = ({ nombre, radicado, respuesta }) => {
+  const asunto = `Respuesta a tu solicitud — radicado ${radicado}`;
   const html = marcoCorreo('Respondimos tu solicitud', `
     <p style="margin:0 0 14px;">Hola ${escHtml(nombre)}, esta es la respuesta a tu solicitud <strong>${escHtml(radicado)}</strong>:</p>
     <div style="margin:0 0 16px;padding:14px 18px;background:#f1f5f9;border-left:4px solid #5B9C3C;border-radius:6px;white-space:pre-wrap;">${escHtml(respuesta)}</div>
     <p style="margin:0;color:#94a3b8;font-size:12px;">También puedes consultarla en nuestro sitio con tu radicado y código de seguimiento.</p>`);
-  const text = [`Hola ${nombre},`, '', `Respuesta a tu solicitud ${radicado}:`, '', respuesta, '', '— Cooperativa Progresemos'].join('\n');
-  try {
-    await enviarEmail(email, subject, html, text);
-    await logEmail('pqrs_respuesta', email, null, 'enviado');
-  } catch (err) {
-    await logEmail('pqrs_respuesta', email, null, 'error', err.message);
-    throw err;
-  }
+  const texto = [`Hola ${nombre},`, '', `Respuesta a tu solicitud ${radicado}:`, '', respuesta, '', '— Cooperativa Progresemos'].join('\n');
+  return { tipo: 'pqrs_respuesta', asunto, html, texto };
 };

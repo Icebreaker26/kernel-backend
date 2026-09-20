@@ -3,6 +3,8 @@ import bcrypt from 'bcrypt';
 import { createApp } from '../../src/createApp.js';
 import pool from '../../src/db/database.js';
 import { emailsDePrueba, simulacionDePrueba } from '../../src/services/emailService.js';
+import { sumarDiasHabiles } from '../../src/modules/pqrs/controllers/pqrsController.js';
+import { MAX_INTENTOS, procesarCola } from '../../src/services/emailColaService.js';
 
 let app;
 const pass = 'testpass123';
@@ -25,6 +27,11 @@ const valida = (extra = {}) => ({
 });
 const radicar = async (extra) => (await request(app).post('/api/pqrs/pub').send(valida(extra)));
 const ids = [];
+const conFallo = async (fn) => { simulacionDePrueba.fallar = true; try { return await fn(); } finally { simulacionDePrueba.fallar = false; } };
+const yaToca = (id) => pool.query(`UPDATE email_cola SET proximo_intento = NOW() - INTERVAL '1 second' WHERE id = $1`, [id]);
+const colaDe = async (pqrsId) => (await pool.query(`SELECT * FROM email_cola WHERE referencia_id = $1 ORDER BY created_at`, [pqrsId])).rows;
+const pqrsId = async (radicado) => (await pool.query('SELECT id FROM pqrs WHERE radicado = $1', [radicado])).rows[0].id;
+const tiposEvento = async (id) => (await pool.query('SELECT tipo FROM pqrs_eventos WHERE pqrs_id = $1 ORDER BY created_at, id', [id])).rows.map((e) => e.tipo);
 
 beforeAll(async () => {
   app = await createApp();
@@ -48,6 +55,7 @@ afterAll(async () => {
   await pool.query(`DELETE FROM pqrs WHERE email = $1`, [CORREO]);                 // los eventos caen por cascada
   await pool.query(`DELETE FROM email_supresiones WHERE lower(email) = $1`, [CORREO]);
   await pool.query(`DELETE FROM email_logs WHERE destinatario = $1`, [CORREO]);
+  await pool.query(`DELETE FROM email_cola WHERE destinatario = $1`, [CORREO]);
   await pool.query(`DELETE FROM notificaciones WHERE usuario_uuid = ANY($1)`, [uids]);
   await pool.query(`DELETE FROM permisos WHERE usuario_uuid = ANY($1)`, [uids]);
   await pool.query(`DELETE FROM global_usuarios WHERE id = ANY($1)`, [uids]);
@@ -109,14 +117,45 @@ describe('PQRS — radicación pública', () => {
     expect(Number(b.slice(-6)) - Number(a.slice(-6))).toBe(1);
   });
 
-  test('si el correo falla, la solicitud igual queda radicada y el código se entrega en la respuesta', async () => {
-    simulacionDePrueba.fallar = true;
-    let res;
-    try { res = await radicar({ asunto: 'Sin correo' }); } finally { simulacionDePrueba.fallar = false; }
+  test('sin canal de correo la solicitud se radica igual, el código se entrega y el correo queda en cola', async () => {
+    const res = await conFallo(() => radicar({ asunto: 'Sin correo' }));
     expect(res.status).toBe(201);
-    expect(res.body.correo_enviado).toBe(false);
+    expect(res.body).toMatchObject({ correo_enviado: false, correo_estado: 'en_cola' });
     expect(res.body.codigo).toMatch(/^[A-Z2-9]{8}$/);
-    expect((await pool.query('SELECT 1 FROM pqrs WHERE radicado = $1', [res.body.radicado])).rowCount).toBe(1);
+    const id = await pqrsId(res.body.radicado);
+    const cola = await colaDe(id);
+    expect(cola).toHaveLength(1);
+    expect(cola[0]).toMatchObject({ estado: 'pendiente', tipo: 'pqrs_confirmacion', destinatario: CORREO, referencia_tipo: 'pqrs' });
+    expect(await tiposEvento(id)).toEqual(['creada', 'confirmacion_en_cola']);
+  });
+
+  test('cuando vuelve el canal, la cola envía la confirmación con su código y lo anota en el historial', async () => {
+    const res = await conFallo(() => radicar({ asunto: 'Confirmación diferida' }));
+    const id = await pqrsId(res.body.radicado);
+    const [fila] = await colaDe(id);
+    await yaToca(fila.id);
+    const r = await procesarCola({ ids: [fila.id] });
+    expect(r.enviados).toBe(1);
+    const correo = emailsDePrueba.at(-1);
+    expect(correo.to).toBe(CORREO);
+    expect(correo.text).toContain(res.body.radicado);
+    expect(correo.text).toContain(res.body.codigo);
+    expect((await colaDe(id))[0]).toMatchObject({ estado: 'enviado', html: null, texto: null });   // el código ya no queda guardado
+    expect(await tiposEvento(id)).toEqual(['creada', 'confirmacion_en_cola', 'correo_enviado']);
+  });
+
+  test('si se agotan los intentos, queda constancia en la solicitud y se avisa a quienes la gestionan', async () => {
+    const res = await conFallo(() => radicar({ asunto: 'Nunca sale' }));
+    const id = await pqrsId(res.body.radicado);
+    const [fila] = await colaDe(id);
+    await pool.query('DELETE FROM notificaciones WHERE usuario_uuid = $1', [usuarios.gestor.id]);
+    await pool.query(`UPDATE email_cola SET intentos = $2 WHERE id = $1`, [fila.id, MAX_INTENTOS - 1]);
+    await yaToca(fila.id);
+    const r = await conFallo(() => procesarCola({ ids: [fila.id] }));
+    expect(r.fallidos).toBe(1);
+    expect(await tiposEvento(id)).toContain('correo_fallido');
+    const { rows } = await pool.query('SELECT mensaje FROM notificaciones WHERE usuario_uuid = $1', [usuarios.gestor.id]);
+    expect(rows.some((n) => n.mensaje.includes(res.body.radicado))).toBe(true);
   });
 
   test('un robot (campo trampa lleno) recibe respuesta normal pero no se guarda nada', async () => {
@@ -134,6 +173,19 @@ describe('PQRS — radicación pública', () => {
     expect(rows.map((r) => r.usuario_uuid)).toEqual([usuarios.gestor.id]);   // quien no tiene permiso no recibe nada
     expect(rows[0].mensaje).toContain(body.radicado);
     expect(rows[0].mensaje).not.toContain('Secreta');
+  });
+});
+
+describe('PQRS — plazo de respuesta', () => {
+  test('15 días hábiles: nunca cae en fin de semana, salga de un sábado, un viernes o un domingo', () => {
+    expect(sumarDiasHabiles('2026-09-19', 15)).toBe('2026-10-09');   // sábado
+    expect(sumarDiasHabiles('2026-09-18', 15)).toBe('2026-10-09');   // viernes
+    expect(sumarDiasHabiles('2026-09-20', 15)).toBe('2026-10-09');   // domingo
+    expect(sumarDiasHabiles('2026-09-21', 15)).toBe('2026-10-12');   // lunes
+    for (let d = 1; d <= 28; d++) {
+      const dia = new Date(`${sumarDiasHabiles(`2026-02-${String(d).padStart(2, '0')}`, 15)}T00:00:00Z`).getUTCDay();
+      expect([0, 6]).not.toContain(dia);
+    }
   });
 });
 
@@ -275,10 +327,53 @@ describe('PQRS — gestión (Control Interno)', () => {
     await pool.query(`INSERT INTO email_supresiones (email, motivo) VALUES ($1, 'rebote') ON CONFLICT (lower(email)) DO UPDATE SET is_active = true`, [CORREO]);
     const res = await ag.post(`/api/pqrs/${sid}/responder`).send({ respuesta: 'Respuesta que no podrá llegar por correo.' });
     expect(res.status).toBe(200);
-    expect(res.body.correo_enviado).toBe(false);
+    expect(res.body).toMatchObject({ correo_enviado: false, correo_estado: 'suprimido' });
     const det = (await ag.get(`/api/pqrs/${sid}`)).body;
     expect(det.estado).toBe('respondida');
     expect(det.eventos.map((e) => e.tipo)).toContain('respuesta_sin_correo');
+    expect(await colaDe(sid)).toHaveLength(0);   // un correo suprimido es definitivo: no se encola
     await pool.query(`DELETE FROM email_supresiones WHERE lower(email) = $1`, [CORREO]);
+  });
+
+  test('responder sin canal de correo: la respuesta se guarda, el correo queda en cola (visible en el detalle) y sale solo', async () => {
+    const ag = await login('gestor');
+    const { body } = await radicar({ asunto: 'Respuesta diferida' });
+    const id = await pqrsId(body.radicado);
+    const res = await conFallo(() => ag.post(`/api/pqrs/${id}/responder`).send({ respuesta: 'Esta respuesta saldrá cuando haya correo.' }));
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ correo_enviado: false, correo_estado: 'en_cola' });
+
+    const det = (await ag.get(`/api/pqrs/${id}`)).body;
+    expect(det.estado).toBe('respondida');
+    expect(det.eventos.map((e) => e.tipo)).toContain('respuesta_en_cola');
+    expect(det.correos.find((k) => k.tipo === 'pqrs_respuesta')).toMatchObject({ estado: 'pendiente', intentos: 0 });
+    // la persona ya puede ver la respuesta en el sitio, aunque el correo no haya salido
+    const pub = await request(app).post('/api/pqrs/pub/consulta').send({ radicado: body.radicado, codigo: body.codigo });
+    expect(pub.body.respuesta).toContain('saldrá cuando haya correo');
+
+    const fila = (await colaDe(id)).find((k) => k.tipo === 'pqrs_respuesta');
+    await yaToca(fila.id);
+    expect((await procesarCola({ ids: [fila.id] })).enviados).toBe(1);
+    expect(emailsDePrueba.at(-1).text).toContain('saldrá cuando haya correo');
+    expect((await ag.get(`/api/pqrs/${id}`)).body.correos.find((k) => k.tipo === 'pqrs_respuesta').estado).toBe('enviado');
+  });
+
+  test('reenviar la respuesta: pide permiso de gestión, exige que exista respuesta y la vuelve a enviar', async () => {
+    const ag = await login('gestor');
+    const { body } = await radicar({ asunto: 'Reenvío' });
+    const id = await pqrsId(body.radicado);
+
+    expect((await request(app).post(`/api/pqrs/${id}/reenviar-respuesta`)).status).toBe(401);
+    expect((await (await login('lector')).post(`/api/pqrs/${id}/reenviar-respuesta`)).status).toBe(403);
+    expect((await ag.post(`/api/pqrs/${id}/reenviar-respuesta`)).status).toBe(400);   // todavía sin respuesta
+
+    await ag.post(`/api/pqrs/${id}/responder`).send({ respuesta: 'Primera respuesta para reenviar.' });
+    const antes = emailsDePrueba.length;
+    const res = await ag.post(`/api/pqrs/${id}/reenviar-respuesta`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ correo_enviado: true, correo_estado: 'enviado' });
+    expect(emailsDePrueba.length).toBe(antes + 1);
+    expect(emailsDePrueba.at(-1).text).toContain('Primera respuesta para reenviar.');
+    expect(await tiposEvento(id)).toContain('respuesta_reenviada');
   });
 });

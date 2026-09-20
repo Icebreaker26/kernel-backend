@@ -1029,7 +1029,9 @@ export const importarCSV = async (req, res, next) => {
           // Aparición nueva — registrar todos los campos con valor como entrada inicial
           for (const campo of todosLosCampos) {
             const vn = item[campo] ?? null;
-            if (vn !== null) {
+            // Una cuota sin número de obligación (fondo de bienestar, seguros) no tiene saldo, tasa ni plazo: el 0 del CSV no es un dato
+            const ceroSinObligacion = !item.numero && campo !== 'valor' && Number(vn) === 0;
+            if (vn !== null && !ceroSinObligacion) {
               historialEntradas.push({
                 asociado_codigo: item.asociado_codigo,
                 linea_id:        item.linea_id,

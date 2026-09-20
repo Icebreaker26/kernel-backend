@@ -117,6 +117,48 @@ export const enlacePublicoLimiter = isTest
         res.status(429).json({ error: 'Demasiados intentos desde esta conexión. Inténtalo de nuevo en unos minutos.' }),
     });
 
+// ── Páginas públicas del sitio (transparencia, etc.): por IP, amplio porque es lectura ──
+export const paginaPublicaLimiter = isTest
+  ? (_req, _res, next) => next()
+  : rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 200,
+      standardHeaders: true,
+      legacyHeaders: false,
+      store: makeStore('pagina_publica'),
+      keyGenerator: (req) => ipKeyGenerator(req),
+      handler: (_req, res) =>
+        res.status(429).json({ error: 'Demasiadas solicitudes. Inténtalo de nuevo en unos minutos.' }),
+    });
+
+// ── PQRS públicas: por IP. Radicar es lo que abusan los robots (pocas por hora); consultar el estado adivinando
+//    códigos también se limita. ──
+export const pqrsCrearLimiter = isTest
+  ? (_req, _res, next) => next()
+  : rateLimit({
+      windowMs: 60 * 60 * 1000,
+      max: 8,
+      standardHeaders: true,
+      legacyHeaders: false,
+      store: makeStore('pqrs_crear'),
+      keyGenerator: (req) => ipKeyGenerator(req),
+      handler: (_req, res) =>
+        res.status(429).json({ error: 'Has enviado varias solicitudes seguidas. Inténtalo de nuevo en una hora o llámanos.' }),
+    });
+
+export const pqrsConsultaLimiter = isTest
+  ? (_req, _res, next) => next()
+  : rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 20,
+      standardHeaders: true,
+      legacyHeaders: false,
+      store: makeStore('pqrs_consulta'),
+      keyGenerator: (req) => ipKeyGenerator(req),
+      handler: (_req, res) =>
+        res.status(429).json({ error: 'Demasiadas consultas. Inténtalo de nuevo en unos minutos.' }),
+    });
+
 // ── Baja de avisos por enlace (público): por IP ─────────────────────────────
 export const bajaLimiter = isTest
   ? (_req, _res, next) => next()

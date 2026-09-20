@@ -20,7 +20,7 @@ export const createApp = async () => {
   app.set('trust proxy', env.NODE_ENV === 'production' ? 1 : false);
 
   app.use(helmet());
-  const allowedOrigins = [env.FRONTEND_URL, env.PORTAL_URL].filter(Boolean);
+  const allowedOrigins = [env.FRONTEND_URL, env.PORTAL_URL, env.SITIO_URL].filter(Boolean).map((u) => u.replace(/\/$/, ''));
   app.use(cors({ origin: allowedOrigins, credentials: true }));
   app.use(express.json({ limit: '2mb' }));
   app.use(cookieParser());

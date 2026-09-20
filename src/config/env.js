@@ -9,6 +9,9 @@ const envSchema = z.object({
   NODE_ENV:     z.enum(['development', 'production', 'test']).default('development'),
   FRONTEND_URL: z.string().url(),
   PORTAL_URL:   z.string().url().optional(),
+  // Origen del sitio público de la cooperativa cuando vive en otro dominio (p. ej. https://cooperativaprogresemos.coop):
+  // se agrega a los orígenes permitidos por CORS para que ese sitio lea la API pública.
+  SITIO_URL:    z.string().url().optional(),
   SMTP_HOST:    z.string().optional(),
   SMTP_PORT:    z.string().optional().transform((v) => (v ? Number(v) : 587)),
   SMTP_USER:    z.string().optional(),

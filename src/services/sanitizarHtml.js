@@ -34,6 +34,8 @@ const filtro = new xss.FilterXSS({
 });
 
 export const sanitizarContenido = (html) => filtro.process(String(html ?? ''))
+  // El editor deja párrafos vacíos al dar Enter de más: en la página serían huecos sin sentido
+  .replace(/<p>(?:\s|&nbsp;|<br\s*\/?>)*<\/p>/gi, '')
   // Los enlaces sin destino válido quedan como texto
   .replace(/<a(?:\s+href(?:="")?)?\s*>([\s\S]*?)<\/a>/gi, '$1')
   // Los enlaces abren en otra pestaña y no comparten el contexto con el sitio de destino

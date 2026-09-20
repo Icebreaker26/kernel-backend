@@ -159,6 +159,12 @@ describe('Blog — borrador, publicación y sitio público', () => {
     expect(html).toContain('<h2>Titulo</h2>');   // el h1 baja a h2: el título de la página es el h1
   });
 
+  test('los párrafos vacíos que deja el editor no se guardan', async () => {
+    const ag = await login('editor');
+    const { body } = await nueva(ag, { titulo: 'Sin huecos', contenido: '<p>Uno</p><p></p><p><br></p><p>&nbsp;</p><p>Dos</p><p></p>' });
+    expect((await ag.get(`/api/blog/${body.id}`)).body.contenido).toBe('<p>Uno</p><p>Dos</p>');
+  });
+
   test('categorías: se listan, se pueden crear (sin duplicar) y filtran el sitio público', async () => {
     const ag = await login('editor');
     const cats = (await ag.get('/api/blog/categorias')).body;

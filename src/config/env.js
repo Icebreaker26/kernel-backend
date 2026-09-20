@@ -14,6 +14,8 @@ const envSchema = z.object({
   SITIO_URL:    z.string().url().optional(),
   // Clave con la que se protege el código de seguimiento de las PQRS (HMAC). Si no se define se usa JWT_SECRET; cambiarla invalida los códigos ya entregados.
   PQRS_PEPPER:  z.string().min(16).optional(),
+  // Sal con la que se calcula el hash diario del visitante en la analítica del sitio (sin cookies). Si no se define se usa JWT_SECRET.
+  ANALITICA_SALT: z.string().min(16).optional(),
   SMTP_HOST:    z.string().optional(),
   SMTP_PORT:    z.string().optional().transform((v) => (v ? Number(v) : 587)),
   SMTP_USER:    z.string().optional(),

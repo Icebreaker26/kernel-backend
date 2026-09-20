@@ -110,6 +110,9 @@ const purgarActividad = () => {
   // auth_intentos: retención 90 días (datos más sensibles, ventana más corta)
   pool.query(`DELETE FROM auth_intentos WHERE created_at < NOW() - INTERVAL '90 days'`)
     .catch((err) => logger.error('Error purga auth_intentos', err));
+  // analitica_eventos: sin datos personales; se conservan ~26 meses para comparar año contra año
+  pool.query(`DELETE FROM analitica_eventos WHERE created_at < NOW() - INTERVAL '800 days'`)
+    .catch((err) => logger.error('Error purga analitica_eventos', err));
 };
 purgarActividad();
 setInterval(purgarActividad, 7 * 24 * 60 * 60 * 1000);

@@ -117,6 +117,20 @@ export const enlacePublicoLimiter = isTest
         res.status(429).json({ error: 'Demasiados intentos desde esta conexión. Inténtalo de nuevo en unos minutos.' }),
     });
 
+// ── Eventos de analítica del sitio: una vista por página que se abre y unos pocos clics; por IP ──
+export const eventoAnaliticaLimiter = isTest
+  ? (_req, _res, next) => next()
+  : rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 400,
+      standardHeaders: true,
+      legacyHeaders: false,
+      store: makeStore('analitica_evento'),
+      keyGenerator: (req) => ipKeyGenerator(req),
+      // Es telemetría: al pasarse del límite simplemente se descarta, sin error visible en el sitio
+      handler: (_req, res) => res.status(204).end(),
+    });
+
 // ── Páginas públicas del sitio (transparencia, etc.): por IP, amplio porque es lectura ──
 export const paginaPublicaLimiter = isTest
   ? (_req, _res, next) => next()

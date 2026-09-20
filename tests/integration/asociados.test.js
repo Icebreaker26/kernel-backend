@@ -2378,3 +2378,99 @@ describe('Asociados — Fase 2: GET /:codigo/historial-descuentos', () => {
     await pool.query(`DELETE FROM asociados WHERE codigo = '0000000099'`);
   });
 });
+
+// ── Descuentos sin número (fondo de bienestar, seguros): el sync no debe duplicarlos ──────────────
+
+describe('Asociados — sync de descuentos sin número (fondo de bienestar)', () => {
+  const COD_A = '7781111111';
+  const COD_B = '7782222222';
+  const LINEA_FONDO = 17;
+
+  // Cabecera con 'numero' vacío: el fondo de bienestar no tiene número de obligación
+  const buildCSV = (cuotaFondo, { incluirFondoB = true } = {}) => [
+    'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,numero',
+    `1,${testCodigo},Torres,Test,1,EMP01,Empresa Test,Pereira,Calle 1,3001234567,,`,
+    `1,${COD_A},Fondo,Uno,1,EMP_FDO,Empresa Fondo,Bogota,Calle A,3010000011,,`,
+    `1,${COD_B},Fondo,Dos,1,EMP_FDO,Empresa Fondo,Bogota,Calle B,3010000012,,`,
+    `${LINEA_FONDO},${COD_A},Fondo,Uno,1,EMP_FDO,Empresa Fondo,Bogota,Calle A,3010000011,${cuotaFondo},0`,
+    // Seguro de vida (línea 5) fijo para B: el sync solo revisa las bajas de quien aún trae alguna línea de descuento
+    `5,${COD_B},Fondo,Dos,1,EMP_FDO,Empresa Fondo,Bogota,Calle B,3010000012,5.000,0`,
+    ...(incluirFondoB ? [`${LINEA_FONDO},${COD_B},Fondo,Dos,1,EMP_FDO,Empresa Fondo,Bogota,Calle B,3010000012,${cuotaFondo},0`] : []),
+  ].join('\n');
+
+  const importar = async (csv) => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(csv), 'fondo.csv');
+    expect(res.status).toBe(200);
+    return ag;
+  };
+  const filas = async (codigo) => (await pool.query(
+    `SELECT valor::float AS valor, is_active FROM asociado_descuentos
+      WHERE asociado_codigo = $1 AND linea_id = $2 ORDER BY updated_at`, [codigo, LINEA_FONDO])).rows;
+
+  beforeAll(async () => {
+    await pool.query(`DELETE FROM asociado_descuentos WHERE asociado_codigo = ANY($1)`, [[COD_A, COD_B]]);
+    await pool.query(`DELETE FROM asociado_descuentos_historial WHERE asociado_codigo = ANY($1)`, [[COD_A, COD_B]]);
+  });
+
+  afterAll(async () => {
+    await pool.query(`DELETE FROM asociado_descuentos_historial WHERE asociado_codigo = ANY($1)`, [[COD_A, COD_B]]);
+    await pool.query(`DELETE FROM asociado_descuentos WHERE asociado_codigo = ANY($1)`, [[COD_A, COD_B]]);
+    await pool.query(`DELETE FROM asociados WHERE codigo = ANY($1)`, [[COD_A, COD_B]]);
+    await pool.query(`DELETE FROM empresas WHERE codigo = 'EMP_FDO'`);
+    await pool.query('DELETE FROM sincronizaciones WHERE usuario_uuid = $1', [adminUuid]);
+  });
+
+  test('importar el mismo CSV varias veces deja UNA sola fila de fondo por asociado', async () => {
+    await importar(buildCSV('5.300'));
+    await importar(buildCSV('5.300'));
+    await importar(buildCSV('5.300'));
+    for (const cod of [COD_A, COD_B]) {
+      const f = await filas(cod);
+      expect(f).toHaveLength(1);
+      expect(f[0]).toMatchObject({ valor: 5300, is_active: true });
+    }
+  });
+
+  test('el historial no registra "apariciones" repetidas por cada sync', async () => {
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS n FROM asociado_descuentos_historial
+        WHERE asociado_codigo = $1 AND linea_id = $2 AND campo = 'valor' AND valor_anterior IS NULL`, [COD_A, LINEA_FONDO]);
+    expect(rows[0].n).toBe(1);
+  });
+
+  test('el estado de cuenta del asociado (ficha) muestra la cuota una sola vez', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.get(`/api/asociados/${COD_A}/perfil`);
+    expect(res.status).toBe(200);
+    const fondo = res.body.descuentos.filter((d) => d.linea_id === LINEA_FONDO);
+    expect(fondo).toHaveLength(1);
+    expect(Number(fondo[0].valor)).toBe(5300);
+  });
+
+  test('si cambia el valor, la cuota vieja se da de baja y solo se muestra la nueva', async () => {
+    await importar(buildCSV('6.000'));
+    const f = await filas(COD_A);
+    expect(f.filter((x) => x.is_active)).toHaveLength(1);
+    expect(f.find((x) => x.is_active).valor).toBe(6000);
+
+    const ag = agent();
+    await loginAdmin(ag);
+    const res = await ag.get(`/api/asociados/${COD_A}/perfil`);
+    const fondo = res.body.descuentos.filter((d) => d.linea_id === LINEA_FONDO);
+    expect(fondo).toHaveLength(1);
+    expect(Number(fondo[0].valor)).toBe(6000);
+  });
+
+  test('si la cuota desaparece del CSV se da de baja, y si vuelve se REACTIVA la misma fila (sin duplicar)', async () => {
+    await importar(buildCSV('6.000', { incluirFondoB: false }));
+    expect((await filas(COD_B)).filter((x) => x.is_active)).toHaveLength(0);
+
+    await importar(buildCSV('6.000'));
+    const f = await filas(COD_B);
+    expect(f.filter((x) => x.is_active)).toHaveLength(1);
+    expect(f.filter((x) => x.valor === 6000)).toHaveLength(1);   // la misma fila reactivada, no una nueva
+  });
+});

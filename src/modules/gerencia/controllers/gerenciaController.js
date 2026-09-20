@@ -138,7 +138,7 @@ export const resumen = async (req, res, next) => {
           , 4)
           ELSE 0
         END                                                                                    AS tasa_promedio_ponderada
-      FROM asociado_descuentos ad
+      FROM (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
       JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
       WHERE ad.saldo_credito IS NOT NULL AND ad.saldo_credito > 0
     `);
@@ -157,7 +157,7 @@ export const resumen = async (req, res, next) => {
           DATE_TRUNC('month', ad.fecha_vencimiento) AS mes,
           COUNT(ad.id)::int                          AS creditos,
           SUM(ad.saldo_credito)::bigint              AS capital
-        FROM asociado_descuentos ad
+        FROM (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
         JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
         WHERE ad.saldo_credito > 0
           AND ad.fecha_vencimiento IS NOT NULL
@@ -170,7 +170,7 @@ export const resumen = async (req, res, next) => {
           m.mes,
           COALESCE(SUM(ad.saldo_credito * COALESCE(ad.tasa_interes, 0) / 100), 0)::numeric(16,2) AS intereses
         FROM meses m
-        JOIN asociado_descuentos ad ON ad.saldo_credito > 0
+        JOIN (SELECT * FROM asociado_descuentos WHERE is_active = true) ad ON ad.saldo_credito > 0
           AND ad.fecha_vencimiento IS NOT NULL
           AND ad.fecha_vencimiento >= m.mes
         JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
@@ -208,7 +208,7 @@ export const resumen = async (req, res, next) => {
         SUM(ad.saldo_credito)::bigint                                                        AS saldo,
         ROUND(AVG(ad.num_cuotas))::int                                                       AS cuotas_promedio,
         COALESCE(SUM(ad.saldo_credito * COALESCE(ad.tasa_interes, 0) / 100), 0)::numeric(16,2) AS intereses_mensual
-      FROM asociado_descuentos ad
+      FROM (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
       JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
       WHERE ad.saldo_credito > 0
       GROUP BY plazo_id, plazo
@@ -233,7 +233,7 @@ export const resumen = async (req, res, next) => {
         END AS rango,
         COUNT(*)::int AS cantidad,
         SUM(ad.saldo_credito)::bigint AS subtotal
-      FROM asociado_descuentos ad
+      FROM (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
       JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
       WHERE ad.saldo_credito > 0
       GROUP BY rango_id, rango
@@ -246,7 +246,7 @@ export const resumen = async (req, res, next) => {
         COUNT(DISTINCT ad.asociado_codigo)::int                    AS asociados,
         COALESCE(SUM(ad.valor), 0)::bigint                         AS mensual,
         COALESCE(SUM(ad.valor), 0)::bigint * 12                    AS anual
-      FROM asociado_descuentos ad
+      FROM (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
       JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
       WHERE UPPER(ad.nombre_linea) LIKE '%BIENESTAR%'
         AND ad.valor IS NOT NULL AND ad.valor > 0
@@ -257,7 +257,7 @@ export const resumen = async (req, res, next) => {
         ad.nombre_linea,
         COUNT(DISTINCT ad.asociado_codigo)::int  AS asociados,
         SUM(ad.valor)::bigint                    AS mensual
-      FROM asociado_descuentos ad
+      FROM (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
       JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
       WHERE UPPER(ad.nombre_linea) LIKE '%BIENESTAR%'
         AND ad.valor IS NOT NULL AND ad.valor > 0
@@ -275,7 +275,7 @@ export const resumen = async (req, res, next) => {
         DATE_TRUNC('month', NOW()),
         '1 month'
       ) AS m(mes)
-      LEFT JOIN asociado_descuentos ad
+      LEFT JOIN (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
         ON UPPER(ad.nombre_linea) LIKE '%BIENESTAR%'
         AND ad.valor IS NOT NULL AND ad.valor > 0
         AND ad.fecha_pri_descuento IS NOT NULL
@@ -301,7 +301,7 @@ export const resumen = async (req, res, next) => {
         COUNT(DISTINCT ad.asociado_codigo)::int    AS asociados,
         COALESCE(SUM(ad.valor), 0)::bigint          AS mensual,
         COALESCE(SUM(ad.valor), 0)::bigint * 12     AS anual
-      FROM asociado_descuentos ad
+      FROM (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
       JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
       WHERE ${segurosWhere}
     `);
@@ -311,7 +311,7 @@ export const resumen = async (req, res, next) => {
         ad.nombre_linea,
         COUNT(DISTINCT ad.asociado_codigo)::int  AS asociados,
         SUM(ad.valor)::bigint                    AS mensual
-      FROM asociado_descuentos ad
+      FROM (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
       JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
       WHERE ${segurosWhere}
       GROUP BY ad.nombre_linea
@@ -328,7 +328,7 @@ export const resumen = async (req, res, next) => {
         DATE_TRUNC('month', NOW()),
         '1 month'
       ) AS m(mes)
-      LEFT JOIN asociado_descuentos ad
+      LEFT JOIN (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
         ON (UPPER(ad.nombre_linea) LIKE '%SEGURO%'
             OR UPPER(ad.nombre_linea) LIKE '%PÓLIZA%'
             OR UPPER(ad.nombre_linea) LIKE '%SOAT%'
@@ -383,7 +383,7 @@ export const lineas = async (req, res, next) => {
         COUNT(DISTINCT ad.asociado_codigo)::int                               AS con_linea,
         COALESCE(SUM(ad.valor), 0)::bigint                                    AS valor_total,
         ROUND(COALESCE(AVG(ad.valor), 0))::bigint                             AS valor_promedio
-      FROM asociado_descuentos ad
+      FROM (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
       JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
       WHERE ad.valor IS NOT NULL AND ad.valor > 0
       GROUP BY ad.linea_id
@@ -412,7 +412,7 @@ export const lineaDetalle = async (req, res, next) => {
           a.codigo, a.nombre, a.apellido,
           ad.valor::bigint AS valor,
           ad.fecha_pri_descuento
-        FROM asociado_descuentos ad
+        FROM (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
         JOIN asociados a ON a.codigo = ad.asociado_codigo AND a.is_active = true
         WHERE ad.linea_id = $1
           AND ad.valor IS NOT NULL AND ad.valor > 0
@@ -424,7 +424,7 @@ export const lineaDetalle = async (req, res, next) => {
         FROM asociados a
         WHERE a.is_active = true
           AND NOT EXISTS (
-            SELECT 1 FROM asociado_descuentos ad
+            SELECT 1 FROM (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
             WHERE ad.asociado_codigo = a.codigo
               AND ad.linea_id = $1
               AND ad.valor IS NOT NULL AND ad.valor > 0
@@ -434,7 +434,7 @@ export const lineaDetalle = async (req, res, next) => {
 
       pool.query(`
         SELECT MAX(ad.nombre_linea) AS nombre_linea
-        FROM asociado_descuentos ad
+        FROM (SELECT * FROM asociado_descuentos WHERE is_active = true) ad
         WHERE ad.linea_id = $1
       `, [lineaId]),
     ]);

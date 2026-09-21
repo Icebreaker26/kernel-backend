@@ -71,8 +71,13 @@ router.get ('/valores/:uuid',                  checkPermission('captacion', 'REA
 router.get ('/config/web',                     checkPermission('captacion', 'READ'),       ctrl.getConfigWeb);
 router.put ('/config/web',                     checkPermission('captacion', 'CONFIGURAR'), ctrl.actualizarConfigWeb);
 
+router.get ('/config/validacion-voz',          checkPermission('captacion', 'READ'),       ctrl.getExigenciaVoz);
+router.put ('/config/validacion-voz',          checkPermission('captacion', 'CONFIGURAR'), ctrl.actualizarExigenciaVoz);
+
 router.get ('/vinculaciones',                  checkPermission('captacion', 'READ'),     ctrl.listarVinculaciones);
 router.get ('/vinculaciones/:id',              checkPermission('captacion', 'READ'),     ctrl.getVinculacion);
+router.get ('/vinculaciones/:id/validacion-voz', checkPermission('captacion', 'READ'),   ctrl.getValidacionVoz);
+router.post('/vinculaciones/:id/validacion-voz', checkPermission('captacion', 'WRITE'),  ctrl.registrarValidacionVoz);
 router.get ('/vinculaciones/:id/documentos',   checkPermission('captacion', 'READ'),     ctrl.getDocumentosVinculacion);
 router.get ('/vinculaciones/:id/formato',      checkPermission('captacion', 'READ'),     ctrl.descargarFormato);
 router.post ('/vinculaciones/:id/documentos/:lado/solicitar', checkPermission('captacion', 'WRITE'), ctrl.solicitarDocumentoAsesor);

@@ -649,7 +649,7 @@ describe('Captacion — Endpoints públicos', () => {
       .post(`/api/captacion/pub/${rawToken}/firmar`)
       .send({
         firma_png: 'data:image/png;base64,iVBORw0KGgo=',
-        firma_trazos: [{ x: 10, y: 20, t: 100 }],
+        firma_trazos: [{ x: 10, y: 20, t: 100 }, { x: 15, y: 25, t: 150 }],
         version_consentimiento: 'v1.0', acepta_terminos: true, acepta_firma_electronica: true, version_firma_electronica: 'fe-v1.0',
       });
     expect(res.status).toBe(403);
@@ -665,7 +665,7 @@ describe('Captacion — Endpoints públicos', () => {
       .set('x-stepup-token', stepupToken)
       .send({
         firma_png             : 'data:image/png;base64,iVBORw0KGgo=',
-        firma_trazos          : [{ x: 10, y: 20, t: 100 }],
+        firma_trazos          : [{ x: 10, y: 20, t: 100 }, { x: 15, y: 25, t: 150 }],
         version_consentimiento: 'v1.0',
         acepta_terminos       : true,
         acepta_firma_electronica: true,
@@ -684,7 +684,7 @@ describe('Captacion — Endpoints públicos', () => {
         .set('x-stepup-token', stepupToken)
         .send({
           firma_png: 'data:image/png;base64,iVBORw0KGgo=',
-          firma_trazos: [{ x: 10, y: 20, t: 100 }],
+          firma_trazos: [{ x: 10, y: 20, t: 100 }, { x: 15, y: 25, t: 150 }],
           version_consentimiento: 'v1.0', acepta_terminos: true, acepta_firma_electronica: true, version_firma_electronica: 'fe-v1.0',
         });
       expect(res.status).toBe(400);
@@ -697,7 +697,7 @@ describe('Captacion — Endpoints públicos', () => {
   test('POST /pub/:token/firmar — sin consentimiento a firmar electrónicamente o con texto viejo → 400', async () => {
     const base = {
       firma_png: 'data:image/png;base64,iVBORw0KGgo=',
-      firma_trazos: [{ x: 10, y: 20, t: 100 }],
+      firma_trazos: [{ x: 10, y: 20, t: 100 }, { x: 15, y: 25, t: 150 }],
       version_consentimiento: 'v1.0', acepta_terminos: true,
     };
     const firmar = (extra) => request(app).post(`/api/captacion/pub/${rawToken}/firmar`).set('x-stepup-token', stepupToken).send({ ...base, ...extra });
@@ -807,7 +807,7 @@ describe('Captacion — Endpoints públicos', () => {
       .set('x-stepup-token', stepupToken)
       .send({
         firma_png: 'data:image/png;base64,iVBORw0KGgo=',
-        firma_trazos: [{ x: 1, y: 2, t: 3 }],
+        firma_trazos: [{ x: 1, y: 2, t: 3 }, { x: 4, y: 5, t: 6 }],
         version_consentimiento: 'v1.0', acepta_terminos: true,
         acepta_firma_electronica: true, version_firma_electronica: 'fe-v1.0',
       });
@@ -1029,7 +1029,7 @@ describe('Captacion — Vinculaciones internas', () => {
       expect((await ag.patch(`${base()}/frente/confirmar`).send(meta())).status).toBe(400);
     });
 
-    test('flujo completo: ambas caras marcan la sección, quedan trazadas y reemplazar no deja huérfanos', async () => {
+    test('flujo completo: ambas caras marcan la sección, quedan trazadas y, en una solicitud ya firmada, reemplazar conserva la anterior como evidencia', async () => {
       const ag = agent();
       await loginAsesor(ag);
       try {
@@ -1050,14 +1050,15 @@ describe('Captacion — Vinculaciones internas', () => {
         const { rows: [arch] } = await pool.query(`SELECT subido_por FROM archivos WHERE id = $1`, [v.cedula_frente_id]);
         expect(arch.subido_por).toBe(asesorUuid);
 
-        // Reemplazar el frente: el anterior desaparece de la tabla y la vinculación apunta al nuevo
+        // Reemplazar el frente de una solicitud YA FIRMADA: la vinculación apunta al nuevo y el anterior se conserva
+        // (es la evidencia de lo que se firmó); no se borra ni de la tabla ni de S3
         const reemplazo = await subir(ag, 'frente', meta('frente-nuevo.png', 'image/png'));
         expect(reemplazo.conf.status).toBe(200);
         const { rows: frentes } = await pool.query(
           `SELECT id FROM archivos WHERE entidad_tipo = 'captacion_cedula_frente' AND entidad_id = $1`, [vinculacionId]);
-        expect(frentes).toHaveLength(1);
-        expect(frentes[0].id).toBe(reemplazo.conf.body.archivo_id);
-        expect(frentes[0].id).not.toBe(v.cedula_frente_id);
+        expect(frentes.map((x) => x.id).sort()).toEqual([v.cedula_frente_id, reemplazo.conf.body.archivo_id].sort());
+        const { rows: [vinc] } = await pool.query(`SELECT cedula_frente_id FROM captacion_vinculaciones WHERE id = $1`, [vinculacionId]);
+        expect(vinc.cedula_frente_id).toBe(reemplazo.conf.body.archivo_id);
 
         const { rows: eventos } = await pool.query(
           `SELECT autor_uuid, payload FROM captacion_eventos

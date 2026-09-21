@@ -27,6 +27,10 @@ const envSchema = z.object({
   AWS_ACCESS_KEY_ID:     z.string().min(16).optional(),
   AWS_SECRET_ACCESS_KEY: z.string().min(32).optional(),
   S3_BUCKET:             z.string().min(3).optional(),
+  // Años de retención (Object Lock) de la evidencia de firma. Solo se define cuando el bucket YA tiene Object Lock activo: sin esto no se pide bloqueo.
+  S3_RETENCION_EVIDENCIA_ANIOS: z.string().optional().transform((v) => (v ? Number(v) : null)).pipe(z.number().int().min(1).max(30).nullable()),
+  // GOVERNANCE (reversible por quien tenga permiso explícito) o COMPLIANCE (nadie puede borrar antes del plazo). Por defecto GOVERNANCE.
+  S3_RETENCION_MODO:     z.enum(['GOVERNANCE', 'COMPLIANCE']).default('GOVERNANCE'),
   // Correo por API HTTPS (Resend): canal principal si están ambas. RESEND_FROM p. ej. 'Cooperativa Progresemos <no-responder@cooperativaprogresemos.coop>'
   RESEND_API_KEY:        z.string().startsWith('re_').optional(),
   RESEND_FROM:           z.string().min(3).optional(),

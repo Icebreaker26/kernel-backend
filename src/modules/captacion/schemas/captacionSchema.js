@@ -131,8 +131,10 @@ export const seccionReferenciasSchema = z.object({
 });
 
 export const seccionFirmaSchema = z.object({
-  firma_png             : z.string().min(1),
-  firma_trazos          : z.array(z.object({ x: z.number(), y: z.number(), t: z.number() })),
+  // PNG en data URL (la firma dibujada): formato y tamaño acotados; una firma vacía o de otro tipo se rechaza
+  firma_png             : z.string().max(1_500_000).refine((v) => v.startsWith('data:image/png;base64,iVBORw0KGgo'), 'La firma debe ser una imagen PNG'),
+  // Trazos: al menos dos puntos (una firma real no es un punto suelto)
+  firma_trazos          : z.array(z.object({ x: z.number(), y: z.number(), t: z.number() })).min(2, 'La firma está vacía').max(20000),
   version_consentimiento: z.string().min(1),
   acepta_terminos       : z.literal(true),
   // Consentimiento explícito a firmar electrónicamente (Ley 527 de 1999); equivale a la firma manuscrita
@@ -165,3 +167,17 @@ export const valoresAsesorSchema = z.object({
   valor_aporte  : z.preprocess(v => Number(v), z.number().nonnegative()).optional(),
   cuota_admision: z.preprocess(v => Number(v), z.number().nonnegative()).optional(),
 }).strict();
+
+// Resultado de la llamada de voz de validación de identidad (protocolo en services/validacionVoz.js)
+export const validacionVozSchema = z.object({
+  resultado        : z.enum(['validada', 'no_contesta', 'no_coincide']),
+  preguntas        : z.array(z.object({
+    clave   : z.enum(['empresa', 'cargo', 'aporte', 'beneficiario', 'referencia']),
+    coincide: z.boolean(),
+  })).max(10).default([]),
+  confirma_voluntad: z.boolean().default(false),
+  grabada          : z.boolean().default(false),
+  observaciones    : z.string().trim().max(1000).optional(),
+}).strict();
+
+export const exigenciaVozSchema = z.object({ exigida: z.boolean() }).strict();

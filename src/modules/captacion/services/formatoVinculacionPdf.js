@@ -267,7 +267,7 @@ const pagina2 = (p, d, firmaImg) => {
   }
 
   // Recuadro de huella: la vinculación se firma electrónicamente (Ley 527 de 1999), así que en lugar
-  // de huella se deja la constancia con el hash SHA-256 del documento firmado. Sin firma, queda en blanco.
+  // de huella se deja la constancia con el hash SHA-256 de los datos y la firma (el del PDF sellado queda aparte, en la vinculación). Sin firma, queda en blanco.
   if (d.firma_doc_hash && d.firma_at) {
     const cx = 575.5;
     const cuando = new Date(d.firma_at);
@@ -277,9 +277,9 @@ const pagina2 = (p, d, firmaImg) => {
     linea('FIRMADO', 7.5, p.negrita);
     linea('ELECTRÓNICAMENTE', 6.5, p.negrita);
     linea('Ley 527 de 1999', 5.5);
-    linea(fecha, 5.5);
+    linea(`${fecha} (hora Colombia)`, 5.5);
     top += 5;
-    linea('Hash SHA-256:', 5.5);
+    linea('SHA-256 datos+firma:', 5.5);
     (String(d.firma_doc_hash).match(/.{1,16}/g) || []).forEach((t) => linea(t, 5.5));
   }
 

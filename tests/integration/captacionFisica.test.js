@@ -100,6 +100,30 @@ describe('Solicitud física — auth y propiedad', () => {
   });
 });
 
+describe('Solicitud física — inicio (retomar a la mitad)', () => {
+  test('iniciar abre la solicitud física sin digitar nada y aparece con su vinculacion_id en la lista', async () => {
+    const ag = await login('asesor');
+    const res = await ag.post(`/api/captacion/prospectos/${e.prospectoId}/solicitud-fisica`);
+    expect(res.status).toBe(200);
+    e.vinculacionId = res.body.vinculacion_id;
+    const { rows: [v] } = await pool.query(`SELECT origen_solicitud, seccion_pep_at, estado FROM captacion_vinculaciones WHERE id = $1`, [e.vinculacionId]);
+    expect(v).toMatchObject({ origen_solicitud: 'fisico', seccion_pep_at: null, estado: 'borrador' });
+    const lista = await ag.get('/api/captacion/prospectos');
+    expect(lista.body.find((p) => p.id === e.prospectoId)?.vinculacion_id).toBe(e.vinculacionId);
+    expect((await ag.get(`/api/captacion/vinculaciones/${e.vinculacionId}`)).status).toBe(200);
+  });
+
+  test('iniciar dos veces devuelve la misma solicitud (idempotente); otro asesor → 404', async () => {
+    const ag = await login('asesor');
+    const res = await ag.post(`/api/captacion/prospectos/${e.prospectoId}/solicitud-fisica`);
+    expect(res.body.vinculacion_id).toBe(e.vinculacionId);
+    const { rows } = await pool.query(`SELECT 1 FROM captacion_vinculaciones WHERE prospecto_id = $1`, [e.prospectoId]);
+    expect(rows).toHaveLength(1);
+    const otro = await login('otro');
+    expect((await otro.post(`/api/captacion/prospectos/${e.prospectoId}/solicitud-fisica`)).status).toBe(404);
+  });
+});
+
 describe('Solicitud física — digitación', () => {
   test('sin PEP ni aportes → 400', async () => {
     const ag = await login('asesor');

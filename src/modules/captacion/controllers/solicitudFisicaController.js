@@ -45,6 +45,31 @@ export const getSolicitudFisica = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// Abre la solicitud física apenas se registra a la persona (antes de digitar el formato): así queda en la lista de
+// solicitudes y se puede retomar aunque el asesor cierre el panel a la mitad. Idempotente.
+export const iniciarSolicitudFisica = async (req, res, next) => {
+  try {
+    const p = await prospectoDelAsesor(req.params.id, req.user.id);
+    if (!p) return res.status(404).json({ error: 'Prospecto no encontrado' });
+
+    let { rows: [v] } = await pool.query(
+      `SELECT id, estado, origen_solicitud, firma_png, seccion_firma_at FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]);
+    if (v?.estado === 'entregada') return res.status(400).json({ error: 'La solicitud ya fue entregada' });
+    if (v && (v.firma_png || (v.origen_solicitud !== 'fisico' && v.seccion_firma_at))) {
+      return res.status(409).json({ error: 'Esta solicitud ya fue firmada digitalmente: no se puede convertir en física' });
+    }
+    if (!v) {
+      ({ rows: [v] } = await pool.query(
+        `INSERT INTO captacion_vinculaciones (prospecto_id, origen_solicitud, fisico_digitado_por) VALUES ($1, 'fisico', $2) RETURNING id`, [p.id, req.user.id]));
+      await evento(p.id, v.id, 'solicitud_fisica_iniciada', 'solicitud', req);
+    } else if (v.origen_solicitud !== 'fisico') {
+      await pool.query(`UPDATE captacion_vinculaciones SET origen_solicitud = 'fisico', fisico_digitado_por = $2, updated_at = NOW() WHERE id = $1`, [v.id, req.user.id]);
+      await evento(p.id, v.id, 'solicitud_fisica_iniciada', 'solicitud', req);
+    }
+    res.json({ ok: true, vinculacion_id: v.id });
+  } catch (err) { next(err); }
+};
+
 // PUT idempotente: digita (o corrige) todas las secciones del formato físico
 export const guardarSolicitudFisica = async (req, res, next) => {
   try {

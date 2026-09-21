@@ -3,6 +3,7 @@ import { verifyToken } from '../../../middlewares/auth.js';
 import { checkPermission } from '../../../middlewares/checkPermission.js';
 import { captacionPublicLimiter, enlacePublicoLimiter } from '../../../middlewares/rateLimiter.js';
 import * as ctrl from '../controllers/captacionController.js';
+import * as listas from '../controllers/consultaListasController.js';
 
 const router = Router();
 const auditarPub = ctrl.auditarCambioPosteriorAFirma('prospecto');
@@ -77,6 +78,22 @@ router.put ('/config/validacion-voz',          checkPermission('captacion', 'CON
 
 router.get ('/vinculaciones',                  checkPermission('captacion', 'READ'),     ctrl.listarVinculaciones);
 router.get ('/vinculaciones/:id',              checkPermission('captacion', 'READ'),     ctrl.getVinculacion);
+// Consulta en listas restrictivas y fuentes abiertas: la hace el asesor; el Oficial de Cumplimiento valida que se hizo bien
+router.get ('/vinculaciones/:id/consulta-listas', checkPermission('captacion', 'READ'),  listas.getConsultaListas);
+router.post('/vinculaciones/:id/consulta-listas', checkPermission('captacion', 'WRITE'), listas.iniciarConsultaListas);
+router.put ('/consultas-listas/:cid',             checkPermission('captacion', 'WRITE'), listas.guardarConsultaListas);
+router.post('/consultas-listas/:cid/cerrar',      checkPermission('captacion', 'WRITE'), listas.cerrarConsultaListas);
+router.get ('/consultas-listas/:cid/pdf',         checkPermission('captacion', 'READ'),  listas.pdfConsultaAsesor);
+router.get ('/cumplimiento/consultas',            checkPermission('captacion', 'VALIDAR'), listas.listarConsultasCumplimiento);
+router.get ('/cumplimiento/consultas/:cid',       checkPermission('captacion', 'VALIDAR'), listas.getConsultaCumplimiento);
+router.get ('/cumplimiento/consultas/:cid/pdf',   checkPermission('captacion', 'VALIDAR'), listas.pdfConsultaOficial);
+router.post('/cumplimiento/consultas/:cid/validar', checkPermission('captacion', 'VALIDAR'), listas.validarConsulta);
+router.get ('/cumplimiento/listas',               checkPermission('captacion', 'VALIDAR'), listas.getEstadoListas);
+router.post('/cumplimiento/listas/actualizar',    checkPermission('captacion', 'VALIDAR'), listas.actualizarListasAhora);
+router.get ('/listas/estado',                     checkPermission('captacion', 'READ'),  listas.getEstadoListas);
+router.get ('/config/reglas-entrega',             checkPermission('captacion', 'READ'),  listas.getReglasEntrega);
+router.put ('/config/reglas-entrega',             checkPermission('captacion', 'CONFIGURAR'), listas.actualizarReglasEntrega);
+
 router.get ('/vinculaciones/:id/correcciones',   checkPermission('captacion', 'READ'),   ctrl.getCorrecciones);
 router.post('/vinculaciones/:id/verificacion-identidad', checkPermission('captacion', 'WRITE'), ctrl.verificarIdentidad);
 router.put ('/vinculaciones/:id/identidad',      checkPermission('captacion', 'WRITE'),  ctrl.corregirIdentidad);

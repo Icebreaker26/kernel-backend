@@ -12,6 +12,7 @@ import { SQL_SIN_IDENTIFICAR } from '../services/captacionService.js';
 import { canonicalizar, sha256 } from '../../../services/hashCanonico.js';
 import { registrarTexto } from '../services/textosConsentimiento.js';
 import { subsanacionAbierta, archivarFirma, textoSubsanacion } from '../services/subsanacion.js';
+import { consultaListasExigida, consultaVigente } from '../listas/consultas.js';
 import { PROTOCOLO_VOZ, MIN_PREGUNTAS_COINCIDEN, validacionVozExigida, guardarExigencia, validacionVigente } from '../services/validacionVoz.js';
 import {
   crearProspectoSchema, toqueSchema, updateProspectoSchema,
@@ -847,6 +848,9 @@ export const entregar = async (req, res, next) => {
     if (!v.seccion_firma_at) return res.status(400).json({ error: 'Falta la firma digital del asociado' });
     if (!v.seccion_documentos_at) return res.status(400).json({ error: 'Falta cargar la cédula' });
     if (v.valor_aporte === null) return res.status(400).json({ error: 'Falta definir el aporte del asociado' });
+    if (await consultaListasExigida() && !(await consultaVigente(v.id))) {
+      return res.status(400).json({ error: 'Falta la consulta en listas restrictivas validada por el Oficial de Cumplimiento', code: 'CONSULTA_LISTAS_REQUERIDA' });
+    }
     if (await validacionVozExigida() && !(await validacionVigente(v.id))) {
       return res.status(400).json({ error: 'Falta la validación de identidad por llamada de voz', code: 'VALIDACION_VOZ_REQUERIDA' });
     }

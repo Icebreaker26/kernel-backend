@@ -84,7 +84,7 @@ export const generarPresignedDescarga = async (archivoId) => {
 
 // Evidencia que nunca se borra por el flujo normal (conservación mínima de 5 a 10 años, Circular Básica Jurídica Título V).
 // Solo la retira un proceso de depuración explícito (`permitirEvidencia`) y con el plazo legal cumplido.
-const ENTIDADES_PROTEGIDAS = ['captacion_formato'];
+const ENTIDADES_PROTEGIDAS = ['captacion_formato', 'captacion_consulta_listas', 'listas_snapshot'];
 
 // `omitirS3`: solo borra la fila (tests, o cuando el objeto ya no existe en el bucket).
 export const eliminarArchivo = async (archivoId, { omitirS3 = false, permitirEvidencia = false } = {}) => {

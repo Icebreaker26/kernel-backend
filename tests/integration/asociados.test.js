@@ -1204,6 +1204,22 @@ describe('Asociados — descuentos portal (GET /descuentos)', () => {
     expect(Number(l5.valor)).toBe(10000);
   });
 
+  test('el portal del asociado muestra solo las cuotas vigentes tras el re-sync (no las anteriores dadas de baja)', async () => {
+    const ag = agent();
+    await ag.post('/api/asociados/login').send({ codigo: codigoDesc, password: passwordDesc });
+    const res = await ag.get('/api/asociados/descuentos');
+    expect(res.status).toBe(200);
+    const l4 = res.body.filter((d) => d.linea_id === 4);
+    const l5 = res.body.filter((d) => d.linea_id === 5);
+    expect(l4).toHaveLength(1);
+    expect(Number(l4[0].valor)).toBe(20000);
+    expect(l5).toHaveLength(1);
+    expect(Number(l5[0].valor)).toBe(10000);
+    // Las anteriores siguen en la base (borrado lógico), solo que ya no se muestran
+    const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM asociado_descuentos WHERE asociado_codigo = $1 AND NOT is_active', [codigoDesc]);
+    expect(rows[0].n).toBeGreaterThanOrEqual(2);
+  });
+
   test('CSV sin lineas relevantes → datos anteriores permanecen', async () => {
     const csvSoloL1 = [
       'linea,codigo,apellido,nombre,clase_cuota,empresa_dsto,nombre_empresa,ciudad,direccion,movil,cuota,periodo_descto',

@@ -19,6 +19,22 @@ const sendViaRelay = async (to, subject, html, text) => {
   }
 };
 
+// ── Resend por HTTPS (canal principal en producción; Railway Hobby bloquea SMTP pero sí llega a 443) ──
+const resendConfigurado = () => !!(env.RESEND_API_KEY && env.RESEND_FROM);
+
+const sendViaResend = async (to, subject, html, text) => {
+  const res = await fetch('https://api.resend.com/emails', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.RESEND_API_KEY}` },
+    body:    JSON.stringify({ from: env.RESEND_FROM, to: [to], subject, html, ...(text ? { text } : {}) }),
+    signal:  AbortSignal.timeout(20000),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.message ?? `Resend error ${res.status}`);
+  }
+};
+
 // ── Amazon SES por HTTPS (respaldo del relay; Railway sí llega a 443) ─────────
 let ses = null;
 
@@ -103,6 +119,19 @@ export const enviarConRespaldo = async (principal, respaldo, args) => {
   }
 };
 
+// Prueba los canales en orden; devuelve al primero que funcione y, si todos fallan, lanza el error del último.
+export const enviarPorCadena = async (canales, args) => {
+  for (let i = 0; i < canales.length; i++) {
+    try {
+      await canales[i](...args);
+      return;
+    } catch (err) {
+      if (i === canales.length - 1) throw err;
+      logger.warn(`email: el canal ${canales[i].name} falló (${err.message}); se prueba el siguiente`);
+    }
+  }
+};
+
 // Direcciones que rebotaron de forma permanente o se quejaron (llegan de SES por SNS): no se les escribe más
 export const estaSuprimido = async (email) => {
   const { rowCount } = await pool.query(
@@ -120,8 +149,13 @@ export const enviarEmail = async (to, subject, html, text = '') => {
     emailsDePrueba.push({ to, subject, html, text });
     return;
   }
-  if (env.RELAY_URL && env.RELAY_SECRET) {
-    await enviarConRespaldo(sendViaRelay, sesConfigurado() ? sendViaSes : null, [to, subject, html, text]);
+  // Orden: Resend (HTTPS, no depende de ningún equipo nuestro) → relay → SES; cada uno respalda al anterior
+  const canales = [];
+  if (resendConfigurado()) canales.push(sendViaResend);
+  if (env.RELAY_URL && env.RELAY_SECRET) canales.push(sendViaRelay);
+  if (sesConfigurado() && (canales.length > 0 || !env.SMTP_HOST)) canales.push(sendViaSes);
+  if (canales.length > 0) {
+    await enviarPorCadena(canales, [to, subject, html, text]);
   } else if (sesConfigurado() && !env.SMTP_HOST) {
     await sendViaSes(to, subject, html, text);
   } else {

@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import { enviarConRespaldo } from '../../src/services/emailService.js';
+import { enviarConRespaldo, enviarPorCadena } from '../../src/services/emailService.js';
 
 describe('Email — respaldo del relay', () => {
   const args = ['a@b.co', 'Asunto', '<p>hola</p>', 'hola'];
@@ -28,5 +28,30 @@ describe('Email — respaldo del relay', () => {
     const principal = jest.fn().mockRejectedValue(new Error('relay caído'));
     const respaldo = jest.fn().mockRejectedValue(new Error('SES rechazó el correo'));
     await expect(enviarConRespaldo(principal, respaldo, args)).rejects.toThrow('SES rechazó el correo');
+  });
+});
+
+describe('enviarPorCadena — Resend → relay → SES', () => {
+  const args = ['a@b.co', 'Asunto', '<p>x</p>', 'x'];
+
+  test('usa el primer canal si funciona y no toca los demás', async () => {
+    const a = jest.fn().mockResolvedValue(); const b = jest.fn();
+    await enviarPorCadena([a, b], args);
+    expect(a).toHaveBeenCalledWith(...args);
+    expect(b).not.toHaveBeenCalled();
+  });
+
+  test('salta al siguiente canal cuando falla el anterior', async () => {
+    const a = jest.fn().mockRejectedValue(new Error('resend caído'));
+    const b = jest.fn().mockRejectedValue(new Error('relay apagado'));
+    const c = jest.fn().mockResolvedValue();
+    await enviarPorCadena([a, b, c], args);
+    expect(c).toHaveBeenCalledTimes(1);
+  });
+
+  test('si todos fallan lanza el error del último', async () => {
+    const a = jest.fn().mockRejectedValue(new Error('uno'));
+    const b = jest.fn().mockRejectedValue(new Error('dos'));
+    await expect(enviarPorCadena([a, b], args)).rejects.toThrow('dos');
   });
 });

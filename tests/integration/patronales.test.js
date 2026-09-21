@@ -194,6 +194,44 @@ describe('GET /patronales/preview', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Descuentos adicionales: solo los vigentes (regresión: el fondo de bienestar se cobraba una vez por cada sync)
+// ═══════════════════════════════════════════════════════════════════════════════
+describe('GET /patronales/preview — solo cuentan los descuentos vigentes', () => {
+  const fila = (linea, nombre, valor, activo, numero = null) => pool.query(
+    `INSERT INTO asociado_descuentos (asociado_codigo, linea_id, nombre_linea, valor, numero, is_active, origen)
+     VALUES ($1, $2, $3, $4, $5, $6, 'csv')`, [ASOC_CODIGO, linea, nombre, valor, numero, activo]);
+
+  beforeAll(async () => {
+    await pool.query('DELETE FROM asociado_descuentos WHERE asociado_codigo = $1', [ASOC_CODIGO]);
+    // Fondo de bienestar: una cuota vigente y tres que el sync dio de baja (mismo valor, como dejaba el error)
+    await fila(17, 'FONDO DE BIENESTAR', 5300, true);
+    for (let i = 0; i < 3; i += 1) await fila(17, 'FONDO DE BIENESTAR', 5300, false);
+    // Un crédito ya pagado (dado de baja) que no debe cobrarse
+    await fila(1006, 'CRÉDITO LIBRE INVERSIÓN', 90000, false, 'PAT-TEST-1');
+    // Un crédito vigente que sí se cobra
+    await fila(1015, 'CRÉDITO CAJA RÁPIDA', 40000, true, 'PAT-TEST-2');
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM asociado_descuentos WHERE asociado_codigo = $1', [ASOC_CODIGO]);
+  });
+
+  test('el fondo de bienestar se cobra UNA vez y no se cobran créditos dados de baja', async () => {
+    const ag = agAdmin();
+    await loginAdmin(ag);
+    const res = await ag.get(`/api/patronales/preview?periodo=${PERIODO}&quincena=1&empresa_codigo=${EMP_CODIGO}`);
+    expect(res.status).toBe(200);
+    const asoc = res.body.empresas[0].asociados.find((a) => a.codigo === ASOC_CODIGO);
+    const fondo = asoc.conceptos.filter((c) => c.codigo === 'L17');
+    expect(fondo).toHaveLength(1);
+    expect(fondo[0].monto).toBe(5300);                                       // no 4 × 5.300
+    expect(asoc.conceptos.some((c) => c.codigo === 'L1006')).toBe(false);    // crédito dado de baja
+    expect(asoc.conceptos.find((c) => c.codigo === 'L1015').monto).toBe(40000);
+    expect(asoc.total).toBe(50000 + 5300 + 40000);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // POST /patronales/empresas/:codigo/causar
 // ═══════════════════════════════════════════════════════════════════════════════
 describe('POST /patronales/empresas/:codigo/causar', () => {

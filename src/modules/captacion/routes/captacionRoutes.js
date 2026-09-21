@@ -77,6 +77,9 @@ router.put ('/config/validacion-voz',          checkPermission('captacion', 'CON
 
 router.get ('/vinculaciones',                  checkPermission('captacion', 'READ'),     ctrl.listarVinculaciones);
 router.get ('/vinculaciones/:id',              checkPermission('captacion', 'READ'),     ctrl.getVinculacion);
+router.get ('/vinculaciones/:id/correcciones',   checkPermission('captacion', 'READ'),   ctrl.getCorrecciones);
+router.post('/vinculaciones/:id/verificacion-identidad', checkPermission('captacion', 'WRITE'), ctrl.verificarIdentidad);
+router.put ('/vinculaciones/:id/identidad',      checkPermission('captacion', 'WRITE'),  ctrl.corregirIdentidad);
 router.get ('/vinculaciones/:id/subsanacion',    checkPermission('captacion', 'READ'),   ctrl.getSubsanacion);
 router.post('/vinculaciones/:id/subsanacion',    checkPermission('captacion', 'WRITE'),  ctrl.pedirSubsanacion);
 router.post('/vinculaciones/:id/subsanacion/cerrar', checkPermission('captacion', 'WRITE'), ctrl.cerrarSubsanacion);

@@ -193,3 +193,11 @@ export const subsanacionSchema = z.object({
   items : z.array(z.enum(['cedula_frente', 'cedula_reverso', 'firma', 'datos'])).min(1, 'Elige qué hay que corregir').max(4),
   motivo: z.string().trim().min(5, 'Explica el motivo (mínimo 5 caracteres)').max(1000),
 }).strict();
+
+// Corrección de identidad hecha por el asesor (cédula o nombre mal escritos). El motivo es obligatorio: queda como evidencia.
+export const correccionIdentidadSchema = z.object({
+  cedula   : z.string().trim().regex(/^\d{4,15}$/, 'La cédula debe tener solo números (entre 4 y 15)').optional(),
+  nombres  : z.string().trim().min(1).max(100).optional(),
+  apellidos: z.string().trim().min(1).max(100).optional(),
+  motivo   : z.string().trim().min(10, 'Explica el motivo (mínimo 10 caracteres)').max(500),
+}).strict().refine((d) => d.cedula || d.nombres || d.apellidos, { message: 'Indica qué dato corregir' });

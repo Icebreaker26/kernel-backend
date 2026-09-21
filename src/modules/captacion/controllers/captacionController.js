@@ -92,11 +92,14 @@ export const crearProspecto = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// El admin ve la captación de todos los asesores (null = sin filtro); cada asesor, solo la suya.
+const ambitoAsesor = (req) => (req.user.rol === 'admin' ? null : req.user.id);
+
 export const listarProspectos = async (req, res, next) => {
   try {
     const { estado, empresa, sin_identificar } = req.query;
-    const params = [req.user.id];
-    const filters = [`p.asesor_uuid = $1`, `p.is_active = true`];
+    const params = [ambitoAsesor(req)];
+    const filters = [`($1::uuid IS NULL OR p.asesor_uuid = $1)`, `p.is_active = true`];
 
     // Por defecto se ocultan los prospectos del stand que nadie ha identificado (ver captacionService).
     // ?sin_identificar=solo → únicamente esos; ?sin_identificar=incluir → todos.
@@ -123,9 +126,11 @@ export const listarProspectos = async (req, res, next) => {
                 WHERE prospecto_id = p.id ORDER BY created_at DESC LIMIT 1) AS ultimo_toque,
               (SELECT created_at FROM captacion_toques
                 WHERE prospecto_id = p.id ORDER BY created_at DESC LIMIT 1) AS ultimo_toque_at,
-              ${calcScore}
+              ${calcScore},
+              p.asesor_uuid, CASE WHEN $1::uuid IS NULL THEN ua.nombre END AS asesor_nombre
          FROM captacion_prospectos p
          JOIN empresas e ON e.codigo = p.empresa_codigo
+         LEFT JOIN global_usuarios ua ON ua.id = p.asesor_uuid
          LEFT JOIN captacion_vinculaciones v ON v.prospecto_id = p.id AND v.is_active = true
         WHERE ${filters.join(' AND ')}
         ORDER BY score DESC, p.ping_at DESC NULLS LAST, p.created_at DESC`,
@@ -141,8 +146,8 @@ export const resumenProspectos = async (req, res, next) => {
     const { rows: [r] } = await pool.query(
       `SELECT COUNT(*) FILTER (WHERE ${SQL_SIN_IDENTIFICAR}) AS sin_identificar
          FROM captacion_prospectos p
-        WHERE p.asesor_uuid = $1 AND p.is_active = true`,
-      [req.user.id]
+        WHERE ($1::uuid IS NULL OR p.asesor_uuid = $1) AND p.is_active = true`,
+      [ambitoAsesor(req)]
     );
     res.json({ sin_identificar: Number(r.sin_identificar) });
   } catch (err) { next(err); }
@@ -162,8 +167,8 @@ export const getProspecto = async (req, res, next) => {
          FROM captacion_prospectos p
          JOIN empresas e ON e.codigo = p.empresa_codigo
          LEFT JOIN captacion_vinculaciones v ON v.prospecto_id = p.id AND v.is_active = true
-        WHERE p.id = $1 AND p.asesor_uuid = $2 AND p.is_active = true`,
-      [req.params.id, req.user.id]
+        WHERE p.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND p.is_active = true`,
+      [req.params.id, ambitoAsesor(req)]
     );
     if (!p) return res.status(404).json({ error: 'Prospecto no encontrado' });
     res.json(p);
@@ -250,7 +255,7 @@ export const listarVinculaciones = async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT v.id, v.estado, v.created_at, v.updated_at,
               p.nombres, p.apellidos, p.cedula, p.celular, p.empresa_codigo,
-              e.nombre AS empresa_nombre,
+              e.nombre AS empresa_nombre, p.asesor_uuid, CASE WHEN $1::uuid IS NULL THEN ua.nombre END AS asesor_nombre,
               v.seccion_personal_at, v.seccion_laboral_at, v.seccion_pep_at,
               v.seccion_financiera_at, v.seccion_beneficiarios_at,
               v.seccion_referencias_at, v.seccion_documentos_at, v.seccion_firma_at, v.seccion_aportes_at,
@@ -259,9 +264,10 @@ export const listarVinculaciones = async (req, res, next) => {
          FROM captacion_vinculaciones v
          JOIN captacion_prospectos p ON p.id = v.prospecto_id
          JOIN empresas e ON e.codigo = p.empresa_codigo
-        WHERE p.asesor_uuid = $1 AND v.is_active = true
+         LEFT JOIN global_usuarios ua ON ua.id = p.asesor_uuid
+        WHERE ($1::uuid IS NULL OR p.asesor_uuid = $1) AND v.is_active = true
         ORDER BY v.updated_at DESC`,
-      [req.user.id]
+      [ambitoAsesor(req)]
     );
     res.json(rows);
   } catch (err) { next(err); }
@@ -292,10 +298,10 @@ export const getVinculacion = async (req, res, next) => {
          JOIN empresas e ON e.codigo = p.empresa_codigo
          LEFT JOIN captacion_beneficiarios b ON b.vinculacion_id = v.id
          LEFT JOIN captacion_referencias r ON r.vinculacion_id = v.id
-        WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true
+        WHERE v.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND v.is_active = true
         GROUP BY v.id, p.nombres, p.apellidos, p.cedula, p.celular, p.correo,
                  p.empresa_codigo, p.habeas_data_at, p.habeas_data_origen, p.habeas_data_version, e.nombre`,
-      [req.params.id, req.user.id]
+      [req.params.id, ambitoAsesor(req)]
     );
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
     res.json({ ...v, tarifas: TARIFAS });
@@ -357,7 +363,7 @@ const sellarFormato = async (vinculacionId) => {
 // dueño, sin caché, y cada descarga queda en captacion_eventos.
 export const descargarFormato = async (req, res, next) => {
   try {
-    const v = await cargarDatosFormato(req.params.id, req.user.id);
+    const v = await cargarDatosFormato(req.params.id, ambitoAsesor(req));
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
 
     let pdf = null;
@@ -396,8 +402,8 @@ export const getDocumentosVinculacion = async (req, res, next) => {
       `SELECT v.id, v.prospecto_id, v.cedula_frente_id, v.cedula_reverso_id
          FROM captacion_vinculaciones v
          JOIN captacion_prospectos p ON p.id = v.prospecto_id
-        WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true`,
-      [req.params.id, req.user.id]
+        WHERE v.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND v.is_active = true`,
+      [req.params.id, ambitoAsesor(req)]
     );
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
 
@@ -832,7 +838,7 @@ export const initStandProspecto = async (req, res, next) => {
 export const getValoresAsesor = async (req, res, next) => {
   try {
     // Cada asesor solo ve sus propios valores (antes bastaba con cambiar el UUID de la URL)
-    if (req.params.uuid !== req.user.id) return res.status(403).json({ error: 'Solo puedes ver tus propios valores' });
+    if (req.params.uuid !== req.user.id && req.user.rol !== 'admin') return res.status(403).json({ error: 'Solo puedes ver tus propios valores' });
     const asesor_uuid = req.params.uuid;
     const { rows: [r] } = await pool.query(`
       SELECT

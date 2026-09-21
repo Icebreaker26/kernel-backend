@@ -1677,7 +1677,7 @@ export const pubFirmar = async (req, res, next) => {
     };
     const snapshotStr = canonicalizar({
       formulario: snap,
-      firma: { png: data.firma_png, trazos: data.firma_trazos, firmada_at: firmaAt, ip: req.ip, user_agent: userAgent, verificacion },
+      firma: { origen: data.firma_origen, png: data.firma_png, trazos: data.firma_trazos, firmada_at: firmaAt, ip: req.ip, user_agent: userAgent, verificacion },
       consentimientos,
     });
     const docHash = sha256(snapshotStr);
@@ -1713,7 +1713,7 @@ export const pubFirmar = async (req, res, next) => {
     await pool.query(
       `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, autor_tipo, ip, payload)
        VALUES ($1,$2,'firma','prospecto',$3,$4)`,
-      [p.id, v.id, req.ip, JSON.stringify({ doc_hash: docHash, firma_sha256: sha256(data.firma_png), version: data.version_consentimiento, firma_electronica: data.version_firma_electronica, verificacion: { canal: decoded.canal, destino: decoded.destino }, user_agent: userAgent, consentimientos })]
+      [p.id, v.id, req.ip, JSON.stringify({ doc_hash: docHash, firma_origen: data.firma_origen, firma_sha256: sha256(data.firma_png), version: data.version_consentimiento, firma_electronica: data.version_firma_electronica, verificacion: { canal: decoded.canal, destino: decoded.destino }, user_agent: userAgent, consentimientos })]
     );
 
     // Notificar al asesor

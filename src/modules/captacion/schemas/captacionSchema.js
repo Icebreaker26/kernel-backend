@@ -131,15 +131,21 @@ export const seccionReferenciasSchema = z.object({
 });
 
 export const seccionFirmaSchema = z.object({
+  // 'dibujada': con el dedo o el mouse (quedan los trazos). 'imagen': cargada desde un archivo (no hay trazos)
+  firma_origen          : z.enum(['dibujada', 'imagen']).default('dibujada'),
   // PNG en data URL (la firma dibujada): formato y tamaño acotados; una firma vacía o de otro tipo se rechaza
   firma_png             : z.string().max(1_500_000).refine((v) => v.startsWith('data:image/png;base64,iVBORw0KGgo'), 'La firma debe ser una imagen PNG'),
-  // Trazos: al menos dos puntos (una firma real no es un punto suelto)
-  firma_trazos          : z.array(z.object({ x: z.number(), y: z.number(), t: z.number() })).min(2, 'La firma está vacía').max(20000),
+  // Trazos: en una firma dibujada, al menos dos puntos (una firma real no es un punto suelto); en una imagen cargada no hay trazos
+  firma_trazos          : z.array(z.object({ x: z.number(), y: z.number(), t: z.number() })).max(20000),
   version_consentimiento: z.string().min(1),
   acepta_terminos       : z.literal(true),
   // Consentimiento explícito a firmar electrónicamente (Ley 527 de 1999); equivale a la firma manuscrita
   acepta_firma_electronica: z.literal(true),
   version_firma_electronica: z.string().min(1),
+}).superRefine((d, ctx) => {
+  if (d.firma_origen === 'dibujada' && d.firma_trazos.length < 2) {
+    ctx.addIssue({ code: 'custom', path: ['firma_trazos'], message: 'La firma está vacía' });
+  }
 });
 
 // Código de un solo uso que se envía al correo del asociado

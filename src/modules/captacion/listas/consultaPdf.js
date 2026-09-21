@@ -270,7 +270,7 @@ export const generarPdfConsulta = async (c, { asesorNombre, oficialNombre = null
     })
   );
   const p = c.parametros || {};
-  dibujar(`Motor ${p.motor || '—'}  ·  umbral de coincidencia posible ${p.umbral_posible ?? '—'}, fuerte ${p.umbral_fuerte ?? '—'}  ·  PEP y sanciones disciplinarias se cotejan solo por cédula`, M, top, { size: 6.8, color: C.gris });
+  dibujar(`Motor ${p.motor || '—'}  ·  umbral de coincidencia posible ${p.umbral_posible ?? '—'}, fuerte ${p.umbral_fuerte ?? '—'}  ·  PEP, sanciones disciplinarias y responsables fiscales se cotejan solo por cédula`, M, top, { size: 6.8, color: C.gris });
   top += 12;
 
   // ── Coincidencias ──────────────────────────────────────────────────────────

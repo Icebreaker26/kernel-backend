@@ -3,6 +3,7 @@ import pool from '../../../db/database.js';
 import logger from '../../../config/logger.js';
 import { subirBuffer } from '../../../services/archivoService.js';
 import { parseOnu, parseOfac, parseUe, parseUk, parsePepSigep, parseSiri } from './parsers.js';
+import { descargarBoletinCgr, parseBoletinCgr } from './boletinCgr.js';
 import { invalidarCache } from './cotejo.js';
 
 const OFAC = 'https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports';
@@ -44,6 +45,13 @@ export const FUENTES = {
     archivos: [{ url: `${DATOS}/3qxn-uc22/rows.csv?accessType=DOWNLOAD`, nombre: 'pep_sigep.csv', mime: 'text/csv' }],
     leer: ([csv]) => parsePepSigep(csv),
   },
+  CGR_BOLETIN: {
+    nombre: 'Contraloría — Boletín de Responsables Fiscales', vinculante: false, obligatoria: false, cotejo: 'documento', grupo: 'antecedentes',
+    // PDF trimestral público (sin CAPTCHA): se revisa cada semana y se acepta hasta con 14 días sin verificar
+    cadaHoras: 120, maxDias: 14, binario: true, urlTexto: 'cfiscal.contraloria.gov.co/reportes/consultaboletinestrimestrales.aspx',
+    descargar: descargarBoletinCgr,
+    leer: ([pdf]) => parseBoletinCgr(pdf),
+  },
   SIRI: {
     nombre: 'Procuraduría — Sanciones disciplinarias (SIRI)', vinculante: false, obligatoria: false, cotejo: 'documento', grupo: 'antecedentes',
     archivos: [{ url: `${DATOS}/iaeu-rcn6/rows.csv?accessType=DOWNLOAD`, nombre: 'siri.csv', mime: 'text/csv' }],
@@ -84,10 +92,10 @@ const guardarEntradas = async (client, versionId, fuente, entradas) => {
 export const actualizarFuente = async (codigo) => {
   const cfg = FUENTES[codigo];
   if (!cfg) throw new Error(`Fuente desconocida: ${codigo}`);
-  const url = cfg.archivos.map((a) => a.url.split('?')[0]).join(' + ');
+  const url = cfg.urlTexto ?? cfg.archivos.map((a) => a.url.split('?')[0]).join(' + ');
   try {
-    const descargas = [];
-    for (const a of cfg.archivos) descargas.push(await descargar(a));
+    const descargas = cfg.descargar ? await cfg.descargar() : [];
+    if (!cfg.descargar) for (const a of cfg.archivos) descargas.push(await descargar(a));
     const sha256 = crypto.createHash('sha256').update(Buffer.concat(descargas.map((d) => d.buf))).digest('hex');
     const bytes = descargas.reduce((n, d) => n + d.buf.length, 0);
 
@@ -97,7 +105,7 @@ export const actualizarFuente = async (codigo) => {
       return { fuente: codigo, cambio: false };
     }
 
-    const { publicada, entradas } = cfg.leer(descargas.map((d) => d.buf.toString('utf8')));
+    const { publicada, entradas } = await cfg.leer(descargas.map((d) => (cfg.binario ? d.buf : d.buf.toString('utf8'))));
     if (!entradas.length) throw new Error('El archivo no trajo registros: se conserva la versión anterior');
     // Una lista que de un día para otro pierde más de la mitad de sus registros casi seguro llegó dañada
     if (activa) {
@@ -122,9 +130,9 @@ export const actualizarFuente = async (codigo) => {
 
       // Archivos originales (evidencia de qué versión se consultó); si S3 falla la versión igual queda activa
       const ids = [];
-      for (let i = 0; i < cfg.archivos.length; i++) {
+      for (let i = 0; i < descargas.length; i++) {
         try {
-          const a = await subirBuffer('listas_snapshot', v.id, descargas[i].buf, { nombre: cfg.archivos[i].nombre, mime: cfg.archivos[i].mime });
+          const a = await subirBuffer('listas_snapshot', v.id, descargas[i].buf, { nombre: descargas[i].nombre ?? cfg.archivos[i].nombre, mime: descargas[i].mime ?? cfg.archivos[i].mime });
           ids.push(a.id);
         } catch (err) { logger.warn(`listas: no se pudo guardar el original de ${codigo} en S3: ${err.message}`); }
       }
@@ -155,7 +163,7 @@ export const actualizarTodas = async ({ soloVencidas = false } = {}) => {
     for (const codigo of Object.keys(FUENTES)) {
       if (soloVencidas) {
         const { rows: [v] } = await pool.query(`SELECT verificada_at FROM listas_versiones WHERE fuente = $1 AND activa`, [codigo]);
-        if (v && Date.now() - new Date(v.verificada_at).getTime() < 20 * 3600 * 1000) continue;
+        if (v && Date.now() - new Date(v.verificada_at).getTime() < (FUENTES[codigo].cadaHoras ?? 20) * 3600 * 1000) continue;
       }
       resultados.push(await actualizarFuente(codigo));
     }
@@ -179,7 +187,7 @@ export const estadoFuentes = async () => {
       codigo, nombre: cfg.nombre, vinculante: cfg.vinculante, obligatoria: cfg.obligatoria, cotejo: cfg.cotejo, grupo: cfg.grupo,
       disponible: !!a, version_id: a?.id ?? null, publicada: a?.publicada ?? null, verificada_at: a?.verificada_at ?? null, descargada_at: a?.descargada_at ?? null,
       sha256: a?.sha256 ?? null, registros: a?.registros ?? 0, dias_sin_verificar: dias,
-      desactualizada: a ? dias > 3 : true,
+      desactualizada: a ? dias > (cfg.maxDias ?? 3) : true,
       ultimo_error: e && (!a || new Date(e.descargada_at) > new Date(a.verificada_at)) ? e.error : null,
     };
   });

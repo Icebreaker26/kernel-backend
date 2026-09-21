@@ -2,7 +2,7 @@ import pool from '../../../db/database.js';
 import { PARAMETROS_COTEJO, normalizar, palabras, soloDigitos, compararPalabras } from './normalizar.js';
 
 // Fuentes que solo se cotejan por cédula exacta (buscar por nombre en decenas de miles de personas solo genera homónimos)
-const SOLO_DOCUMENTO = new Set(['PEP_SIGEP', 'SIRI']);
+const SOLO_DOCUMENTO = new Set(['PEP_SIGEP', 'SIRI', 'CGR_BOLETIN']);
 
 let cache = null;   // { firma, entradas[], porPalabra: Map, porPrefijo: Map, porDoc: Map }
 

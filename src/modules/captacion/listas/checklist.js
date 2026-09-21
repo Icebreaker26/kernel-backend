@@ -19,7 +19,7 @@ export const CHECKLIST_MANUAL = [
   {
     clave: 'contraloria', obligatoria: false,
     titulo: 'Boletín de responsables fiscales (Contraloría)',
-    ayuda: 'No hay descarga masiva automatizable: el boletín se publica en PDF cada trimestre y el certificado se saca por persona. Consúltalo con la cédula y anota el resultado.',
+    ayuda: 'El sistema ya cruza por cédula el Boletín de Responsables Fiscales (se descarga solo cada semana). El certificado oficial se saca por persona en la web: si además lo consultaste, anota el resultado.',
     enlaces: [
       { etiqueta: 'Certificado de antecedentes fiscales', url: 'https://www.contraloria.gov.co/en/control-fiscal/responsabilidad-fiscal/certificado-de-antecedentes-fiscales' },
       { etiqueta: 'Boletín trimestral (PDF)', url: 'https://cfiscal.contraloria.gov.co/reportes/consultaboletinestrimestrales.aspx' },

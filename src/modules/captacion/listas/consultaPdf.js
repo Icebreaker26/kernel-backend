@@ -328,7 +328,7 @@ export const generarPdfConsulta = async (c, { asesorNombre, oficialNombre = null
       const m = (c.manual || {})[item.clave];
       const t = item.titulo + (item.obligatoria ? '' : ' (opcional)');
       if (!m) return [{ texto: t, bold: true }, { texto: 'No consultada', color: C.gris }, { texto: '—', color: C.gris }];
-      const detalle = [m.terminos && `Buscó: ${m.terminos}`, m.motor && `Motor: ${m.motor}`, m.consultada_at && `Consultada: ${fechaHoraBogota(m.consultada_at)}`, m.observaciones && `Observaciones: ${m.observaciones}`].filter(Boolean).join('\n');
+      const detalle = [m.autorizacion_titular && 'Con autorización del titular para la consulta', m.terminos && `Buscó: ${m.terminos}`, m.motor && `Motor: ${m.motor}`, m.consultada_at && `Consultada: ${fechaHoraBogota(m.consultada_at)}`, m.observaciones && `Observaciones: ${m.observaciones}`].filter(Boolean).join('\n');
       return [{ texto: t, bold: true }, { texto: RESULTADO_MANUAL[m.resultado] || m.resultado, bold: true, color: m.resultado === 'hallazgo' ? C.rojo : m.resultado === 'sin_hallazgos' ? C.bosque : C.gris }, { texto: detalle || '—', size: 7.5 }];
     })
   );

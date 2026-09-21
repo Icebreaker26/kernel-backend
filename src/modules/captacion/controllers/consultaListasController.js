@@ -25,6 +25,7 @@ const manualSchema = z.object({
   observaciones: z.string().trim().max(1500).optional(),
   terminos: z.string().trim().max(500).optional(),
   motor: z.string().trim().max(120).optional(),
+  autorizacion_titular: z.boolean().optional(),
 });
 const guardarSchema = z.object({
   decisiones: z.array(decisionSchema).max(100).default([]),
@@ -203,6 +204,9 @@ export const guardarConsultaListas = async (req, res, next) => {
         return res.status(400).json({ error: `${item.titulo}: indica qué términos buscaste y en qué motor` });
       }
       if (item.obligatoria && m.resultado === 'no_aplica') return res.status(400).json({ error: `${item.titulo} es obligatoria: no puede quedar como "no aplica"` });
+      if (item.pide_autorizacion && !m.autorizacion_titular) {
+        return res.status(400).json({ error: `${item.titulo}: confirma que tienes la autorización del titular para consultar sus antecedentes` });
+      }
       manual[clave] = { ...m, consultada_at: new Date().toISOString() };
     }
     const { rows: [fila] } = await pool.query(

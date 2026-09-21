@@ -26,9 +26,9 @@ export const CHECKLIST_MANUAL = [
     ],
   },
   {
-    clave: 'policia', obligatoria: false,
+    clave: 'policia', obligatoria: true, pide_autorizacion: true,
     titulo: 'Antecedentes judiciales (Policía Nacional)',
-    ayuda: 'Consulta individual con la cédula y un CAPTCHA (no se puede automatizar). La página pide que quien consulta tenga la autorización del titular. Anota el resultado.',
+    ayuda: 'La consulta oficial se hace a mano: abre el enlace, escribe la cédula y resuelve el CAPTCHA (no hay forma autorizada de automatizarlo). La página pide que quien consulta tenga la autorización del titular: confírmalo abajo. Anota lo que dice el resultado.',
     enlaces: [{ etiqueta: 'Consulta de antecedentes judiciales', url: 'https://antecedentes.policia.gov.co:7005/WebJudicial/' }],
   },
 ];

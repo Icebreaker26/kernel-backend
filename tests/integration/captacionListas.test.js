@@ -284,6 +284,11 @@ describe('Consulta en listas — asesor, Oficial de Cumplimiento y entrega', () 
     expect((await ag.asesor.put(url).send({ manual: { fuentes_abiertas: { resultado: 'no_aplica' } } })).status).toBe(400);                // obligatoria
     expect((await ag.asesor.put(url).send({ manual: { procuraduria: { resultado: 'hallazgo' } } })).status).toBe(400);                    // hallazgo sin describir
     expect((await ag.asesor.put(url).send({ manual: { inventada: { resultado: 'sin_hallazgos' } } })).status).toBe(400);
+    // La consulta a la Policía es obligatoria y exige confirmar la autorización del titular
+    expect((await ag.asesor.put(url).send({ manual: { policia: { resultado: 'no_aplica' } } })).status).toBe(400);
+    const sinAutorizacion = await ag.asesor.put(url).send({ manual: { policia: { resultado: 'sin_hallazgos' } } });
+    expect(sinAutorizacion.status).toBe(400);
+    expect(sinAutorizacion.body.error).toContain('autorización del titular');
 
     const ok = await ag.asesor.put(url).send({
       decisiones: [
@@ -292,7 +297,7 @@ describe('Consulta en listas — asesor, Oficial de Cumplimiento y entrega', () 
         { id: est.ids.PEP_SIGEP, decision: 'confirmada', motivo: 'Es él: fue alcalde encargado; requiere debida diligencia ampliada' },
       ],
       manual: { fuentes_abiertas: { resultado: 'sin_hallazgos', terminos: '"Carlos Alberto Mendoza Rueda" lavado de activos', motor: 'Google', observaciones: 'Solo perfiles de redes sociales' },
-                policia: { resultado: 'no_aplica', observaciones: 'No se consultó' } },
+                policia: { resultado: 'sin_hallazgos', autorizacion_titular: true, observaciones: 'Página de la Policía: no tiene asuntos pendientes con las autoridades judiciales' } },
     });
     expect(ok.status).toBe(200);
     expect(ok.body.pendientes).toMatchObject({ completa: true });

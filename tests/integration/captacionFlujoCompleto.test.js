@@ -344,6 +344,94 @@ describe('Afiliación de principio a fin (página web → firma → entrega al a
     expect((await ag.get(url)).status).toBe(200);
   });
 
+  test('Paso 13a2 — el asesor DEVUELVE a subsanar la cédula (frente) y la firma: la persona corrige, firma de nuevo y la firma anterior queda archivada', async () => {
+    const ag = await login('asesor');
+    const url = `/api/captacion/vinculaciones/${e.vinculacionId}`;
+    const hashViejo = e.firmaHash;
+    const { rows: [antes] } = await pool.query(`SELECT firma_pdf_archivo_id FROM captacion_vinculaciones WHERE id = $1`, [e.vinculacionId]);
+
+    // Validaciones del pedido
+    expect((await ag.post(`${url}/subsanacion`).send({ items: [], motivo: 'La foto se ve borrosa' })).status).toBe(400);
+    expect((await ag.post(`${url}/subsanacion`).send({ items: ['firma'], motivo: 'x' })).status).toBe(400);
+
+    const emailsAntes = emailsDePrueba.length;
+    const pide = await ag.post(`${url}/subsanacion`).send({ items: ['cedula_frente', 'firma'], motivo: 'El frente de la cédula sale borroso y la firma es una foto de otra cosa' });
+    expect(pide.status).toBe(201);
+    expect(pide.body).toMatchObject({ correo_enviado: true, firma_archivada: true });
+    expect(pide.body.enlace).toContain(`/conocenos/${e.token}`);
+    expect(emailsDePrueba.length).toBe(emailsAntes + 1);
+    expect(emailsDePrueba.at(-1)).toMatchObject({ to: CORREO });
+    expect(emailsDePrueba.at(-1).text).toContain('borroso');
+
+    // Una sola devolución abierta; y mientras esté abierta no se entrega
+    expect((await ag.post(`${url}/subsanacion`).send({ items: ['datos'], motivo: 'Otra cosa distinta' })).body.code).toBe('SUBSANACION_ABIERTA');
+    const bloqueo = await ag.post(`${url}/entregar`);
+    expect([bloqueo.status, bloqueo.body.code]).toEqual([400, 'SUBSANACION_PENDIENTE']);
+
+    // La firma vigente se archivó (con su hash y su PDF sellado) y la solicitud quedó sin firma
+    const { rows: [v1] } = await pool.query(`SELECT estado, seccion_firma_at, firma_png, firma_doc_hash FROM captacion_vinculaciones WHERE id = $1`, [e.vinculacionId]);
+    expect(v1).toEqual({ estado: 'por_subsanar', seccion_firma_at: null, firma_png: null, firma_doc_hash: null });
+    const { rows: hist } = await pool.query(`SELECT datos FROM captacion_firmas_historial WHERE vinculacion_id = $1`, [e.vinculacionId]);
+    expect(hist).toHaveLength(1);
+    expect(hist[0].datos.firma_doc_hash).toBe(hashViejo);
+    expect(hist[0].datos.firma_pdf_archivo_id).toBe(antes.firma_pdf_archivo_id);
+    expect((await pool.query(`SELECT 1 FROM archivos WHERE id = $1`, [antes.firma_pdf_archivo_id])).rowCount).toBe(1);   // el PDF anterior sigue existiendo
+
+    // La persona ve qué se le pidió y por qué, y no puede dar por resuelto lo que falta
+    const estado = await request(app).get(pub());
+    expect(estado.body.subsanacion).toMatchObject({ items: ['cedula_frente', 'firma'], pendientes: ['cedula_frente', 'firma'] });
+    expect(estado.body.subsanacion.motivo).toContain('borroso');
+    const incompleta = await request(app).post(pub('/subsanacion/resolver'));
+    expect([incompleta.status, incompleta.body.code, incompleta.body.pendientes]).toEqual([400, 'SUBSANACION_INCOMPLETA', ['cedula_frente', 'firma']]);
+
+    // Sube otra foto del frente (queda como pendiente la firma)
+    const meta = { nombre: 'cedula-frente-nueva.jpg', mime: 'image/jpeg', size: 260000 };
+    const sol = await request(app).post(pub('/documentos/frente/solicitar')).send(meta);
+    expect(sol.status).toBe(200);
+    expect((await request(app).patch(pub('/documentos/frente/confirmar')).send({ key: sol.body.key, ...meta })).status).toBe(200);
+    expect((await request(app).get(pub())).body.subsanacion.pendientes).toEqual(['firma']);
+
+    // Firma de nuevo (basta con firmar; su verificación por correo sigue vigente)
+    const firma = await request(app).post(pub('/firmar')).set('x-stepup-token', e.stepup).set('User-Agent', UA).send(e.cuerpoFirma);
+    expect(firma.status).toBe(200);
+    const { rows: [v2] } = await pool.query(`SELECT estado, firma_doc_hash, firma_pdf_archivo_id FROM captacion_vinculaciones WHERE id = $1`, [e.vinculacionId]);
+    expect(v2.estado).toBe('por_subsanar');                  // sigue devuelta hasta que la persona confirme
+    expect(v2.firma_doc_hash).toHaveLength(64);
+    expect(v2.firma_doc_hash).not.toBe(hashViejo);           // nueva firma, nuevo hash (otra hora)
+    expect(v2.firma_pdf_archivo_id).toBeTruthy();
+    expect(v2.firma_pdf_archivo_id).not.toBe(antes.firma_pdf_archivo_id);
+    e.firmaHash = v2.firma_doc_hash;
+
+    // Confirma la corrección: la solicitud vuelve a estar lista y el asesor recibe el aviso
+    expect((await request(app).post(pub('/subsanacion/resolver'))).status).toBe(200);
+    const { rows: [v3] } = await pool.query(`SELECT estado FROM captacion_vinculaciones WHERE id = $1`, [e.vinculacionId]);
+    expect(v3.estado).toBe('solicitud_completa');
+    const lista = await ag.get(`${url}/subsanacion`);
+    expect(lista.body.abierta).toBeNull();
+    expect(lista.body.historial).toHaveLength(1);
+    expect(lista.body.historial[0]).toMatchObject({ resuelta_por: 'prospecto' });
+    expect(lista.body.firmas_archivadas).toBe(1);
+    const { rows: tipos } = await pool.query(
+      `SELECT tipo FROM captacion_eventos WHERE prospecto_id = $1 AND tipo LIKE 'subsanacion_%' ORDER BY created_at, id`, [e.prospectoId]);
+    expect(tipos.map((t) => t.tipo)).toEqual(['subsanacion_solicitada', 'subsanacion_resuelta']);
+  });
+
+  test('Paso 13a3 — devolver solo los datos deja a la persona corregir su contacto aunque ya haya firmado; el asesor puede cerrarla', async () => {
+    const ag = await login('asesor');
+    const url = `/api/captacion/vinculaciones/${e.vinculacionId}`;
+    expect((await request(app).put(pub('/personal')).send({ celular: '3200000001' })).body.code).toBe('DATOS_FIRMADOS');   // sin devolución, sigue bloqueado
+
+    expect((await ag.post(`${url}/subsanacion`).send({ items: ['datos'], motivo: 'El celular tiene un dígito de más' })).status).toBe(201);
+    const corrige = await request(app).put(pub('/personal')).send({ celular: '3105550102' });
+    expect(corrige.status).toBe(200);
+    expect((await pool.query(`SELECT celular FROM captacion_prospectos WHERE id = $1`, [e.prospectoId])).rows[0].celular).toBe('3105550102');
+
+    expect((await ag.post(`${url}/subsanacion/cerrar`)).status).toBe(200);
+    expect((await ag.post(`${url}/subsanacion/cerrar`)).status).toBe(404);       // ya no hay una abierta
+    // Vuelve el celular original para no alterar los pasos siguientes
+    await pool.query(`UPDATE captacion_prospectos SET celular = $2 WHERE id = $1`, [e.prospectoId, CELULAR]);
+  });
+
   test('Paso 13b — con la validación por voz exigida, no se entrega sin la llamada; y solo vale con el protocolo cumplido', async () => {
     const config = await login('configurador');
     expect((await config.put('/api/captacion/config/validacion-voz').send({ exigida: true })).status).toBe(200);

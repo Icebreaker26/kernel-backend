@@ -46,6 +46,7 @@ router.put ('/pub/:token/financiera',                     exigirHabeas, auditarP
 router.put ('/pub/:token/aportes',                        exigirHabeas, auditarPub, ctrl.pubSeccionAportes);
 router.put ('/pub/:token/beneficiarios',                  exigirHabeas, auditarPub, ctrl.pubSeccionBeneficiarios);
 router.put ('/pub/:token/referencias',                    exigirHabeas, auditarPub, ctrl.pubSeccionReferencias);
+router.post('/pub/:token/subsanacion/resolver',           exigirHabeas, ctrl.pubResolverSubsanacion);
 router.post('/pub/:token/firmar',                         exigirHabeas, ctrl.pubFirmar);
 router.post('/pub/:token/documentos/:lado/solicitar',     exigirHabeas, ctrl.pubSolicitarUploadCedula);
 router.patch('/pub/:token/documentos/:lado/confirmar',    exigirHabeas, auditarPub, ctrl.pubConfirmarUploadCedula);
@@ -76,6 +77,9 @@ router.put ('/config/validacion-voz',          checkPermission('captacion', 'CON
 
 router.get ('/vinculaciones',                  checkPermission('captacion', 'READ'),     ctrl.listarVinculaciones);
 router.get ('/vinculaciones/:id',              checkPermission('captacion', 'READ'),     ctrl.getVinculacion);
+router.get ('/vinculaciones/:id/subsanacion',    checkPermission('captacion', 'READ'),   ctrl.getSubsanacion);
+router.post('/vinculaciones/:id/subsanacion',    checkPermission('captacion', 'WRITE'),  ctrl.pedirSubsanacion);
+router.post('/vinculaciones/:id/subsanacion/cerrar', checkPermission('captacion', 'WRITE'), ctrl.cerrarSubsanacion);
 router.get ('/vinculaciones/:id/validacion-voz', checkPermission('captacion', 'READ'),   ctrl.getValidacionVoz);
 router.post('/vinculaciones/:id/validacion-voz', checkPermission('captacion', 'WRITE'),  ctrl.registrarValidacionVoz);
 router.get ('/vinculaciones/:id/documentos',   checkPermission('captacion', 'READ'),     ctrl.getDocumentosVinculacion);

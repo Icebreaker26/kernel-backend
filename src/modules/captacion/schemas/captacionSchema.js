@@ -187,3 +187,9 @@ export const validacionVozSchema = z.object({
 }).strict();
 
 export const exigenciaVozSchema = z.object({ exigida: z.boolean() }).strict();
+
+// Devolver a subsanar: qué está mal y por qué (ver services/subsanacion.js)
+export const subsanacionSchema = z.object({
+  items : z.array(z.enum(['cedula_frente', 'cedula_reverso', 'firma', 'datos'])).min(1, 'Elige qué hay que corregir').max(4),
+  motivo: z.string().trim().min(5, 'Explica el motivo (mínimo 5 caracteres)').max(1000),
+}).strict();

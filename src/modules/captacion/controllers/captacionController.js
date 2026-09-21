@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import pool from '../../../db/database.js';
 import { env } from '../../../config/env.js';
 import { notificarUsuario } from '../../../services/notificationService.js';
-import { enviarCodigoFirma } from '../../../services/emailService.js';
+import { enviarCodigoFirma, enviarEmail } from '../../../services/emailService.js';
 import { validarArchivo, generarPresignedUpload, guardarArchivo, generarPresignedDescarga, eliminarArchivo, subirBuffer, leerBuffer } from '../../../services/archivoService.js';
 import logger from '../../../config/logger.js';
 import { TARIFAS } from '../tarifas.js';
@@ -11,13 +11,14 @@ import { generarFormatoVinculacion } from '../services/formatoVinculacionPdf.js'
 import { SQL_SIN_IDENTIFICAR } from '../services/captacionService.js';
 import { canonicalizar, sha256 } from '../../../services/hashCanonico.js';
 import { registrarTexto } from '../services/textosConsentimiento.js';
+import { subsanacionAbierta, archivarFirma, textoSubsanacion } from '../services/subsanacion.js';
 import { PROTOCOLO_VOZ, MIN_PREGUNTAS_COINCIDEN, validacionVozExigida, guardarExigencia, validacionVigente } from '../services/validacionVoz.js';
 import {
   crearProspectoSchema, toqueSchema, updateProspectoSchema,
   seccionPersonalSchema, seccionLaboralSchema, seccionPepSchema,
   seccionFinancieraSchema, seccionAportesSchema, seccionBeneficiariosSchema, seccionReferenciasSchema,
   seccionFirmaSchema, stepUpSchema, valoresAsesorSchema, habeasDataSchema, iniciarWebSchema, configWebSchema,
-  validacionVozSchema, exigenciaVozSchema,
+  validacionVozSchema, exigenciaVozSchema, subsanacionSchema,
 } from '../schemas/captacionSchema.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -473,6 +474,168 @@ export const actualizarValoresAsesor = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── Devolver a subsanar ──────────────────────────────────────────────────────
+// El asesor marca qué está mal (cédula, firma o datos) con un motivo. La solicitud queda "por subsanar" y no se entrega hasta que se
+// resuelva. Si devuelve la firma, la anterior se archiva en captacion_firmas_historial y la persona firma de nuevo.
+
+const enlaceDelProspecto = (token) => `${env.FRONTEND_URL.replace(/\/$/, '')}/conocenos/${token}`;
+
+// Qué le falta hacer a la persona para dar por corregida la solicitud
+const pendientesSubsanacion = async (vinculacionId, s) => {
+  const { rows: [v] } = await pool.query(
+    `SELECT v.seccion_firma_at,
+            (SELECT a.created_at FROM archivos a WHERE a.id = v.cedula_frente_id)  AS frente_at,
+            (SELECT a.created_at FROM archivos a WHERE a.id = v.cedula_reverso_id) AS reverso_at
+       FROM captacion_vinculaciones v WHERE v.id = $1`, [vinculacionId]);
+  const desde = new Date(s.created_at);
+  const pendientes = [];
+  if (s.items.includes('cedula_frente') && !(v.frente_at && new Date(v.frente_at) > desde)) pendientes.push('cedula_frente');
+  if (s.items.includes('cedula_reverso') && !(v.reverso_at && new Date(v.reverso_at) > desde)) pendientes.push('cedula_reverso');
+  if (s.items.includes('firma') && !v.seccion_firma_at) pendientes.push('firma');
+  return pendientes;
+};
+
+const cerrarSubsanacionDe = async (vinculacionId, subsanacionId, por) => {
+  await pool.query(`UPDATE captacion_subsanaciones SET resuelta_at = NOW(), resuelta_por = $2 WHERE id = $1`, [subsanacionId, por]);
+  await pool.query(
+    `UPDATE captacion_vinculaciones
+        SET estado = CASE WHEN seccion_firma_at IS NOT NULL THEN 'solicitud_completa' ELSE 'borrador' END, updated_at = NOW()
+      WHERE id = $1 AND estado = 'por_subsanar'`, [vinculacionId]);
+};
+
+export const pedirSubsanacion = async (req, res, next) => {
+  let client;
+  try {
+    const data = subsanacionSchema.parse(req.body);
+    const items = [...new Set(data.items)];
+    const { rows: [v] } = await pool.query(
+      `SELECT v.id, v.prospecto_id, v.estado, v.seccion_firma_at, p.nombres, p.correo, p.token, a.nombre AS asesor_nombre
+         FROM captacion_vinculaciones v
+         JOIN captacion_prospectos p ON p.id = v.prospecto_id
+         LEFT JOIN global_usuarios a ON a.id = p.asesor_uuid
+        WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true`,
+      [req.params.id, req.user.id]
+    );
+    if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
+    if (v.estado === 'entregada') return res.status(400).json({ error: 'Ya fue entregada: no se puede devolver' });
+    if (await subsanacionAbierta(v.id)) {
+      return res.status(409).json({ error: 'Esta solicitud ya está devuelta a subsanar. Espera la corrección o ciérrala.', code: 'SUBSANACION_ABIERTA' });
+    }
+
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const { rows: [s] } = await client.query(
+      `INSERT INTO captacion_subsanaciones (vinculacion_id, asesor_uuid, items, motivo) VALUES ($1,$2,$3,$4) RETURNING id, created_at`,
+      [v.id, req.user.id, items, data.motivo]
+    );
+    const firmaArchivada = items.includes('firma') && !!v.seccion_firma_at;
+    if (firmaArchivada) await archivarFirma(client, v.id, s.id);
+    await client.query(`UPDATE captacion_vinculaciones SET estado = 'por_subsanar', updated_at = NOW() WHERE id = $1`, [v.id]);
+    await client.query(
+      `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, autor_uuid, ip, payload)
+       VALUES ($1,$2,'subsanacion_solicitada','subsanacion','asesor',$3,$4,$5)`,
+      [v.prospecto_id, v.id, req.user.id, req.ip, JSON.stringify({ subsanacion_id: s.id, items, motivo: data.motivo, firma_archivada: firmaArchivada })]
+    );
+    await client.query('COMMIT');
+
+    // Aviso a la persona por correo (si falla, el asesor tiene el enlace y el mensaje para enviarlo por WhatsApp)
+    const enlace = enlaceDelProspecto(v.token);
+    const mensaje = textoSubsanacion({ nombres: v.nombres, items, motivo: data.motivo, enlace, asesor: v.asesor_nombre || 'tu asesor' });
+    let correoEnviado = false;
+    if (v.correo) {
+      try {
+        await enviarEmail(v.correo, mensaje.asunto, mensaje.html, mensaje.texto);
+        correoEnviado = true;
+        await pool.query(`UPDATE captacion_subsanaciones SET correo_enviado = true WHERE id = $1`, [s.id]);
+      } catch (err) {
+        logger.warn(`captacion: no se pudo avisar la subsanación ${s.id} por correo: ${err.message}`);
+      }
+    }
+    res.status(201).json({ id: s.id, items, motivo: data.motivo, enlace, correo_enviado: correoEnviado, mensaje: mensaje.texto, firma_archivada: firmaArchivada });
+  } catch (err) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client?.release();
+  }
+};
+
+export const getSubsanacion = async (req, res, next) => {
+  try {
+    const { rows: [v] } = await pool.query(
+      `SELECT v.id, p.token FROM captacion_vinculaciones v JOIN captacion_prospectos p ON p.id = v.prospecto_id
+        WHERE v.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND v.is_active = true`,
+      [req.params.id, ambitoAsesor(req)]
+    );
+    if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
+    const [abierta, { rows: historial }, { rows: [firmas] }] = await Promise.all([
+      subsanacionAbierta(v.id),
+      pool.query(
+        `SELECT s.id, s.items, s.motivo, s.correo_enviado, s.created_at, s.resuelta_at, s.resuelta_por, u.nombre AS asesor_nombre
+           FROM captacion_subsanaciones s LEFT JOIN global_usuarios u ON u.id = s.asesor_uuid
+          WHERE s.vinculacion_id = $1 ORDER BY s.created_at DESC`, [v.id]),
+      pool.query(`SELECT COUNT(*)::int AS n FROM captacion_firmas_historial WHERE vinculacion_id = $1`, [v.id]),
+    ]);
+    res.json({
+      abierta: abierta ? { ...abierta, pendientes: await pendientesSubsanacion(v.id, abierta) } : null,
+      enlace: enlaceDelProspecto(v.token),
+      historial,
+      firmas_archivadas: firmas.n,
+    });
+  } catch (err) { next(err); }
+};
+
+// El asesor cierra la subsanación sin esperar a la persona (p. ej. ya lo resolvieron por otro medio)
+export const cerrarSubsanacion = async (req, res, next) => {
+  try {
+    const { rows: [v] } = await pool.query(
+      `SELECT v.id, v.prospecto_id FROM captacion_vinculaciones v JOIN captacion_prospectos p ON p.id = v.prospecto_id
+        WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true`, [req.params.id, req.user.id]);
+    if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
+    const s = await subsanacionAbierta(v.id);
+    if (!s) return res.status(404).json({ error: 'No hay una subsanación abierta' });
+    if (s.items.includes('firma')) {
+      const { rows: [f] } = await pool.query(`SELECT seccion_firma_at FROM captacion_vinculaciones WHERE id = $1`, [v.id]);
+      if (!f.seccion_firma_at) return res.status(400).json({ error: 'La firma se devolvió y la persona aún no firma de nuevo' });
+    }
+    await cerrarSubsanacionDe(v.id, s.id, 'asesor');
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, autor_uuid, ip, payload)
+       VALUES ($1,$2,'subsanacion_resuelta','subsanacion','asesor',$3,$4,$5)`,
+      [v.prospecto_id, v.id, req.user.id, req.ip, JSON.stringify({ subsanacion_id: s.id })]);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+};
+
+// La persona avisa que ya corrigió lo que se le pidió
+export const pubResolverSubsanacion = async (req, res, next) => {
+  try {
+    const p = await resolverToken(req.params.token);
+    if (!p) return res.status(404).json({ error: 'Link no válido' });
+    if (await solicitudEntregada(p.id)) return res.status(400).json(ERROR_ENTREGADA);
+    const { rows: [v] } = await pool.query(`SELECT id FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [p.id]);
+    const s = v ? await subsanacionAbierta(v.id) : null;
+    if (!s) return res.status(404).json({ error: 'No tienes nada pendiente por corregir' });
+
+    const pendientes = await pendientesSubsanacion(v.id, s);
+    if (pendientes.length) {
+      return res.status(400).json({ error: 'Aún falta corregir algo de lo que se te pidió', code: 'SUBSANACION_INCOMPLETA', pendientes });
+    }
+    await cerrarSubsanacionDe(v.id, s.id, 'prospecto');
+    await pool.query(
+      `INSERT INTO captacion_eventos (prospecto_id, vinculacion_id, tipo, seccion, autor_tipo, ip, payload)
+       VALUES ($1,$2,'subsanacion_resuelta','subsanacion','prospecto',$3,$4)`,
+      [p.id, v.id, req.ip, JSON.stringify({ subsanacion_id: s.id, items: s.items })]);
+    if (p.asesor_uuid) {
+      notificarUsuario(p.asesor_uuid, {
+        tipo: 'captacion', modulo: 'captacion',
+        mensaje: `${p.nombres} ${p.apellidos} corrigió su solicitud: ya puedes revisarla`,
+      }).catch(() => {});
+    }
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+};
+
 // ── Validación de identidad por llamada de voz ───────────────────────────────
 // El asesor llama al celular registrado, hace preguntas del protocolo y confirma la voluntad de la persona. Cada intento queda
 // registrado; la solicitud solo se entrega (si la cooperativa lo exige) con una validación posterior a la firma y a ese mismo celular.
@@ -569,6 +732,9 @@ export const entregar = async (req, res, next) => {
     );
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
     if (v.estado === 'entregada') return res.status(400).json({ error: 'Ya fue entregada' });
+    if (await subsanacionAbierta(v.id)) {
+      return res.status(400).json({ error: 'La solicitud está devuelta a subsanar: falta que se corrija', code: 'SUBSANACION_PENDIENTE' });
+    }
     if (!v.seccion_pep_at) return res.status(400).json({ error: 'Falta completar la sección PEP (SARLAFT)' });
     if (!v.seccion_firma_at) return res.status(400).json({ error: 'Falta la firma digital del asociado' });
     if (!v.seccion_documentos_at) return res.status(400).json({ error: 'Falta cargar la cédula' });
@@ -1027,6 +1193,14 @@ const asociadosDeEmpresa = async (empresaCodigo) => {
   return r.n >= MIN_PRUEBA_SOCIAL ? r.n : null;
 };
 
+// Lo que la persona debe ver de una devolución abierta: qué se le pidió, por qué y qué le falta
+const estadoSubsanacionPublico = async (prospectoId) => {
+  const { rows: [v] } = await pool.query(`SELECT id FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true`, [prospectoId]);
+  const s = v ? await subsanacionAbierta(v.id) : null;
+  if (!s) return null;
+  return { items: s.items, motivo: s.motivo, created_at: s.created_at, pendientes: await pendientesSubsanacion(v.id, s) };
+};
+
 export const pubGetProspecto = async (req, res, next) => {
   try {
     const p = await resolverToken(req.params.token);
@@ -1066,6 +1240,7 @@ export const pubGetProspecto = async (req, res, next) => {
       version_habeas_data: VERSION_HABEAS_DATA,
       tarifas: TARIFAS,
       vinculacion: v || null,
+      subsanacion: await estadoSubsanacionPublico(p.id),
     });
   } catch (err) { next(err); }
 };
@@ -1360,9 +1535,10 @@ export const pubSeccionPersonal = async (req, res, next) => {
 
     // Firmada la solicitud, los datos de identidad y contacto quedan como se firmaron: corregirlos lo hace el asesor y queda auditado
     const { rows: [firmada] } = await pool.query(
-      `SELECT 1 FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true AND seccion_firma_at IS NOT NULL`, [p.id]);
+      `SELECT id FROM captacion_vinculaciones WHERE prospecto_id = $1 AND is_active = true AND seccion_firma_at IS NOT NULL`, [p.id]);
     const distintos = Object.entries({ nombres, apellidos, cedula, celular, correo }).filter(([k, val]) => val && val !== p[k]);
-    if (firmada && distintos.length) {
+    const subsDatos = firmada ? await subsanacionAbierta(firmada.id) : null;
+    if (firmada && distintos.length && !subsDatos?.items.includes('datos')) {
       return res.status(409).json({ error: 'Tu solicitud ya está firmada: tus datos de identidad y contacto no se pueden cambiar desde aquí. Escríbele a tu asesor.', code: 'DATOS_FIRMADOS' });
     }
 
@@ -1696,7 +1872,8 @@ export const pubFirmar = async (req, res, next) => {
          firma_electronica_version = $8,
          firma_verificacion        = $10,
          seccion_firma_at       = NOW(),
-         estado                 = 'solicitud_completa',
+         estado                 = CASE WHEN EXISTS (SELECT 1 FROM captacion_subsanaciones s WHERE s.vinculacion_id = $9 AND s.resuelta_at IS NULL)
+                                       THEN 'por_subsanar' ELSE 'solicitud_completa' END,
          updated_at             = NOW()
        WHERE id = $9`,
       [data.firma_png, JSON.stringify(data.firma_trazos), req.ip,

@@ -344,6 +344,37 @@ describe('Cartera de créditos — cálculos', () => {
 
 // ── Distribución de plazos — cálculos con datos reales ───────────────────────
 
+// Regresión: los créditos dados de baja (pagados o que dejaron de venir en el CSV) inflaban la cartera
+describe('Cartera de créditos — los dados de baja no cuentan', () => {
+  const codigo = '99999997';
+  let ag;
+  const cartera = async () => Number((await ag.get('/api/gerencia/resumen')).body.cartera.cartera_total);
+
+  beforeAll(async () => {
+    ag = agAdmin();
+    await ag.post('/api/auth/login').send({ email: adminEmail, password: adminPass });
+    await pool.query(`INSERT INTO asociados (codigo, apellido, nombre, clase_cuota, is_active) VALUES ($1, 'Baja', 'Test Cartera', '1', true)
+                      ON CONFLICT (codigo) DO UPDATE SET is_active = true`, [codigo]);
+    await pool.query('DELETE FROM asociado_descuentos WHERE asociado_codigo = $1', [codigo]);
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM asociado_descuentos WHERE asociado_codigo = $1', [codigo]);
+    await pool.query('DELETE FROM asociados WHERE codigo = $1', [codigo]);
+  });
+
+  test('un crédito con saldo pero dado de baja no suma; al reactivarse sí', async () => {
+    const antes = await cartera();
+    await pool.query(
+      `INSERT INTO asociado_descuentos (asociado_codigo, linea_id, nombre_linea, valor, saldo_credito, valor_obligacion, numero, is_active)
+       VALUES ($1, 9903, 'Crédito Test Baja', 100000, 4000000, 5000000, 'GER-BAJA-1', false)`, [codigo]);
+    expect(await cartera()).toBe(antes);                       // dado de baja: no cuenta
+
+    await pool.query('UPDATE asociado_descuentos SET is_active = true WHERE asociado_codigo = $1', [codigo]);
+    expect(await cartera()).toBe(antes + 4_000_000);           // vigente: cuenta
+  });
+});
+
 describe('Distribución de plazos — cálculos', () => {
   let ag;
   const codigoPlazos = '88888888';

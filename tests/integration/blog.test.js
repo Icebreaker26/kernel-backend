@@ -254,6 +254,10 @@ describe('Blog — portada', () => {
     const res = await request(app).get(`/api/blog/pub/${body.slug}/portada`).redirects(0);
     expect(res.status).toBe(302);
     expect(res.headers.location).toMatch(/^https?:\/\//);
+    // El sitio (otro dominio) la carga con <img>: sin esto el navegador la bloquea (helmet pone same-origin por defecto)
+    expect(res.headers['cross-origin-resource-policy']).toBe('cross-origin');
+    // El resto de la API sigue con la política restrictiva
+    expect((await request(app).get('/api/blog/pub')).headers['cross-origin-resource-policy']).toBe('same-origin');
     // El editor la ve aunque sea borrador
     expect((await ag.get(`/api/blog/${body.id}/portada`)).body.url).toMatch(/^https?:\/\//);
   });

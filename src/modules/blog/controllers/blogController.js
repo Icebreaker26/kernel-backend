@@ -94,6 +94,9 @@ export const pubPortada = async (req, res, next) => {
     const f = await generarPresignedDescarga(e.portada_archivo_id);
     if (!f) return res.status(404).json({ error: 'Imagen no encontrada' });
     res.set('Cache-Control', 'public, max-age=120');
+    // helmet manda `Cross-Origin-Resource-Policy: same-origin`, y con eso el navegador bloquea la imagen cuando la pide el sitio
+    // (otro dominio) con <img>. Esta ruta solo sirve portadas de entradas YA publicadas, así que puede cargarse desde cualquier sitio.
+    res.set('Cross-Origin-Resource-Policy', 'cross-origin');
     res.redirect(302, f.url);
   } catch (err) { next(err); }
 };

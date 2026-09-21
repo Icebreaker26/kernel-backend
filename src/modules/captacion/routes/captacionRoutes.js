@@ -70,6 +70,7 @@ router.get ('/prospectos/:id/whatsapp',        checkPermission('captacion', 'WRI
 
 // Solicitud diligenciada en papel: el asesor digita el formato y sube el escaneo firmado a mano
 router.get ('/prospectos/:id/solicitud-fisica',            checkPermission('captacion', 'READ'),  fisica.getSolicitudFisica);
+router.post('/prospectos/:id/solicitud-fisica',            checkPermission('captacion', 'WRITE'), fisica.iniciarSolicitudFisica);
 router.put ('/prospectos/:id/solicitud-fisica',            checkPermission('captacion', 'WRITE'), fisica.guardarSolicitudFisica);
 router.post('/vinculaciones/:id/firma-fisica/solicitar',   checkPermission('captacion', 'WRITE'), fisica.solicitarEscaneoFirma);
 router.post('/vinculaciones/:id/firma-fisica',             checkPermission('captacion', 'WRITE'), fisica.registrarFirmaFisica);

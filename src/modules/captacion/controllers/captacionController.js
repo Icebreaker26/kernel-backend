@@ -752,7 +752,7 @@ export const pubResolverSubsanacion = async (req, res, next) => {
 export const getValidacionVoz = async (req, res, next) => {
   try {
     const { rows: [v] } = await pool.query(
-      `SELECT v.id, v.seccion_firma_at, p.celular
+      `SELECT v.id, v.seccion_firma_at, v.origen_solicitud, p.celular
          FROM captacion_vinculaciones v JOIN captacion_prospectos p ON p.id = v.prospecto_id
         WHERE v.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND v.is_active = true`,
       [req.params.id, ambitoAsesor(req)]
@@ -768,7 +768,7 @@ export const getValidacionVoz = async (req, res, next) => {
           WHERE vv.vinculacion_id = $1 ORDER BY vv.created_at DESC`, [v.id]),
     ]);
     res.json({
-      exigida, validada: !!vigente, firmada: !!v.seccion_firma_at, celular: v.celular,
+      exigida: exigida && v.origen_solicitud !== 'fisico', validada: !!vigente, firmada: !!v.seccion_firma_at, celular: v.celular,
       protocolo: PROTOCOLO_VOZ, minimo_coincidencias: MIN_PREGUNTAS_COINCIDEN, historial,
     });
   } catch (err) { next(err); }
@@ -833,7 +833,7 @@ export const entregar = async (req, res, next) => {
   try {
     const { rows: [v] } = await pool.query(
       `SELECT v.id, v.estado,
-              v.seccion_pep_at, v.seccion_firma_at, v.seccion_documentos_at, v.valor_aporte
+              v.seccion_pep_at, v.seccion_firma_at, v.seccion_documentos_at, v.valor_aporte, v.origen_solicitud
          FROM captacion_vinculaciones v
          JOIN captacion_prospectos p ON p.id = v.prospecto_id
         WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true`,
@@ -851,7 +851,8 @@ export const entregar = async (req, res, next) => {
     if (await consultaListasExigida() && !(await consultaVigente(v.id))) {
       return res.status(400).json({ error: 'Falta la consulta en listas restrictivas validada por el Oficial de Cumplimiento', code: 'CONSULTA_LISTAS_REQUERIDA' });
     }
-    if (await validacionVozExigida() && !(await validacionVigente(v.id))) {
+    // Las solicitudes en papel se firmaron en presencia del asesor: no aplica la llamada de validación de identidad
+    if (v.origen_solicitud !== 'fisico' && await validacionVozExigida() && !(await validacionVigente(v.id))) {
       return res.status(400).json({ error: 'Falta la validación de identidad por llamada de voz', code: 'VALIDACION_VOZ_REQUERIDA' });
     }
 
@@ -1764,7 +1765,7 @@ export const pubSeccionFinanciera = guardarSeccion('financiera', seccionFinancie
 
 // Guarda la elección de aportes. Los precios de fondo, seguro, bono y cuota los fija el servidor.
 // `autor` queda en seccion_aportes_autor: 'prospecto' (lo eligió el asociado) o 'asesor' (lo definió el asesor).
-const aplicarAportes = async ({ vinculacionId, datos, autor }) => {
+export const aplicarAportes = async ({ vinculacionId, datos, autor }) => {
   const seguro = datos.seguro_vida ? TARIFAS.seguro_vida : 0;
   const bono   = datos.bono_sorteo ? TARIFAS.bono_sorteo : 0;
 

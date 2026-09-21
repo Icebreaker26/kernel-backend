@@ -4,6 +4,7 @@ import { checkPermission } from '../../../middlewares/checkPermission.js';
 import { captacionPublicLimiter, enlacePublicoLimiter } from '../../../middlewares/rateLimiter.js';
 import * as ctrl from '../controllers/captacionController.js';
 import * as listas from '../controllers/consultaListasController.js';
+import * as fisica from '../controllers/solicitudFisicaController.js';
 
 const router = Router();
 const auditarPub = ctrl.auditarCambioPosteriorAFirma('prospecto');
@@ -66,6 +67,13 @@ router.get ('/prospectos/:id',                 checkPermission('captacion', 'REA
 router.put ('/prospectos/:id',                 checkPermission('captacion', 'WRITE'),    ctrl.actualizarProspecto);
 router.post('/prospectos/:id/toque',           checkPermission('captacion', 'WRITE'),    ctrl.registrarToque);
 router.get ('/prospectos/:id/whatsapp',        checkPermission('captacion', 'WRITE'),    ctrl.whatsappUrl);
+
+// Solicitud diligenciada en papel: el asesor digita el formato y sube el escaneo firmado a mano
+router.get ('/prospectos/:id/solicitud-fisica',            checkPermission('captacion', 'READ'),  fisica.getSolicitudFisica);
+router.put ('/prospectos/:id/solicitud-fisica',            checkPermission('captacion', 'WRITE'), fisica.guardarSolicitudFisica);
+router.post('/vinculaciones/:id/firma-fisica/solicitar',   checkPermission('captacion', 'WRITE'), fisica.solicitarEscaneoFirma);
+router.post('/vinculaciones/:id/firma-fisica',             checkPermission('captacion', 'WRITE'), fisica.registrarFirmaFisica);
+router.get ('/vinculaciones/:id/firma-fisica',             checkPermission('captacion', 'READ'),  fisica.verEscaneoFirma);
 
 router.get ('/valores/:uuid',                  checkPermission('captacion', 'READ'),     ctrl.getValoresAsesor);
 

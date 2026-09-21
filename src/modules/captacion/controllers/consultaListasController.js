@@ -9,6 +9,7 @@ import { FUENTES, estadoFuentes, actualizarTodas } from '../listas/fuentes.js';
 import { cotejar } from '../listas/cotejo.js';
 import { generarPdfConsulta } from '../listas/consultaPdf.js';
 import { CHECKLIST_MANUAL, CLAVES_MANUAL, enlacesBusqueda } from '../listas/checklist.js';
+import { buscarFuentesAbiertas, busquedaWebDisponible } from '../listas/busquedaWeb.js';
 import { consultaListasExigida, guardarExigenciaListas } from '../listas/consultas.js';
 import { validacionVozExigida, guardarExigencia as guardarExigenciaVoz } from '../services/validacionVoz.js';
 
@@ -49,7 +50,7 @@ const pendientesDe = (c) => {
 const formato = (c, extra = {}) => ({
   id: c.id, vinculacion_id: c.vinculacion_id, estado: c.estado, cedula: c.cedula, nombres: c.nombres, apellidos: c.apellidos,
   fecha_nacimiento: c.fecha_nacimiento, versiones: c.versiones, coincidencias: c.coincidencias, manual: c.manual, declaracion_pep: c.declaracion_pep,
-  parametros: c.parametros, conclusion: c.conclusion, tiene_pdf: !!c.pdf_archivo_id, pdf_hash: c.pdf_hash,
+  parametros: c.parametros, busquedas: c.busquedas ?? null, busqueda_web_disponible: busquedaWebDisponible(), conclusion: c.conclusion, tiene_pdf: !!c.pdf_archivo_id, pdf_hash: c.pdf_hash,
   cerrada_at: c.cerrada_at, validada_at: c.validada_at, observaciones_oficial: c.observaciones_oficial, created_at: c.created_at,
   asesor_nombre: c.asesor_nombre ?? null, oficial_nombre: c.oficial_nombre ?? null,
   pendientes: pendientesDe(c), checklist: CHECKLIST_MANUAL,
@@ -152,12 +153,16 @@ export const iniciarConsultaListas = async (req, res, next) => {
         v.pep_poder_publico && 'ejerce poder público', v.pep_vinculo_expuesto && 'tiene vínculo con una persona expuesta políticamente'].filter(Boolean).join('; ') : null,
     } : null;
 
+    // Búsqueda automática en fuentes abiertas (si hay buscador configurado): deja enlaces y resúmenes para que el asesor los revise
+    const busquedas = busquedaWebDisponible() ? await buscarFuentesAbiertas({ nombres: v.nombres, apellidos: v.apellidos, cedula: v.cedula }) : null;
+
     const { rows: [c] } = await pool.query(
       `INSERT INTO captacion_consultas_listas
-         (vinculacion_id, asesor_uuid, cedula, nombres, apellidos, fecha_nacimiento, versiones, coincidencias, declaracion_pep, parametros, ip, user_agent)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+         (vinculacion_id, asesor_uuid, cedula, nombres, apellidos, fecha_nacimiento, versiones, coincidencias, declaracion_pep, parametros, ip, user_agent, busquedas)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
       [v.id, req.user.id, v.cedula, v.nombres, v.apellidos, v.fecha_nacimiento, JSON.stringify(versiones), JSON.stringify(coincidencias),
-       declaracionPep ? JSON.stringify(declaracionPep) : null, JSON.stringify(PARAMETROS_COTEJO), req.ip, req.headers['user-agent'] || null]
+       declaracionPep ? JSON.stringify(declaracionPep) : null, JSON.stringify(PARAMETROS_COTEJO), req.ip, req.headers['user-agent'] || null,
+       busquedas ? JSON.stringify(busquedas) : null]
     );
     await evento(v, 'consulta_listas_iniciada', req, { consulta_id: c.id, coincidencias: coincidencias.length });
     const { rows: [fila] } = await pool.query(`${SELECT_CONSULTA} WHERE c.id = $1`, [c.id]);
@@ -208,6 +213,20 @@ export const guardarConsultaListas = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// Vuelve a buscar en fuentes abiertas (p. ej. se configuró el buscador después de iniciar la consulta, o falló alguna búsqueda)
+export const buscarWebConsulta = async (req, res, next) => {
+  try {
+    const c = await cargarConsultaDelAsesor(req.params.cid, req);
+    if (!c) return res.status(404).json({ error: 'Consulta no encontrada' });
+    if (!['en_curso', 'observada'].includes(c.estado)) return res.status(409).json({ error: 'La consulta ya está cerrada', code: 'CONSULTA_CERRADA' });
+    if (!busquedaWebDisponible()) return res.status(409).json({ error: 'El buscador no está configurado en el servidor', code: 'BUSCADOR_NO_CONFIGURADO' });
+    const busquedas = await buscarFuentesAbiertas({ nombres: c.nombres, apellidos: c.apellidos, cedula: c.cedula });
+    await pool.query(`UPDATE captacion_consultas_listas SET busquedas = $2, updated_at = NOW() WHERE id = $1`, [c.id, JSON.stringify(busquedas)]);
+    const { rows: [fila] } = await pool.query(`${SELECT_CONSULTA} WHERE c.id = $1`, [c.id]);
+    res.json(formato(fila));
+  } catch (err) { next(err); }
+};
+
 // Guarda el PDF (S3) y devuelve su id y hash
 const guardarPdf = async (c, vinculacionId, opciones) => {
   const bytes = Buffer.from(await generarPdfConsulta(c, opciones));
@@ -233,7 +252,7 @@ export const cerrarConsultaListas = async (req, res, next) => {
     const cerradaAt = new Date();
     const datosHash = sha256(canonicalizar({
       cedula: c.cedula, nombres: c.nombres, apellidos: c.apellidos, fecha_nacimiento: c.fecha_nacimiento, versiones: c.versiones, parametros: c.parametros,
-      coincidencias: c.coincidencias, manual: c.manual, declaracion_pep: c.declaracion_pep, conclusion,
+      coincidencias: c.coincidencias, manual: c.manual, declaracion_pep: c.declaracion_pep, busquedas: c.busquedas ?? null, conclusion,
     }));
     const pdf = await guardarPdf({ ...c, conclusion, datos_hash: datosHash, cerrada_at: cerradaAt, estado: 'cerrada' }, c.vinculacion_id, { asesorNombre: c.asesor_nombre });
     const { rows: [v] } = await pool.query(`SELECT id, prospecto_id FROM captacion_vinculaciones WHERE id = $1`, [c.vinculacion_id]);

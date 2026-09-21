@@ -31,6 +31,10 @@ const envSchema = z.object({
   S3_RETENCION_EVIDENCIA_ANIOS: z.string().optional().transform((v) => (v ? Number(v) : null)).pipe(z.number().int().min(1).max(30).nullable()),
   // GOVERNANCE (reversible por quien tenga permiso explícito) o COMPLIANCE (nadie puede borrar antes del plazo). Por defecto GOVERNANCE.
   S3_RETENCION_MODO:     z.enum(['GOVERNANCE', 'COMPLIANCE']).default('GOVERNANCE'),
+  // Búsqueda en fuentes abiertas para la consulta de listas (Brave Search API). Sin llave, el asesor busca con los enlaces de ayuda.
+  BRAVE_SEARCH_API_KEY:  z.string().min(10).optional(),
+  // Buscar también por la cédula envía ese dato a un tercero: por defecto solo se busca por el nombre
+  BUSQUEDA_INCLUIR_CEDULA: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   // Correo por API HTTPS (Resend): canal principal si están ambas. RESEND_FROM p. ej. 'Cooperativa Progresemos <no-responder@cooperativaprogresemos.coop>'
   RESEND_API_KEY:        z.string().startsWith('re_').optional(),
   RESEND_FROM:           z.string().min(3).optional(),

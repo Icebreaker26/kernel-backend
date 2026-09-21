@@ -7,23 +7,29 @@ export const CHECKLIST_MANUAL = [
   {
     clave: 'fuentes_abiertas', obligatoria: true,
     titulo: 'Búsqueda en fuentes abiertas (Google y noticias)',
-    ayuda: 'Busca al asociado con su nombre completo entre comillas y con palabras de riesgo. Anota qué buscaste, en qué motor y qué encontraste (con las direcciones de las páginas relevantes).',
+    ayuda: 'El sistema ya buscó por ti (resultados arriba, con enlace y resumen). Abre los que parezcan referirse a la persona: muchos son homónimos y no cuentan. Si alguno es de ella, marca “Con hallazgo” y anota cuál. Si no hay buscador configurado, usa los enlaces de ayuda. Anota qué buscaste y dónde.',
     pide_terminos: true,
   },
   {
     clave: 'procuraduria', obligatoria: false,
     titulo: 'Certificado de antecedentes disciplinarios (Procuraduría)',
-    ayuda: 'El sistema ya cruza la base pública de sanciones (SIRI) por cédula. Si además consultaste el certificado oficial en la web, anota el resultado.',
+    ayuda: 'El sistema ya cruza la base pública de sanciones (SIRI) por cédula. El certificado oficial (que también refleja anotaciones penales, contractuales y fiscales) se saca en la web con la cédula: si lo consultaste, anota el resultado.',
+    enlaces: [{ etiqueta: 'Certificado de antecedentes (Procuraduría)', url: 'https://apps.procuraduria.gov.co/webcert/Certificado.aspx' }],
   },
   {
     clave: 'contraloria', obligatoria: false,
     titulo: 'Boletín de responsables fiscales (Contraloría)',
-    ayuda: 'No hay descarga masiva automatizable: consulta la página de la Contraloría con la cédula y anota el resultado.',
+    ayuda: 'No hay descarga masiva automatizable: el boletín se publica en PDF cada trimestre y el certificado se saca por persona. Consúltalo con la cédula y anota el resultado.',
+    enlaces: [
+      { etiqueta: 'Certificado de antecedentes fiscales', url: 'https://www.contraloria.gov.co/en/control-fiscal/responsabilidad-fiscal/certificado-de-antecedentes-fiscales' },
+      { etiqueta: 'Boletín trimestral (PDF)', url: 'https://cfiscal.contraloria.gov.co/reportes/consultaboletinestrimestrales.aspx' },
+    ],
   },
   {
     clave: 'policia', obligatoria: false,
     titulo: 'Antecedentes judiciales (Policía Nacional)',
-    ayuda: 'Consulta individual en la página de la Policía Nacional; anota el resultado.',
+    ayuda: 'Consulta individual con la cédula y un CAPTCHA (no se puede automatizar). La página pide que quien consulta tenga la autorización del titular. Anota el resultado.',
+    enlaces: [{ etiqueta: 'Consulta de antecedentes judiciales', url: 'https://antecedentes.policia.gov.co:7005/WebJudicial/' }],
   },
 ];
 

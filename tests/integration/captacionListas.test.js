@@ -9,7 +9,9 @@ import { createApp } from '../../src/createApp.js';
 import pool from '../../src/db/database.js';
 import { eliminarArchivo } from '../../src/services/archivoService.js';
 import { sha256 } from '../../src/services/hashCanonico.js';
+import { env } from '../../src/config/env.js';
 import { invalidarCache } from '../../src/modules/captacion/listas/cotejo.js';
+import { limpiarResumen, consultasDeBusqueda } from '../../src/modules/captacion/listas/busquedaWeb.js';
 import { normalizar, palabras, compararPalabras } from '../../src/modules/captacion/listas/normalizar.js';
 import { parseOnu, parseOfac, parseUe, parseUk, parsePepSigep, parseSiri } from '../../src/modules/captacion/listas/parsers.js';
 
@@ -36,6 +38,22 @@ describe('Listas — normalización y comparación de nombres', () => {
     const corto = compararPalabras(palabras('Juan Carlos Perez Gomez'), palabras('Juan Perez'));
     expect(corto.parcial).toBe(false);
     expect(corto.score).toBeLessThan(0.85);
+  });
+});
+
+describe('Búsqueda en fuentes abiertas — consultas y limpieza', () => {
+  test('el resumen del buscador se guarda como texto plano', () => {
+    expect(limpiarResumen('Es un <strong>ingeniero</strong> &amp; profesor &quot;de Pereira&quot;<br/>')).toBe('Es un ingeniero & profesor "de Pereira"');
+    expect(limpiarResumen('x'.repeat(500))).toHaveLength(320);
+  });
+
+  test('por defecto se busca solo por el nombre; la cédula únicamente si se activa', () => {
+    const persona = { nombres: 'Carlos Alberto', apellidos: 'Mendoza Rueda', cedula: '55500001' };
+    expect(consultasDeBusqueda(persona, { incluirCedula: false }).map((c) => c.clave)).toEqual(['nombre', 'riesgo', 'judicial']);
+    const con = consultasDeBusqueda(persona, { incluirCedula: true });
+    expect(con.map((c) => c.clave)).toEqual(['nombre', 'riesgo', 'judicial', 'cedula']);
+    expect(con[0].q).toBe('"Carlos Alberto Mendoza Rueda"');
+    expect(con[3].q).toContain('55500001');
   });
 });
 
@@ -127,9 +145,27 @@ const versionActiva = async (fuente, registros, entradas) => {
 
 describe('Consulta en listas — asesor, Oficial de Cumplimiento y entrega', () => {
   let app;
-  const app_ = async () => app;
+  let fetchSpy;
+  const llavePrevia = env.BRAVE_SEARCH_API_KEY;
+  const peticionesBrave = [];
 
   beforeAll(async () => {
+    // El buscador (Brave) se simula: en las pruebas no sale nada a internet
+    env.BRAVE_SEARCH_API_KEY = 'llave-de-prueba-123456';
+    fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async (url, opciones) => {
+      const u = new URL(String(url));
+      if (u.hostname !== 'api.search.brave.com') throw new Error(`fetch inesperado: ${u.hostname}`);
+      const q = u.searchParams.get('q');
+      peticionesBrave.push({ q, token: opciones.headers['X-Subscription-Token'] });
+      if (q.includes('condenado')) return { ok: false, status: 429, json: async () => ({}) };
+      return {
+        ok: true, status: 200,
+        json: async () => ({ web: { results: [
+          { title: 'Carlos <strong>Mendoza</strong> — perfil profesional', url: 'https://www.ejemplo.com/perfil', description: 'Es un <strong>ingeniero</strong> &amp; profesor', meta_url: { hostname: 'www.ejemplo.com' }, age: 'hace 2 días' },
+          { title: 'Enlace no válido', url: 'javascript:alert(1)', description: 'no debe guardarse' },
+        ] } }),
+      };
+    });
     app = await createApp();
     const hash = await bcrypt.hash(pass, 4);
     await pool.query(`INSERT INTO empresas (codigo, nombre) VALUES ($1, 'Empresa Listas Test') ON CONFLICT (codigo) DO UPDATE SET is_active = true`, [EMPRESA]);
@@ -159,6 +195,8 @@ describe('Consulta en listas — asesor, Oficial de Cumplimiento y entrega', () 
   });
 
   afterAll(async () => {
+    fetchSpy.mockRestore();
+    env.BRAVE_SEARCH_API_KEY = llavePrevia;
     await pool.query(`DELETE FROM archivos WHERE entidad_tipo = 'captacion_consulta_listas' AND entidad_id = $1`, [est.vinculacionId]);
     await pool.query(`DELETE FROM captacion_eventos WHERE prospecto_id = $1`, [est.prospectoId]);
     await pool.query(`DELETE FROM captacion_vinculaciones WHERE prospecto_id = $1`, [est.prospectoId]);
@@ -206,6 +244,33 @@ describe('Consulta en listas — asesor, Oficial de Cumplimiento y entrega', () 
     const otra = await ag.asesor.post(`${est.url}/consulta-listas`).send({});
     expect([otra.status, otra.body.id, otra.body.existente]).toEqual([200, est.consultaId, true]);
     est.ids = Object.fromEntries(r.body.coincidencias.map((x) => [x.fuente, x.id]));
+  });
+
+  test('la búsqueda en fuentes abiertas la hace el programa: enlaces con resumen para el asesor, y un fallo no rompe la consulta', async () => {
+    const r = await ag.asesor.get(`${est.url}/consulta-listas`);
+    const b = r.body.actual.busquedas;
+    expect(r.body.actual.busqueda_web_disponible).toBe(true);
+    expect(b.proveedor).toBe('Brave Search');
+    expect(b.consultas.map((c) => c.clave)).toEqual(['nombre', 'riesgo', 'judicial']);   // sin la cédula
+    // Solo se buscó por el nombre (nada de la cédula sale a un tercero) y con la llave configurada
+    expect(peticionesBrave.every((p) => !p.q.includes(CEDULA) && p.token === 'llave-de-prueba-123456')).toBe(true);
+    expect(peticionesBrave[0].q).toBe('"Carlos Alberto Mendoza Rueda"');
+
+    const nombre = b.consultas[0];
+    expect(nombre.resultados).toHaveLength(1);   // el enlace "javascript:" se descarta
+    expect(nombre.resultados[0]).toEqual({ titulo: 'Carlos Mendoza — perfil profesional', url: 'https://www.ejemplo.com/perfil', dominio: 'ejemplo.com', resumen: 'Es un ingeniero & profesor', edad: 'hace 2 días' });
+    const judicial = b.consultas[2];
+    expect(judicial.resultados).toEqual([]);
+    expect(judicial.error).toContain('limitó');
+
+    // Volver a buscar actualiza los resultados; sin buscador configurado avisa
+    const otra = await ag.asesor.post(`/api/captacion/consultas-listas/${est.consultaId}/buscar`);
+    expect(otra.status).toBe(200);
+    expect(otra.body.busquedas.consultas).toHaveLength(3);
+    env.BRAVE_SEARCH_API_KEY = undefined;
+    const sinLlave = await ag.asesor.post(`/api/captacion/consultas-listas/${est.consultaId}/buscar`);
+    expect([sinLlave.status, sinLlave.body.code]).toEqual([409, 'BUSCADOR_NO_CONFIGURADO']);
+    env.BRAVE_SEARCH_API_KEY = 'llave-de-prueba-123456';
   });
 
   test('no se cierra sin decidir cada coincidencia ni sin la búsqueda obligatoria en fuentes abiertas', async () => {
@@ -313,7 +378,7 @@ describe('Consulta en listas — asesor, Oficial de Cumplimiento y entrega', () 
     await pool.query(`UPDATE captacion_prospectos SET nombres = 'Carlos Alberto' WHERE id = $1`, [est.prospectoId]);
 
     const entrega = await ag.asesor.post(`${est.url}/entregar`);
-    expect(entrega.status).toBe(200);
+    expect([entrega.status, entrega.body.error]).toEqual([200, undefined]);
     expect(entrega.body.estado).toBe('entregada');
   });
 

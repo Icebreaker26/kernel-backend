@@ -15,6 +15,9 @@ import { jest } from '@jest/globals';
 import { createApp } from '../../src/createApp.js';
 import pool from '../../src/db/database.js';
 import { emailsDePrueba } from '../../src/services/emailService.js';
+import { eliminarArchivo } from '../../src/services/archivoService.js';
+import { canonicalizar, sha256 } from '../../src/services/hashCanonico.js';
+import { TEXTOS } from '../../src/modules/captacion/services/textosConsentimiento.js';
 
 jest.setTimeout(30000);
 
@@ -39,6 +42,7 @@ const login = async (quien) => {
 // Estado que se va acumulando a lo largo del recorrido
 const e = { token: null, prospectoId: null, vinculacionId: null, stepup: null, embudoAntes: null, firmaHash: null };
 const pub = (ruta = '') => `/api/captacion/pub/${e.token}${ruta}`;
+const UA = 'Mozilla/5.0 (Linux; Android 14) Kernel-Test/1.0';
 const codigoDelCorreo = () => emailsDePrueba.at(-1).text.match(/es: (\d{6})/)[1];
 const eventos = async () => (await pool.query(
   `SELECT tipo, seccion, autor_tipo FROM captacion_eventos WHERE prospecto_id = $1 ORDER BY created_at, id`, [e.prospectoId])).rows;
@@ -79,7 +83,7 @@ afterAll(async () => {
   const ids = Object.values(usuarios).map((u) => u.id);
   await limpiar(ids);
   await pool.query(`DELETE FROM captacion_web_visitas WHERE created_at >= $1`, [INICIO]);
-  await pool.query(`DELETE FROM captacion_config WHERE clave = 'web_asesor_uuid'`);
+  await pool.query(`DELETE FROM captacion_config WHERE clave IN ('web_asesor_uuid', 'exigir_validacion_voz')`);
   await pool.query(`DELETE FROM empresas WHERE codigo = $1`, [EMPRESA]);
   await pool.query(`DELETE FROM permisos WHERE usuario_uuid = ANY($1)`, [ids]);
   await pool.query(`DELETE FROM global_usuarios WHERE id = ANY($1)`, [ids]);
@@ -203,7 +207,7 @@ describe('Afiliación de principio a fin (página web → firma → entrega al a
 
   test('Paso 9 — recibe el código en su correo (6 dígitos, sin exponerse en la respuesta) y lo confirma', async () => {
     const antes = emailsDePrueba.length;
-    const otp = await request(app).post(pub('/otp'));
+    const otp = await request(app).post(pub('/otp')).set('User-Agent', UA);
     expect(otp.status).toBe(200);
     expect(otp.body.correo).toMatch(/^ma\*+@ejemplo\.com$/);   // el correo se muestra enmascarado
     expect(JSON.stringify(otp.body)).not.toMatch(/\d{6}/);
@@ -218,7 +222,7 @@ describe('Afiliación de principio a fin (página web → firma → entrega al a
   });
 
   test('Paso 10 — FIRMA electrónicamente: la solicitud queda completa, sellada con hash y la persona pasa a "convertido"', async () => {
-    const res = await request(app).post(pub('/firmar')).set('x-stepup-token', e.stepup).send(e.cuerpoFirma);
+    const res = await request(app).post(pub('/firmar')).set('x-stepup-token', e.stepup).set('User-Agent', UA).send(e.cuerpoFirma);
     expect(res.status).toBe(200);
     expect(res.body.estado).toBe('solicitud_completa');
 
@@ -235,6 +239,43 @@ describe('Afiliación de principio a fin (página web → firma → entrega al a
     expect(snap).toContain('Auxiliar administrativa');
     expect(snap).toContain('"valor_aporte":"76000.00"');
     expect(snap).toContain('"periodicidad_descuento":"quincenal"');
+  });
+
+  test('Paso 10b — el hash cubre la firma (imagen y trazos) y un perito lo puede recalcular; el texto aceptado queda guardado', async () => {
+    const { rows: [v] } = await pool.query(
+      `SELECT firma_doc_hash, formulario_snapshot, firma_user_agent, firma_verificacion FROM captacion_vinculaciones WHERE id = $1`, [e.vinculacionId]);
+    // El snapshot guardado incluye la firma dibujada, la hora, la IP y la verificación del correo
+    expect(v.formulario_snapshot.firma.png).toBe(e.cuerpoFirma.firma_png);
+    expect(v.formulario_snapshot.firma.trazos).toEqual(e.cuerpoFirma.firma_trazos);
+    expect(v.formulario_snapshot.firma.verificacion.correo).toBe(CORREO);
+    // Recalculado desde lo guardado da el mismo hash: si alguien cambia la firma, el hash deja de cuadrar
+    expect(sha256(canonicalizar(v.formulario_snapshot))).toBe(v.firma_doc_hash);
+    const alterado = structuredClone(v.formulario_snapshot);
+    alterado.firma.png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+    expect(sha256(canonicalizar(alterado))).not.toBe(v.firma_doc_hash);
+
+    // Los tres textos que aceptó quedan íntegros e inmutables
+    const { rows: textos } = await pool.query(`SELECT tipo, version, texto, hash FROM captacion_textos_consentimiento ORDER BY tipo`);
+    for (const [tipo, version] of [['habeas_data', 'hd-v1.0'], ['declaracion', 'v1.0'], ['firma_electronica', 'fe-v1.0']]) {
+      const t = textos.find((x) => x.tipo === tipo && x.version === version);
+      expect(t.texto).toBe(TEXTOS[tipo][version]);
+      expect(t.hash).toBe(sha256(TEXTOS[tipo][version]));
+      expect(v.formulario_snapshot.consentimientos[tipo].hash).toBe(t.hash);
+    }
+    await expect(pool.query(`UPDATE captacion_textos_consentimiento SET texto = 'x' WHERE tipo = 'habeas_data'`)).rejects.toThrow(/inmutable/);
+    await expect(pool.query(`DELETE FROM captacion_textos_consentimiento WHERE tipo = 'habeas_data'`)).rejects.toThrow(/inmutable/);
+
+    // Dispositivo en la firma y en el código enviado
+    expect(v.firma_user_agent).toBeTruthy();
+    const { rows: [otp] } = await pool.query(`SELECT user_agent FROM captacion_otp WHERE prospecto_id = $1 ORDER BY created_at DESC LIMIT 1`, [e.prospectoId]);
+    expect(otp.user_agent).toBeTruthy();
+  });
+
+  test('Paso 10c — firmada la solicitud, la persona ya no puede cambiar su identidad ni su contacto desde su enlace', async () => {
+    const res = await request(app).put(pub('/personal')).send({ celular: '3200000000' });
+    expect([res.status, res.body.code]).toEqual([409, 'DATOS_FIRMADOS']);
+    const { rows: [p] } = await pool.query(`SELECT celular FROM captacion_prospectos WHERE id = $1`, [e.prospectoId]);
+    expect(p.celular).toBe(CELULAR);
   });
 
   test('Paso 11 — no puede firmar dos veces (409)', async () => {
@@ -280,6 +321,215 @@ describe('Afiliación de principio a fin (página web → firma → entrega al a
     expect(pdf.body.subarray(0, 4).toString()).toBe('%PDF');
   });
 
+  test('Paso 13a — el PDF sellado es evidencia: no se puede eliminar, y si su contenido no coincide con su hash no se entrega', async () => {
+    const ag = await login('asesor');
+    const { rows: [v] } = await pool.query(`SELECT firma_pdf_archivo_id, firma_pdf_hash FROM captacion_vinculaciones WHERE id = $1`, [e.vinculacionId]);
+    expect(v.firma_pdf_archivo_id).toBeTruthy();
+    await expect(eliminarArchivo(v.firma_pdf_archivo_id, { omitirS3: true })).rejects.toMatchObject({ code: 'ARCHIVO_PROTEGIDO' });
+    const { rowCount } = await pool.query(`SELECT 1 FROM archivos WHERE id = $1`, [v.firma_pdf_archivo_id]);
+    expect(rowCount).toBe(1);
+
+    const url = `/api/captacion/vinculaciones/${e.vinculacionId}/formato`;
+    try {
+      // Si el hash guardado ya no corresponde al archivo, no se entrega y queda registrado
+      await pool.query(`UPDATE captacion_vinculaciones SET firma_pdf_hash = $2 WHERE id = $1`, [e.vinculacionId, 'f'.repeat(64)]);
+      const alterado = await ag.get(url);
+      expect([alterado.status, alterado.body.code]).toEqual([409, 'FORMATO_ALTERADO']);
+      const { rowCount: eventos } = await pool.query(
+        `SELECT 1 FROM captacion_eventos WHERE vinculacion_id = $1 AND tipo = 'formato_integridad_fallida'`, [e.vinculacionId]);
+      expect(eventos).toBe(1);
+    } finally {
+      await pool.query(`UPDATE captacion_vinculaciones SET firma_pdf_hash = $2 WHERE id = $1`, [e.vinculacionId, v.firma_pdf_hash]);
+    }
+    expect((await ag.get(url)).status).toBe(200);
+  });
+
+  test('Paso 13a2 — el asesor DEVUELVE a subsanar la cédula (frente) y la firma: la persona corrige, firma de nuevo y la firma anterior queda archivada', async () => {
+    const ag = await login('asesor');
+    const url = `/api/captacion/vinculaciones/${e.vinculacionId}`;
+    const hashViejo = e.firmaHash;
+    const { rows: [antes] } = await pool.query(`SELECT firma_pdf_archivo_id FROM captacion_vinculaciones WHERE id = $1`, [e.vinculacionId]);
+
+    // Validaciones del pedido
+    expect((await ag.post(`${url}/subsanacion`).send({ items: [], motivo: 'La foto se ve borrosa' })).status).toBe(400);
+    expect((await ag.post(`${url}/subsanacion`).send({ items: ['firma'], motivo: 'x' })).status).toBe(400);
+
+    const emailsAntes = emailsDePrueba.length;
+    const pide = await ag.post(`${url}/subsanacion`).send({ items: ['cedula_frente', 'firma'], motivo: 'El frente de la cédula sale borroso y la firma es una foto de otra cosa' });
+    expect(pide.status).toBe(201);
+    expect(pide.body).toMatchObject({ correo_enviado: true, firma_archivada: true });
+    expect(pide.body.enlace).toContain(`/conocenos/${e.token}`);
+    expect(emailsDePrueba.length).toBe(emailsAntes + 1);
+    expect(emailsDePrueba.at(-1)).toMatchObject({ to: CORREO });
+    expect(emailsDePrueba.at(-1).text).toContain('borroso');
+
+    // Una sola devolución abierta; y mientras esté abierta no se entrega
+    expect((await ag.post(`${url}/subsanacion`).send({ items: ['datos'], motivo: 'Otra cosa distinta' })).body.code).toBe('SUBSANACION_ABIERTA');
+    const bloqueo = await ag.post(`${url}/entregar`);
+    expect([bloqueo.status, bloqueo.body.code]).toEqual([400, 'SUBSANACION_PENDIENTE']);
+
+    // La firma vigente se archivó (con su hash y su PDF sellado) y la solicitud quedó sin firma
+    const { rows: [v1] } = await pool.query(`SELECT estado, seccion_firma_at, firma_png, firma_doc_hash FROM captacion_vinculaciones WHERE id = $1`, [e.vinculacionId]);
+    expect(v1).toEqual({ estado: 'por_subsanar', seccion_firma_at: null, firma_png: null, firma_doc_hash: null });
+    const { rows: hist } = await pool.query(`SELECT datos FROM captacion_firmas_historial WHERE vinculacion_id = $1`, [e.vinculacionId]);
+    expect(hist).toHaveLength(1);
+    expect(hist[0].datos.firma_doc_hash).toBe(hashViejo);
+    expect(hist[0].datos.firma_pdf_archivo_id).toBe(antes.firma_pdf_archivo_id);
+    expect((await pool.query(`SELECT 1 FROM archivos WHERE id = $1`, [antes.firma_pdf_archivo_id])).rowCount).toBe(1);   // el PDF anterior sigue existiendo
+
+    // La persona ve qué se le pidió y por qué, y no puede dar por resuelto lo que falta
+    const estado = await request(app).get(pub());
+    expect(estado.body.subsanacion).toMatchObject({ items: ['cedula_frente', 'firma'], pendientes: ['cedula_frente', 'firma'] });
+    expect(estado.body.subsanacion.motivo).toContain('borroso');
+    const incompleta = await request(app).post(pub('/subsanacion/resolver'));
+    expect([incompleta.status, incompleta.body.code, incompleta.body.pendientes]).toEqual([400, 'SUBSANACION_INCOMPLETA', ['cedula_frente', 'firma']]);
+
+    // Sube otra foto del frente (queda como pendiente la firma)
+    const meta = { nombre: 'cedula-frente-nueva.jpg', mime: 'image/jpeg', size: 260000 };
+    const sol = await request(app).post(pub('/documentos/frente/solicitar')).send(meta);
+    expect(sol.status).toBe(200);
+    expect((await request(app).patch(pub('/documentos/frente/confirmar')).send({ key: sol.body.key, ...meta })).status).toBe(200);
+    expect((await request(app).get(pub())).body.subsanacion.pendientes).toEqual(['firma']);
+
+    // Firma de nuevo (basta con firmar; su verificación por correo sigue vigente)
+    const firma = await request(app).post(pub('/firmar')).set('x-stepup-token', e.stepup).set('User-Agent', UA).send(e.cuerpoFirma);
+    expect(firma.status).toBe(200);
+    const { rows: [v2] } = await pool.query(`SELECT estado, firma_doc_hash, firma_pdf_archivo_id FROM captacion_vinculaciones WHERE id = $1`, [e.vinculacionId]);
+    expect(v2.estado).toBe('por_subsanar');                  // sigue devuelta hasta que la persona confirme
+    expect(v2.firma_doc_hash).toHaveLength(64);
+    expect(v2.firma_doc_hash).not.toBe(hashViejo);           // nueva firma, nuevo hash (otra hora)
+    expect(v2.firma_pdf_archivo_id).toBeTruthy();
+    expect(v2.firma_pdf_archivo_id).not.toBe(antes.firma_pdf_archivo_id);
+    e.firmaHash = v2.firma_doc_hash;
+
+    // Confirma la corrección: la solicitud vuelve a estar lista y el asesor recibe el aviso
+    expect((await request(app).post(pub('/subsanacion/resolver'))).status).toBe(200);
+    const { rows: [v3] } = await pool.query(`SELECT estado FROM captacion_vinculaciones WHERE id = $1`, [e.vinculacionId]);
+    expect(v3.estado).toBe('solicitud_completa');
+    const lista = await ag.get(`${url}/subsanacion`);
+    expect(lista.body.abierta).toBeNull();
+    expect(lista.body.historial).toHaveLength(1);
+    expect(lista.body.historial[0]).toMatchObject({ resuelta_por: 'prospecto' });
+    expect(lista.body.firmas_archivadas).toBe(1);
+    const { rows: tipos } = await pool.query(
+      `SELECT tipo FROM captacion_eventos WHERE prospecto_id = $1 AND tipo LIKE 'subsanacion_%' ORDER BY created_at, id`, [e.prospectoId]);
+    expect(tipos.map((t) => t.tipo)).toEqual(['subsanacion_solicitada', 'subsanacion_resuelta']);
+  });
+
+  test('Paso 13a3 — devolver solo los datos deja a la persona corregir su contacto aunque ya haya firmado; el asesor puede cerrarla', async () => {
+    const ag = await login('asesor');
+    const url = `/api/captacion/vinculaciones/${e.vinculacionId}`;
+    expect((await request(app).put(pub('/personal')).send({ celular: '3200000001' })).body.code).toBe('DATOS_FIRMADOS');   // sin devolución, sigue bloqueado
+
+    expect((await ag.post(`${url}/subsanacion`).send({ items: ['datos'], motivo: 'El celular tiene un dígito de más' })).status).toBe(201);
+    const corrige = await request(app).put(pub('/personal')).send({ celular: '3105550102' });
+    expect(corrige.status).toBe(200);
+    expect((await pool.query(`SELECT celular FROM captacion_prospectos WHERE id = $1`, [e.prospectoId])).rows[0].celular).toBe('3105550102');
+
+    expect((await ag.post(`${url}/subsanacion/cerrar`)).status).toBe(200);
+    expect((await ag.post(`${url}/subsanacion/cerrar`)).status).toBe(404);       // ya no hay una abierta
+    // Vuelve el celular original para no alterar los pasos siguientes
+    await pool.query(`UPDATE captacion_prospectos SET celular = $2 WHERE id = $1`, [e.prospectoId, CELULAR]);
+  });
+
+  test('Paso 13a4 — el asesor compara con la cédula: si coincide lo confirma; si no, escribe los datos tal cual aparecen en la cédula y todo queda trazado', async () => {
+    const ag = await login('asesor');
+    const url = `/api/captacion/vinculaciones/${e.vinculacionId}`;
+    const { rows: [antes] } = await pool.query(
+      `SELECT firma_doc_hash, firma_pdf_archivo_id, firma_pdf_hash, formulario_snapshot FROM captacion_vinculaciones WHERE id = $1`, [e.vinculacionId]);
+
+    expect((await ag.get(`${url}/correcciones`)).body).toEqual({ correcciones: [], verificacion: null });
+
+    // Coincide tal cual: queda la confirmación (quién, cuándo y con qué valores)
+    expect((await ag.post(`${url}/verificacion-identidad`)).status).toBe(201);
+    const conf = (await ag.get(`${url}/correcciones`)).body.verificacion;
+    expect(conf).toMatchObject({ origen: 'confirmada', cedula: CEDULA, nombres: 'María', vigente: true });
+
+    // Datos inválidos o sin cambios
+    const motivo = 'La cédula dice otro número y "María José"; se escribió mal en el formulario';
+    expect((await ag.put(`${url}/identidad`).send({ cedula: 'ABC123', motivo })).status).toBe(400);
+    expect((await ag.put(`${url}/identidad`).send({ cedula: '88800002' })).status).toBe(400);            // sin motivo
+    expect((await ag.put(`${url}/identidad`).send({ motivo })).status).toBe(400);                          // sin qué corregir
+    expect((await ag.put(`${url}/identidad`).send({ cedula: CEDULA, motivo })).status).toBe(400);          // igual a lo que ya tiene
+
+    // Otro asesor no puede corregir una solicitud ajena
+    const { rows: [otro] } = await pool.query(`SELECT 1 FROM global_usuarios WHERE id = $1`, [usuarios.configurador.id]);
+    expect(otro).toBeTruthy();
+    expect((await (await login('configurador')).put(`${url}/identidad`).send({ cedula: '88800002', motivo })).status).toBeGreaterThanOrEqual(403);
+
+    // No coincide: la escribe como aparece en la cédula
+    const corrige = await ag.put(`${url}/identidad`).send({ cedula: '88800002', nombres: 'María José', motivo });
+    expect(corrige.status).toBe(200);
+    expect(corrige.body).toMatchObject({ campos: ['cedula', 'nombres'], formato_resellado: true });
+    const { rows: [p] } = await pool.query(`SELECT cedula, nombres FROM captacion_prospectos WHERE id = $1`, [e.prospectoId]);
+    expect(p).toEqual({ cedula: '88800002', nombres: 'María José' });
+
+    // Trazabilidad: valor anterior y nuevo, motivo, asesor, y una verificación "corregida" vigente
+    const { correcciones, verificacion } = (await ag.get(`${url}/correcciones`)).body;
+    expect(correcciones).toHaveLength(1);
+    expect(correcciones[0]).toMatchObject({ antes: { cedula: CEDULA, nombres: 'María' }, despues: { cedula: '88800002', nombres: 'María José' }, motivo });
+    expect(verificacion).toMatchObject({ origen: 'corregida', cedula: '88800002', nombres: 'María José', vigente: true });
+
+    // La firma original sigue probando lo firmado (no cambia); el PDF sellado anterior se conserva y se selló uno nuevo
+    const { rows: [despues] } = await pool.query(
+      `SELECT firma_doc_hash, firma_pdf_archivo_id, firma_pdf_hash, formulario_snapshot FROM captacion_vinculaciones WHERE id = $1`, [e.vinculacionId]);
+    expect(despues.firma_doc_hash).toBe(antes.firma_doc_hash);
+    expect(despues.formulario_snapshot).toEqual(antes.formulario_snapshot);
+    expect(despues.firma_pdf_archivo_id).toBeTruthy();
+    expect(despues.firma_pdf_archivo_id).not.toBe(antes.firma_pdf_archivo_id);
+    expect(despues.firma_pdf_hash).not.toBe(antes.firma_pdf_hash);
+    expect((await pool.query(`SELECT 1 FROM archivos WHERE id = $1`, [antes.firma_pdf_archivo_id])).rowCount).toBe(1);
+    const { rows: [corr] } = await pool.query(`SELECT pdf_anterior_id, pdf_anterior_hash FROM captacion_correcciones WHERE vinculacion_id = $1`, [e.vinculacionId]);
+    expect(corr).toEqual({ pdf_anterior_id: antes.firma_pdf_archivo_id, pdf_anterior_hash: antes.firma_pdf_hash });
+    const { rows: evs } = await pool.query(
+      `SELECT tipo FROM captacion_eventos WHERE prospecto_id = $1 AND tipo IN ('identidad_corregida', 'identidad_verificada') ORDER BY created_at, id`, [e.prospectoId]);
+    expect(evs.map((x) => x.tipo)).toEqual(['identidad_verificada', 'identidad_corregida']);
+
+    // Otra solicitud con esa cédula: no se permite duplicar
+    const { rows: [dup] } = await pool.query(
+      `INSERT INTO captacion_prospectos (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular, token_hash, token, acepta_habeas_data)
+       VALUES ($1, $2, 'Otra', 'Persona', '88800003', '3105550103', 'h', 'tok-dup-corr', true) RETURNING id`, [EMPRESA, usuarios.asesor.id]);
+    expect((await ag.put(`${url}/identidad`).send({ cedula: '88800003', motivo })).body.code).toBe('CEDULA_DUPLICADA');
+    await pool.query(`DELETE FROM captacion_prospectos WHERE id = $1`, [dup.id]);
+
+    // Se deja como estaba para los pasos siguientes
+    expect((await ag.put(`${url}/identidad`).send({ cedula: CEDULA, nombres: 'María', motivo: 'Se restaura el dato original de la prueba' })).status).toBe(200);
+  });
+
+  test('Paso 13b — con la validación por voz exigida, no se entrega sin la llamada; y solo vale con el protocolo cumplido', async () => {
+    const config = await login('configurador');
+    expect((await config.put('/api/captacion/config/validacion-voz').send({ exigida: true })).status).toBe(200);
+    const ag = await login('asesor');
+    const url = `/api/captacion/vinculaciones/${e.vinculacionId}`;
+
+    const sinLlamada = await ag.post(`${url}/entregar`);
+    expect([sinLlamada.status, sinLlamada.body.code]).toEqual([400, 'VALIDACION_VOZ_REQUERIDA']);
+
+    const info = await ag.get(`${url}/validacion-voz`);
+    expect(info.body).toMatchObject({ exigida: true, validada: false, firmada: true, celular: CELULAR });
+    expect(info.body.protocolo.map((q) => q.clave)).toEqual(['empresa', 'cargo', 'aporte', 'beneficiario', 'referencia']);
+
+    // Sin contestar: queda el intento, no vale
+    expect((await ag.post(`${url}/validacion-voz`).send({ resultado: 'no_contesta' })).status).toBe(201);
+    // "Validada" con menos de 3 coincidencias, o sin confirmar la voluntad: se rechaza
+    const pocas = await ag.post(`${url}/validacion-voz`).send({ resultado: 'validada', confirma_voluntad: true, preguntas: [{ clave: 'cargo', coincide: true }] });
+    expect(pocas.status).toBe(400);
+    const sinVoluntad = await ag.post(`${url}/validacion-voz`).send({ resultado: 'validada', confirma_voluntad: false,
+      preguntas: ['empresa', 'cargo', 'aporte'].map((clave) => ({ clave, coincide: true })) });
+    expect(sinVoluntad.status).toBe(400);
+    expect((await ag.post(`${url}/entregar`)).status).toBe(400);
+
+    // Validada de verdad
+    const ok = await ag.post(`${url}/validacion-voz`).send({ resultado: 'validada', confirma_voluntad: true,
+      preguntas: ['empresa', 'cargo', 'aporte', 'beneficiario'].map((clave) => ({ clave, coincide: true })), observaciones: 'Contestó de inmediato' });
+    expect(ok.status).toBe(201);
+    const despues = await ag.get(`${url}/validacion-voz`);
+    expect(despues.body.validada).toBe(true);
+    expect(despues.body.historial).toHaveLength(2);   // los intentos fallidos con parámetros inválidos no se guardan
+    const { rows: evs } = await pool.query(`SELECT payload FROM captacion_eventos WHERE prospecto_id = $1 AND tipo = 'validacion_voz'`, [e.prospectoId]);
+    expect(evs).toHaveLength(2);
+  });
+
   test('Paso 14 — el asesor ENTREGA la solicitud: queda "entregada", con fecha y responsable', async () => {
     const ag = await login('asesor');
     const res = await ag.post(`/api/captacion/vinculaciones/${e.vinculacionId}/entregar`);
@@ -296,6 +546,9 @@ describe('Afiliación de principio a fin (página web → firma → entrega al a
   test('Paso 15 — ya entregada, nadie puede modificarla: ni la persona ni el asesor', async () => {
     const bloqueada = async (r) => { const res = await r; expect([res.status, res.body.error]).toEqual([400, 'La solicitud ya fue entregada']); };
     await bloqueada(request(app).put(pub('/personal')).send({ cargo: 'x', estado_civil: 'soltero' }));
+    const agEntrega = await login('asesor');
+    expect((await agEntrega.put(`/api/captacion/vinculaciones/${e.vinculacionId}/identidad`).send({ cedula: '88800009', motivo: 'Intento tras la entrega' })).status).toBe(400);
+    expect((await agEntrega.post(`/api/captacion/vinculaciones/${e.vinculacionId}/verificacion-identidad`)).status).toBe(400);
     await bloqueada(request(app).put(pub('/laboral')).send({ cargo: 'x' }));
     await bloqueada(request(app).put(pub('/financiera')).send({ origen_fondos: 'x' }));
     await bloqueada(request(app).put(pub('/beneficiarios')).send({ beneficiarios: [{ orden: 1, nombres: 'X', porcentaje: 100 }] }));

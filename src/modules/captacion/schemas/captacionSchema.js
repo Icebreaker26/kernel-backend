@@ -131,13 +131,21 @@ export const seccionReferenciasSchema = z.object({
 });
 
 export const seccionFirmaSchema = z.object({
-  firma_png             : z.string().min(1),
-  firma_trazos          : z.array(z.object({ x: z.number(), y: z.number(), t: z.number() })),
+  // 'dibujada': con el dedo o el mouse (quedan los trazos). 'imagen': cargada desde un archivo (no hay trazos)
+  firma_origen          : z.enum(['dibujada', 'imagen']).default('dibujada'),
+  // PNG en data URL (la firma dibujada): formato y tamaño acotados; una firma vacía o de otro tipo se rechaza
+  firma_png             : z.string().max(1_500_000).refine((v) => v.startsWith('data:image/png;base64,iVBORw0KGgo'), 'La firma debe ser una imagen PNG'),
+  // Trazos: en una firma dibujada, al menos dos puntos (una firma real no es un punto suelto); en una imagen cargada no hay trazos
+  firma_trazos          : z.array(z.object({ x: z.number(), y: z.number(), t: z.number() })).max(20000),
   version_consentimiento: z.string().min(1),
   acepta_terminos       : z.literal(true),
   // Consentimiento explícito a firmar electrónicamente (Ley 527 de 1999); equivale a la firma manuscrita
   acepta_firma_electronica: z.literal(true),
   version_firma_electronica: z.string().min(1),
+}).superRefine((d, ctx) => {
+  if (d.firma_origen === 'dibujada' && d.firma_trazos.length < 2) {
+    ctx.addIssue({ code: 'custom', path: ['firma_trazos'], message: 'La firma está vacía' });
+  }
 });
 
 // Código de un solo uso que se envía al correo del asociado
@@ -165,3 +173,31 @@ export const valoresAsesorSchema = z.object({
   valor_aporte  : z.preprocess(v => Number(v), z.number().nonnegative()).optional(),
   cuota_admision: z.preprocess(v => Number(v), z.number().nonnegative()).optional(),
 }).strict();
+
+// Resultado de la llamada de voz de validación de identidad (protocolo en services/validacionVoz.js)
+export const validacionVozSchema = z.object({
+  resultado        : z.enum(['validada', 'no_contesta', 'no_coincide']),
+  preguntas        : z.array(z.object({
+    clave   : z.enum(['empresa', 'cargo', 'aporte', 'beneficiario', 'referencia']),
+    coincide: z.boolean(),
+  })).max(10).default([]),
+  confirma_voluntad: z.boolean().default(false),
+  grabada          : z.boolean().default(false),
+  observaciones    : z.string().trim().max(1000).optional(),
+}).strict();
+
+export const exigenciaVozSchema = z.object({ exigida: z.boolean() }).strict();
+
+// Devolver a subsanar: qué está mal y por qué (ver services/subsanacion.js)
+export const subsanacionSchema = z.object({
+  items : z.array(z.enum(['cedula_frente', 'cedula_reverso', 'firma', 'datos'])).min(1, 'Elige qué hay que corregir').max(4),
+  motivo: z.string().trim().min(5, 'Explica el motivo (mínimo 5 caracteres)').max(1000),
+}).strict();
+
+// Corrección de identidad hecha por el asesor (cédula o nombre mal escritos). El motivo es obligatorio: queda como evidencia.
+export const correccionIdentidadSchema = z.object({
+  cedula   : z.string().trim().regex(/^\d{4,15}$/, 'La cédula debe tener solo números (entre 4 y 15)').optional(),
+  nombres  : z.string().trim().min(1).max(100).optional(),
+  apellidos: z.string().trim().min(1).max(100).optional(),
+  motivo   : z.string().trim().min(10, 'Explica el motivo (mínimo 10 caracteres)').max(500),
+}).strict().refine((d) => d.cedula || d.nombres || d.apellidos, { message: 'Indica qué dato corregir' });

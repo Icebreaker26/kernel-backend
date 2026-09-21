@@ -3,6 +3,7 @@ import { verifyToken } from '../../../middlewares/auth.js';
 import { checkPermission } from '../../../middlewares/checkPermission.js';
 import { captacionPublicLimiter, enlacePublicoLimiter } from '../../../middlewares/rateLimiter.js';
 import * as ctrl from '../controllers/captacionController.js';
+import * as listas from '../controllers/consultaListasController.js';
 
 const router = Router();
 const auditarPub = ctrl.auditarCambioPosteriorAFirma('prospecto');
@@ -46,6 +47,7 @@ router.put ('/pub/:token/financiera',                     exigirHabeas, auditarP
 router.put ('/pub/:token/aportes',                        exigirHabeas, auditarPub, ctrl.pubSeccionAportes);
 router.put ('/pub/:token/beneficiarios',                  exigirHabeas, auditarPub, ctrl.pubSeccionBeneficiarios);
 router.put ('/pub/:token/referencias',                    exigirHabeas, auditarPub, ctrl.pubSeccionReferencias);
+router.post('/pub/:token/subsanacion/resolver',           exigirHabeas, ctrl.pubResolverSubsanacion);
 router.post('/pub/:token/firmar',                         exigirHabeas, ctrl.pubFirmar);
 router.post('/pub/:token/documentos/:lado/solicitar',     exigirHabeas, ctrl.pubSolicitarUploadCedula);
 router.patch('/pub/:token/documentos/:lado/confirmar',    exigirHabeas, auditarPub, ctrl.pubConfirmarUploadCedula);
@@ -71,8 +73,36 @@ router.get ('/valores/:uuid',                  checkPermission('captacion', 'REA
 router.get ('/config/web',                     checkPermission('captacion', 'READ'),       ctrl.getConfigWeb);
 router.put ('/config/web',                     checkPermission('captacion', 'CONFIGURAR'), ctrl.actualizarConfigWeb);
 
+router.get ('/config/validacion-voz',          checkPermission('captacion', 'READ'),       ctrl.getExigenciaVoz);
+router.put ('/config/validacion-voz',          checkPermission('captacion', 'CONFIGURAR'), ctrl.actualizarExigenciaVoz);
+
 router.get ('/vinculaciones',                  checkPermission('captacion', 'READ'),     ctrl.listarVinculaciones);
 router.get ('/vinculaciones/:id',              checkPermission('captacion', 'READ'),     ctrl.getVinculacion);
+// Consulta en listas restrictivas y fuentes abiertas: la hace el asesor; el Oficial de Cumplimiento valida que se hizo bien
+router.get ('/vinculaciones/:id/consulta-listas', checkPermission('captacion', 'READ'),  listas.getConsultaListas);
+router.post('/vinculaciones/:id/consulta-listas', checkPermission('captacion', 'WRITE'), listas.iniciarConsultaListas);
+router.put ('/consultas-listas/:cid',             checkPermission('captacion', 'WRITE'), listas.guardarConsultaListas);
+router.post('/consultas-listas/:cid/buscar',      checkPermission('captacion', 'WRITE'), listas.buscarWebConsulta);
+router.post('/consultas-listas/:cid/cerrar',      checkPermission('captacion', 'WRITE'), listas.cerrarConsultaListas);
+router.get ('/consultas-listas/:cid/pdf',         checkPermission('captacion', 'READ'),  listas.pdfConsultaAsesor);
+router.get ('/cumplimiento/consultas',            checkPermission('captacion', 'VALIDAR'), listas.listarConsultasCumplimiento);
+router.get ('/cumplimiento/consultas/:cid',       checkPermission('captacion', 'VALIDAR'), listas.getConsultaCumplimiento);
+router.get ('/cumplimiento/consultas/:cid/pdf',   checkPermission('captacion', 'VALIDAR'), listas.pdfConsultaOficial);
+router.post('/cumplimiento/consultas/:cid/validar', checkPermission('captacion', 'VALIDAR'), listas.validarConsulta);
+router.get ('/cumplimiento/listas',               checkPermission('captacion', 'VALIDAR'), listas.getEstadoListas);
+router.post('/cumplimiento/listas/actualizar',    checkPermission('captacion', 'VALIDAR'), listas.actualizarListasAhora);
+router.get ('/listas/estado',                     checkPermission('captacion', 'READ'),  listas.getEstadoListas);
+router.get ('/config/reglas-entrega',             checkPermission('captacion', 'READ'),  listas.getReglasEntrega);
+router.put ('/config/reglas-entrega',             checkPermission('captacion', 'CONFIGURAR'), listas.actualizarReglasEntrega);
+
+router.get ('/vinculaciones/:id/correcciones',   checkPermission('captacion', 'READ'),   ctrl.getCorrecciones);
+router.post('/vinculaciones/:id/verificacion-identidad', checkPermission('captacion', 'WRITE'), ctrl.verificarIdentidad);
+router.put ('/vinculaciones/:id/identidad',      checkPermission('captacion', 'WRITE'),  ctrl.corregirIdentidad);
+router.get ('/vinculaciones/:id/subsanacion',    checkPermission('captacion', 'READ'),   ctrl.getSubsanacion);
+router.post('/vinculaciones/:id/subsanacion',    checkPermission('captacion', 'WRITE'),  ctrl.pedirSubsanacion);
+router.post('/vinculaciones/:id/subsanacion/cerrar', checkPermission('captacion', 'WRITE'), ctrl.cerrarSubsanacion);
+router.get ('/vinculaciones/:id/validacion-voz', checkPermission('captacion', 'READ'),   ctrl.getValidacionVoz);
+router.post('/vinculaciones/:id/validacion-voz', checkPermission('captacion', 'WRITE'),  ctrl.registrarValidacionVoz);
 router.get ('/vinculaciones/:id/documentos',   checkPermission('captacion', 'READ'),     ctrl.getDocumentosVinculacion);
 router.get ('/vinculaciones/:id/formato',      checkPermission('captacion', 'READ'),     ctrl.descargarFormato);
 router.post ('/vinculaciones/:id/documentos/:lado/solicitar', checkPermission('captacion', 'WRITE'), ctrl.solicitarDocumentoAsesor);

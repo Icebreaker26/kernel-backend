@@ -5,7 +5,7 @@ import jwt from 'jsonwebtoken';
 import { createApp } from './createApp.js';
 import { env } from './config/env.js';
 import { initNotificationService } from './services/notificationService.js';
-import { startScheduler, startSchedulerTesoreria, startSchedulerCaptacion, startAnomalyDetector } from './services/scheduler.js';
+import { startScheduler, startSchedulerTesoreria, startSchedulerCaptacion, startSchedulerListas, startAnomalyDetector } from './services/scheduler.js';
 import { startDispatcher } from './services/mailingDispatcher.js';
 import { iniciarColaEmail } from './services/emailColaService.js';
 import logger from './config/logger.js';
@@ -98,6 +98,7 @@ initNotificationService(io);
 startScheduler();
 startSchedulerTesoreria();
 startSchedulerCaptacion();
+startSchedulerListas();
 startAnomalyDetector();
 startDispatcher();
 iniciarColaEmail();   // reintenta los correos transaccionales (PQRS) que no pudieron salir

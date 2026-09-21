@@ -168,6 +168,18 @@ export const startSchedulerCaptacion = async () => {
   logger.info('Scheduler captación: limpieza de prospectos sin identificar cada hora');
 };
 
+// Listas restrictivas (ONU, OFAC, UE, Reino Unido, PEP, SIRI): se descargan solas; cada 6 horas revisa cuáles llevan más de 20 horas sin verificarse
+export const startSchedulerListas = () => {
+  const revisar = () => import('../modules/captacion/listas/fuentes.js')
+    .then(({ actualizarTodas }) => actualizarTodas({ soloVencidas: true }))
+    .catch((err) => logger.error(`Scheduler listas: ${err.message}`));
+  const inicio = setTimeout(revisar, 90 * 1000);   // no se compite con el arranque
+  const timer = setInterval(revisar, 6 * HORA_MS);
+  inicio.unref?.();
+  timer.unref?.();
+  logger.info('Scheduler listas: actualización de listas restrictivas cada 6 horas (solo las vencidas)');
+};
+
 export const startSchedulerTesoreria = async () => {
   await verificarVencimientosTesoreria(); // revisar al arrancar
   startDiarioTesoreria();

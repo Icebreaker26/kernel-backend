@@ -119,4 +119,17 @@ describe('Captación — alcance por rol', () => {
     expect((await agentes.admin.get('/api/captacion/prospectos/resumen')).status).toBe(200);
     expect((await agentes.asesorA.get('/api/captacion/prospectos/resumen')).status).toBe(200);
   });
+
+  test('devolver a subsanar: solo el asesor dueño la pide; el admin la ve pero no la pide; otro asesor no la ve', async () => {
+    const otro = creados.asesorB;
+    const url = `/api/captacion/vinculaciones/${otro.vinculacionId}/subsanacion`;
+    const pedido = { items: ['datos'], motivo: 'Falta corregir un dato del formulario' };
+    expect((await agentes.asesorA.post(url).send(pedido)).status).toBe(404);          // ajena
+    expect((await agentes.asesorA.get(url)).status).toBe(404);
+    expect((await agentes.admin.post(url).send(pedido)).status).toBe(404);            // el admin ve todo, pero no actúa por el asesor
+    expect((await agentes.asesorB.post(url).send(pedido)).status).toBe(201);          // el dueño sí
+    const admin = await agentes.admin.get(url);
+    expect(admin.status).toBe(200);
+    expect(admin.body.abierta).toMatchObject({ items: ['datos'] });
+  });
 });

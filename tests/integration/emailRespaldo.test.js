@@ -31,7 +31,7 @@ describe('Email — respaldo del relay', () => {
   });
 });
 
-describe('enviarPorCadena — Resend → relay → SES', () => {
+describe('enviarPorCadena — SES → Resend → relay', () => {
   const args = ['a@b.co', 'Asunto', '<p>x</p>', 'x'];
 
   test('usa el primer canal si funciona y no toca los demás', async () => {

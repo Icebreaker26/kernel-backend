@@ -35,10 +35,13 @@ const envSchema = z.object({
   BRAVE_SEARCH_API_KEY:  z.string().min(10).optional(),
   // Buscar también por la cédula envía ese dato a un tercero: por defecto solo se busca por el nombre
   BUSQUEDA_INCLUIR_CEDULA: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
-  // Correo por API HTTPS (Resend): canal principal si están ambas. RESEND_FROM p. ej. 'Cooperativa Progresemos <no-responder@cooperativaprogresemos.coop>'
+  // Correo por API HTTPS (Resend): respaldo de SES si están ambas. RESEND_FROM p. ej. 'Cooperativa Progresemos <no-responder@cooperativaprogresemos.coop>'
   RESEND_API_KEY:        z.string().startsWith('re_').optional(),
   RESEND_FROM:           z.string().min(3).optional(),
-  // Respaldo de correo por API (Amazon SES, HTTPS): se usa si el relay falla. Credenciales: SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY.
+  // Canal principal de correo (Amazon SES, HTTPS; cuota 50.000/día). Si falla se usa Resend y luego el relay. Credenciales: SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY.
+  // Ritmo del dispatcher de campañas. Por defecto depende del canal: con SES 10 correos cada 5 s (7.200/h); sin SES, 4 cada 30 s (480/h, límite del relay).
+  MAILING_POR_TICK:      z.string().optional().transform((v) => (v ? Number(v) : undefined)),
+  MAILING_TICK_MS:       z.string().optional().transform((v) => (v ? Number(v) : undefined)),
   SES_FROM:              z.string().min(3).optional(),   // p. ej. 'Cooperativa Progresemos <no-responder@midominio.coop>' (dominio verificado en SES)
   SES_REGION:            z.string().optional(),          // por defecto AWS_REGION
   // ARN del tema SNS al que SES publica rebotes y quejas; solo se aceptan mensajes de ese tema en /api/email/ses-eventos

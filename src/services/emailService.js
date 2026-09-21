@@ -19,7 +19,7 @@ const sendViaRelay = async (to, subject, html, text) => {
   }
 };
 
-// ── Resend por HTTPS (canal principal en producción; Railway Hobby bloquea SMTP pero sí llega a 443) ──
+// ── Resend por HTTPS (respaldo de SES; Railway Hobby bloquea SMTP pero sí llega a 443) ──
 const resendConfigurado = () => !!(env.RESEND_API_KEY && env.RESEND_FROM);
 
 const sendViaResend = async (to, subject, html, text) => {
@@ -35,7 +35,7 @@ const sendViaResend = async (to, subject, html, text) => {
   }
 };
 
-// ── Amazon SES por HTTPS (respaldo del relay; Railway sí llega a 443) ─────────
+// ── Amazon SES por HTTPS (canal principal; Railway sí llega a 443) ────────────
 let ses = null;
 
 // Usuario IAM propio de SES; si no se define, cae en las llaves generales AWS_*
@@ -44,7 +44,7 @@ const sesCredenciales = () => ({
   secretAccessKey: env.SES_SECRET_ACCESS_KEY ?? env.AWS_SECRET_ACCESS_KEY,
 });
 
-const sesConfigurado = () => {
+export const sesConfigurado = () => {
   const c = sesCredenciales();
   return !!(env.SES_FROM && c.accessKeyId && c.secretAccessKey);
 };
@@ -149,15 +149,15 @@ export const enviarEmail = async (to, subject, html, text = '') => {
     emailsDePrueba.push({ to, subject, html, text });
     return;
   }
-  // Orden: Resend (HTTPS, no depende de ningún equipo nuestro) → relay → SES; cada uno respalda al anterior
+  // Orden: Amazon SES (principal, cuota de 50.000/día) → Resend (respaldo) → relay; cada uno respalda al anterior
   const canales = [];
+  const hayRespaldo = resendConfigurado() || !!(env.RELAY_URL && env.RELAY_SECRET);
+  // En desarrollo con SMTP local y sin otros canales, SES no se toca para no mandar correo real por accidente
+  if (sesConfigurado() && (hayRespaldo || !env.SMTP_HOST)) canales.push(sendViaSes);
   if (resendConfigurado()) canales.push(sendViaResend);
   if (env.RELAY_URL && env.RELAY_SECRET) canales.push(sendViaRelay);
-  if (sesConfigurado() && (canales.length > 0 || !env.SMTP_HOST)) canales.push(sendViaSes);
   if (canales.length > 0) {
     await enviarPorCadena(canales, [to, subject, html, text]);
-  } else if (sesConfigurado() && !env.SMTP_HOST) {
-    await sendViaSes(to, subject, html, text);
   } else {
     await getTransporter().sendMail({ from: env.SMTP_FROM, to, subject, html, text });
   }

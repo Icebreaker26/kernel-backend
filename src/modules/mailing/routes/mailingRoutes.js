@@ -8,6 +8,10 @@ router.use(verifyToken);
 
 router.get('/',              checkPermission('mailing', 'READ'),   ctrl.listar);
 router.get('/candidatos',   checkPermission('mailing', 'READ'),   ctrl.candidatos);
+router.get('/jornadas',     checkPermission('mailing', 'READ'),   ctrl.listarJornadas);
+router.get('/contactos',    checkPermission('mailing', 'READ'),   ctrl.listarContactos);
+router.post('/contactos',   checkPermission('mailing', 'WRITE'),  ctrl.crearContacto);
+router.delete('/contactos/:id', checkPermission('mailing', 'DELETE'), ctrl.eliminarContacto);
 router.post('/',             checkPermission('mailing', 'WRITE'),  ctrl.crear);
 router.get('/:id/preview',  checkPermission('mailing', 'READ'),   ctrl.preview);
 router.post('/:id/enviar',  checkPermission('mailing', 'WRITE'),  ctrl.enviar);

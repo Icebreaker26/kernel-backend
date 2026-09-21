@@ -84,7 +84,7 @@ export const generarPresignedDescarga = async (archivoId) => {
 
 // Evidencia que nunca se borra por el flujo normal (conservación mínima de 5 a 10 años, Circular Básica Jurídica Título V).
 // Solo la retira un proceso de depuración explícito (`permitirEvidencia`) y con el plazo legal cumplido.
-const ENTIDADES_PROTEGIDAS = ['captacion_formato', 'captacion_consulta_listas', 'listas_snapshot'];
+const ENTIDADES_PROTEGIDAS = ['captacion_formato', 'captacion_firma_fisica', 'captacion_consulta_listas', 'listas_snapshot'];
 
 // `omitirS3`: solo borra la fila (tests, o cuando el objeto ya no existe en el bucket).
 export const eliminarArchivo = async (archivoId, { omitirS3 = false, permitirEvidencia = false } = {}) => {
@@ -125,6 +125,24 @@ export const subirBuffer = async (entidadTipo, entidadId, buffer, { nombre, mime
     ...retencionEvidencia(entidadTipo),        // Object Lock: nadie lo borra ni sobrescribe hasta cumplir el plazo
   }));
   return guardarArchivo(entidadTipo, entidadId, { key, nombre, mime, size: buffer.length }, subioPor);
+};
+
+// Lee un objeto recién subido con URL prefirmada (aún no tiene fila en `archivos`) para comprobar qué es realmente antes de aceptarlo
+export const leerPorKey = async (key) => {
+  if (memoriaTest) return memoriaTest.get(key) ?? null;
+  try {
+    const out = await s3.send(new GetObjectCommand({ Bucket: env.S3_BUCKET, Key: key }));
+    return Buffer.from(await out.Body.transformToByteArray());
+  } catch (err) {
+    if (err?.name === 'NoSuchKey' || err?.$metadata?.httpStatusCode === 404) return null;
+    throw err;
+  }
+};
+
+// Solo para pruebas: deja un objeto en la memoria que sustituye a S3 (equivale a que el navegador ya hizo el PUT)
+export const colocarObjetoDePrueba = (key, buffer) => {
+  if (!memoriaTest) throw new Error('Solo disponible en pruebas');
+  memoriaTest.set(key, Buffer.from(buffer));
 };
 
 export const leerBuffer = async (archivoId) => {

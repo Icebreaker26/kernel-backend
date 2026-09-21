@@ -201,3 +201,26 @@ export const correccionIdentidadSchema = z.object({
   apellidos: z.string().trim().min(1).max(100).optional(),
   motivo   : z.string().trim().min(10, 'Explica el motivo (mínimo 10 caracteres)').max(500),
 }).strict().refine((d) => d.cedula || d.nombres || d.apellidos, { message: 'Indica qué dato corregir' });
+
+// ── Solicitud diligenciada en papel (la digita el asesor) ────────────────────
+const fechaISO = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha con formato AAAA-MM-DD');
+
+export const solicitudFisicaSchema = z.object({
+  personal     : seccionPersonalSchema.default({}),
+  laboral      : seccionLaboralSchema.default({}),
+  pep          : seccionPepSchema,
+  financiera   : seccionFinancieraSchema.default({}),
+  aportes      : seccionAportesSchema,
+  beneficiarios: seccionBeneficiariosSchema.shape.beneficiarios.default([]),
+  referencias  : seccionReferenciasSchema.shape.referencias.default([]),
+  observaciones: z.string().trim().max(1000).optional(),
+}).strict();
+
+// Escaneo del formulario firmado a mano; fecha_firma es la que figura en el papel
+export const firmaFisicaSchema = z.object({
+  key  : z.string().min(1),
+  nombre: z.string().min(1),
+  mime : z.string().min(1),
+  size : z.coerce.number().int().positive(),
+  fecha_firma: fechaISO,
+}).strict();

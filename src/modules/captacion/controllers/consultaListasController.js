@@ -2,7 +2,7 @@ import { z } from 'zod';
 import pool from '../../../db/database.js';
 import logger from '../../../config/logger.js';
 import { notificarUsuario } from '../../../services/notificationService.js';
-import { subirBuffer, leerBuffer } from '../../../services/archivoService.js';
+import { subirBuffer, leerBuffer, leerPorKey, validarArchivo, generarPresignedUpload, guardarArchivo, generarPresignedDescarga } from '../../../services/archivoService.js';
 import { canonicalizar, sha256 } from '../../../services/hashCanonico.js';
 import { PARAMETROS_COTEJO } from '../listas/normalizar.js';
 import { FUENTES, estadoFuentes, actualizarTodas } from '../listas/fuentes.js';
@@ -36,6 +36,13 @@ const validarSchema = z.object({
   resultado: z.enum(['validada', 'observada']),
   observaciones: z.string().trim().max(1000).optional(),
 }).strict();
+const adjuntoMetaSchema = z.object({ nombre: z.string().min(1).max(200), mime: z.literal('application/pdf'), size: z.coerce.number().int().positive() });
+const adjuntoConfirmarSchema = adjuntoMetaSchema.extend({
+  key: z.string().min(10).max(300),
+  proveedor: z.string().trim().min(2, 'Indica el proveedor (por ejemplo Starsol)').max(60),
+  nota: z.string().trim().max(300).optional(),
+});
+const MAX_ADJUNTO = 10 * 1024 * 1024;
 const reglasSchema = z.object({ validacion_voz: z.boolean().optional(), consulta_listas: z.boolean().optional() }).strict();
 
 const ambito = (req) => (req.user.rol === 'admin' ? null : req.user.id);
@@ -51,7 +58,8 @@ const pendientesDe = (c) => {
 const formato = (c, extra = {}) => ({
   id: c.id, vinculacion_id: c.vinculacion_id, estado: c.estado, cedula: c.cedula, nombres: c.nombres, apellidos: c.apellidos,
   fecha_nacimiento: c.fecha_nacimiento, versiones: c.versiones, coincidencias: c.coincidencias, manual: c.manual, declaracion_pep: c.declaracion_pep,
-  parametros: c.parametros, busquedas: c.busquedas ?? null, busqueda_web_disponible: busquedaWebDisponible(), conclusion: c.conclusion, tiene_pdf: !!c.pdf_archivo_id, pdf_hash: c.pdf_hash,
+  parametros: c.parametros, adjuntos: (c.adjuntos ?? []).map(({ id, nombre, proveedor, nota, bytes, sha256, subido_at, subido_por_nombre }) => ({ id, nombre, proveedor, nota, bytes, sha256, subido_at, subido_por_nombre })),
+  busquedas: c.busquedas ?? null, busqueda_web_disponible: busquedaWebDisponible(), conclusion: c.conclusion, tiene_pdf: !!c.pdf_archivo_id, pdf_hash: c.pdf_hash,
   cerrada_at: c.cerrada_at, validada_at: c.validada_at, observaciones_oficial: c.observaciones_oficial, created_at: c.created_at,
   asesor_nombre: c.asesor_nombre ?? null, oficial_nombre: c.oficial_nombre ?? null,
   pendientes: pendientesDe(c), checklist: CHECKLIST_MANUAL,
@@ -217,6 +225,69 @@ export const guardarConsultaListas = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── Soportes adjuntos (PDF de otro proveedor, como redundancia) ─────────────
+// El asesor sube a S3 con URL prefirmada; al confirmar, el servidor lee el archivo, comprueba que es un PDF de verdad y guarda su hash.
+// Los adjuntos son evidencia: no se borran y solo se agregan mientras la consulta está abierta (antes de cerrarla y sellar el PDF).
+
+export const solicitarAdjunto = async (req, res, next) => {
+  try {
+    const meta = adjuntoMetaSchema.parse(req.body);
+    const c = await cargarConsultaDelAsesor(req.params.cid, req);
+    if (!c) return res.status(404).json({ error: 'Consulta no encontrada' });
+    if (!['en_curso', 'observada'].includes(c.estado)) return res.status(409).json({ error: 'La consulta ya está cerrada', code: 'CONSULTA_CERRADA' });
+    if (meta.size > MAX_ADJUNTO) return res.status(400).json({ error: 'El PDF excede el límite de 10 MB' });
+    const error = validarArchivo(meta);
+    if (error) return res.status(400).json({ error });
+    res.json(await generarPresignedUpload('captacion_consulta_adjunto', c.vinculacion_id, meta));
+  } catch (err) { next(err); }
+};
+
+export const confirmarAdjunto = async (req, res, next) => {
+  try {
+    const data = adjuntoConfirmarSchema.parse(req.body);
+    const c = await cargarConsultaDelAsesor(req.params.cid, req);
+    if (!c) return res.status(404).json({ error: 'Consulta no encontrada' });
+    if (!['en_curso', 'observada'].includes(c.estado)) return res.status(409).json({ error: 'La consulta ya está cerrada', code: 'CONSULTA_CERRADA' });
+    if (data.size > MAX_ADJUNTO) return res.status(400).json({ error: 'El PDF excede el límite de 10 MB' });
+    const error = validarArchivo(data);
+    if (error) return res.status(400).json({ error });
+    if (!data.key.startsWith(`kernel/captacion_consulta_adjuntos/${c.vinculacion_id}/`)) return res.status(400).json({ error: 'Key inválida para esta consulta' });
+
+    // Lo que llegó a S3 tiene que ser realmente un PDF (no basta el nombre ni el tipo declarado)
+    const bytes = await leerPorKey(data.key);
+    if (!bytes) return res.status(400).json({ error: 'No encontramos el archivo subido: inténtalo de nuevo' });
+    if (bytes.length > MAX_ADJUNTO || bytes.subarray(0, 5).toString('latin1') !== '%PDF-') {
+      return res.status(400).json({ error: 'El archivo no es un PDF válido' });
+    }
+    const archivo = await guardarArchivo('captacion_consulta_adjunto', c.vinculacion_id, { key: data.key, nombre: data.nombre, mime: data.mime, size: bytes.length }, req.user.id);
+    const { rows: [yo] } = await pool.query(`SELECT nombre FROM global_usuarios WHERE id = $1`, [req.user.id]);
+    const adjunto = {
+      id: archivo.id, nombre: data.nombre, proveedor: data.proveedor, nota: data.nota ?? null, bytes: bytes.length,
+      sha256: sha256(bytes), subido_at: new Date().toISOString(), subido_por: req.user.id, subido_por_nombre: yo?.nombre ?? null,
+    };
+    const { rows: [fila] } = await pool.query(
+      `UPDATE captacion_consultas_listas SET adjuntos = adjuntos || $2::jsonb, updated_at = NOW() WHERE id = $1 RETURNING id`, [c.id, JSON.stringify([adjunto])]);
+    const { rows: [v] } = await pool.query(`SELECT id, prospecto_id FROM captacion_vinculaciones WHERE id = $1`, [c.vinculacion_id]);
+    await evento(v, 'consulta_listas_adjunto', req, { consulta_id: c.id, archivo_id: archivo.id, proveedor: data.proveedor, sha256: adjunto.sha256 });
+    const { rows: [nueva] } = await pool.query(`${SELECT_CONSULTA} WHERE c.id = $1`, [fila.id]);
+    res.status(201).json(formato(nueva));
+  } catch (err) { next(err); }
+};
+
+const urlDeAdjunto = async (req, res, next, { asesorUuid }) => {
+  try {
+    const { rows: [c] } = await pool.query(
+      `SELECT c.adjuntos FROM captacion_consultas_listas c JOIN captacion_vinculaciones v ON v.id = c.vinculacion_id JOIN captacion_prospectos p ON p.id = v.prospecto_id
+        WHERE c.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2)`, [req.params.cid, asesorUuid]);
+    if (!c || !c.adjuntos.some((a) => a.id === req.params.aid)) return res.status(404).json({ error: 'Adjunto no encontrado' });
+    const d = await generarPresignedDescarga(req.params.aid);
+    res.set('Cache-Control', 'no-store');
+    res.json({ url: d.url, nombre: d.nombre });
+  } catch (err) { next(err); }
+};
+export const urlAdjuntoAsesor = (req, res, next) => urlDeAdjunto(req, res, next, { asesorUuid: ambito(req) });
+export const urlAdjuntoOficial = (req, res, next) => urlDeAdjunto(req, res, next, { asesorUuid: null });
+
 // Vuelve a buscar en fuentes abiertas (p. ej. se configuró el buscador después de iniciar la consulta, o falló alguna búsqueda)
 export const buscarWebConsulta = async (req, res, next) => {
   try {
@@ -256,7 +327,8 @@ export const cerrarConsultaListas = async (req, res, next) => {
     const cerradaAt = new Date();
     const datosHash = sha256(canonicalizar({
       cedula: c.cedula, nombres: c.nombres, apellidos: c.apellidos, fecha_nacimiento: c.fecha_nacimiento, versiones: c.versiones, parametros: c.parametros,
-      coincidencias: c.coincidencias, manual: c.manual, declaracion_pep: c.declaracion_pep, busquedas: c.busquedas ?? null, conclusion,
+      coincidencias: c.coincidencias, manual: c.manual, declaracion_pep: c.declaracion_pep, busquedas: c.busquedas ?? null,
+      adjuntos: (c.adjuntos ?? []).map((a) => ({ id: a.id, nombre: a.nombre, proveedor: a.proveedor, sha256: a.sha256 })), conclusion,
     }));
     const pdf = await guardarPdf({ ...c, conclusion, datos_hash: datosHash, cerrada_at: cerradaAt, estado: 'cerrada' }, c.vinculacion_id, { asesorNombre: c.asesor_nombre });
     const { rows: [v] } = await pool.query(`SELECT id, prospecto_id FROM captacion_vinculaciones WHERE id = $1`, [c.vinculacion_id]);

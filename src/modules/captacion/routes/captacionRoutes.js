@@ -91,6 +91,10 @@ router.get ('/vinculaciones/:id',              checkPermission('captacion', 'REA
 router.get ('/vinculaciones/:id/consulta-listas', checkPermission('captacion', 'READ'),  listas.getConsultaListas);
 router.post('/vinculaciones/:id/consulta-listas', checkPermission('captacion', 'WRITE'), listas.iniciarConsultaListas);
 router.put ('/consultas-listas/:cid',             checkPermission('captacion', 'WRITE'), listas.guardarConsultaListas);
+router.post('/consultas-listas/:cid/adjuntos/solicitar', checkPermission('captacion', 'WRITE'), listas.solicitarAdjunto);
+router.post('/consultas-listas/:cid/adjuntos',    checkPermission('captacion', 'WRITE'), listas.confirmarAdjunto);
+router.get ('/consultas-listas/:cid/adjuntos/:aid', checkPermission('captacion', 'READ'), listas.urlAdjuntoAsesor);
+router.get ('/cumplimiento/consultas/:cid/adjuntos/:aid', checkPermission('captacion', 'VALIDAR'), listas.urlAdjuntoOficial);
 router.post('/consultas-listas/:cid/buscar',      checkPermission('captacion', 'WRITE'), listas.buscarWebConsulta);
 router.post('/consultas-listas/:cid/cerrar',      checkPermission('captacion', 'WRITE'), listas.cerrarConsultaListas);
 router.get ('/consultas-listas/:cid/pdf',         checkPermission('captacion', 'READ'),  listas.pdfConsultaAsesor);

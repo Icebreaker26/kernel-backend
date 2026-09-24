@@ -333,6 +333,18 @@ export const generarPdfConsulta = async (c, { asesorNombre, oficialNombre = null
     })
   );
 
+  // ── Soportes adjuntos (PDF de otro proveedor) ──────────────────────────────
+  const adjuntos = c.adjuntos || [];
+  if (adjuntos.length) {
+    asegurar(70);
+    dibujar('SOPORTES ADJUNTOS (RESPALDO DE OTRO PROVEEDOR)', M, top, { size: 7.5, bold: true, color: C.azul });
+    top += 12;
+    tabla(
+      [{ titulo: 'Archivo', w: 190 }, { titulo: 'Proveedor', w: 90 }, { titulo: 'Subido', w: 100 }, { titulo: 'SHA-256', w: ANCHO - 380 }],
+      adjuntos.map((a) => [{ texto: a.nombre + (a.nota ? `\n${a.nota}` : ''), bold: true }, { texto: a.proveedor }, { texto: a.subido_at ? fechaHoraBogota(a.subido_at).replace(' (hora Colombia)', '') : '—', size: 7 }, { texto: a.sha256 || '—', size: 6.5 }])
+    );
+  }
+
   // ── Conclusión y validación ────────────────────────────────────────────────
   seccion('5. Conclusión y validación');
   tarjeta([

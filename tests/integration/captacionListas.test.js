@@ -7,7 +7,7 @@ import bcrypt from 'bcrypt';
 import { jest } from '@jest/globals';
 import { createApp } from '../../src/createApp.js';
 import pool from '../../src/db/database.js';
-import { eliminarArchivo } from '../../src/services/archivoService.js';
+import { eliminarArchivo, colocarObjetoDePrueba } from '../../src/services/archivoService.js';
 import { sha256 } from '../../src/services/hashCanonico.js';
 import { env } from '../../src/config/env.js';
 import { invalidarCache } from '../../src/modules/captacion/listas/cotejo.js';
@@ -197,7 +197,7 @@ describe('Consulta en listas — asesor, Oficial de Cumplimiento y entrega', () 
   afterAll(async () => {
     fetchSpy.mockRestore();
     env.BRAVE_SEARCH_API_KEY = llavePrevia;
-    await pool.query(`DELETE FROM archivos WHERE entidad_tipo = 'captacion_consulta_listas' AND entidad_id = $1`, [est.vinculacionId]);
+    await pool.query(`DELETE FROM archivos WHERE entidad_tipo IN ('captacion_consulta_listas', 'captacion_consulta_adjunto') AND entidad_id = $1`, [est.vinculacionId]);
     await pool.query(`DELETE FROM captacion_eventos WHERE prospecto_id = $1`, [est.prospectoId]);
     await pool.query(`DELETE FROM captacion_vinculaciones WHERE prospecto_id = $1`, [est.prospectoId]);
     await pool.query(`DELETE FROM captacion_prospectos WHERE id = $1`, [est.prospectoId]);
@@ -206,6 +206,8 @@ describe('Consulta en listas — asesor, Oficial de Cumplimiento y entrega', () 
     invalidarCache();
     await pool.query(`DELETE FROM empresas WHERE codigo = $1`, [EMPRESA]);
     const ids = Object.values(usuarios).map((u) => u.id);
+    // Los adjuntos de la consulta cuelgan de la consulta (no de la vinculación): se borran por quién los subió antes de borrar a los usuarios
+    await pool.query(`DELETE FROM archivos WHERE subido_por = ANY($1)`, [ids]);
     await pool.query(`DELETE FROM permisos WHERE usuario_uuid = ANY($1)`, [ids]);
     await pool.query(`DELETE FROM global_usuarios WHERE id = ANY($1)`, [ids]);
     await pool.end();
@@ -304,6 +306,47 @@ describe('Consulta en listas — asesor, Oficial de Cumplimiento y entrega', () 
     expect(ok.body.coincidencias.find((x) => x.fuente === 'PEP_SIGEP')).toMatchObject({ decision: 'confirmada' });
   });
 
+  test('el asesor puede adjuntar el PDF de otro proveedor como respaldo: se comprueba que sea un PDF, queda su hash y no se borra', async () => {
+    const base = `/api/captacion/consultas-listas/${est.consultaId}`;
+    const pdfReal = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF');
+
+    // Solo PDF, con extensión y tipo coherentes
+    expect((await ag.asesor.post(`${base}/adjuntos/solicitar`).send({ nombre: 'consulta.png', mime: 'image/png', size: 1000 })).status).toBe(400);
+    expect((await ag.asesor.post(`${base}/adjuntos/solicitar`).send({ nombre: 'consulta.pdf', mime: 'application/pdf', size: 11 * 1024 * 1024 })).status).toBe(400);
+    const sol = await ag.asesor.post(`${base}/adjuntos/solicitar`).send({ nombre: 'starsol-consulta.pdf', mime: 'application/pdf', size: pdfReal.length });
+    expect(sol.status).toBe(200);
+    expect(sol.body.key).toContain(`kernel/captacion_consulta_adjuntos/${est.vinculacionId}/`);
+
+    const meta = { key: sol.body.key, nombre: 'starsol-consulta.pdf', mime: 'application/pdf', size: pdfReal.length, proveedor: 'Starsol', nota: 'Consulta del 21 de septiembre' };
+    // Antes de subir nada, o con una key ajena, se rechaza
+    expect((await ag.asesor.post(`${base}/adjuntos`).send(meta)).status).toBe(400);
+    expect((await ag.asesor.post(`${base}/adjuntos`).send({ ...meta, key: 'kernel/captacion_consulta_adjuntos/otra/x.pdf' })).status).toBe(400);
+    expect((await ag.asesor.post(`${base}/adjuntos`).send({ ...meta, proveedor: '' })).status).toBe(400);
+
+    // Un archivo que dice ser PDF pero no lo es
+    colocarObjetoDePrueba(sol.body.key, Buffer.from('MZ esto es un ejecutable disfrazado'));
+    const falso = await ag.asesor.post(`${base}/adjuntos`).send(meta);
+    expect([falso.status, falso.body.error]).toEqual([400, 'El archivo no es un PDF válido']);
+
+    // El PDF de verdad
+    colocarObjetoDePrueba(sol.body.key, pdfReal);
+    const ok = await ag.asesor.post(`${base}/adjuntos`).send(meta);
+    expect(ok.status).toBe(201);
+    expect(ok.body.adjuntos).toHaveLength(1);
+    expect(ok.body.adjuntos[0]).toMatchObject({ nombre: 'starsol-consulta.pdf', proveedor: 'Starsol', nota: 'Consulta del 21 de septiembre', bytes: pdfReal.length, sha256: sha256(pdfReal), subido_por_nombre: 'Listas asesor' });
+    est.adjuntoId = ok.body.adjuntos[0].id;
+
+    // Es evidencia: no se puede eliminar; el asesor y el Oficial obtienen su enlace de descarga
+    await expect(eliminarArchivo(est.adjuntoId, { omitirS3: true })).rejects.toMatchObject({ code: 'ARCHIVO_PROTEGIDO' });
+    const urlAsesor = await ag.asesor.get(`${base}/adjuntos/${est.adjuntoId}`);
+    expect(urlAsesor.status).toBe(200);
+    expect(urlAsesor.body).toMatchObject({ nombre: 'starsol-consulta.pdf' });
+    expect(urlAsesor.body.url).toMatch(/^https:\/\//);
+    expect((await ag.oficial.get(`/api/captacion/cumplimiento/consultas/${est.consultaId}/adjuntos/${est.adjuntoId}`)).status).toBe(200);
+    expect((await ag.oficial.get(`${base}/adjuntos/${est.adjuntoId}`)).status).toBe(403);        // el Oficial entra por su propia ruta
+    expect((await ag.asesor.get(`${base}/adjuntos/00000000-0000-0000-0000-000000000000`)).status).toBe(404);
+  });
+
   test('al cerrar queda el PDF en S3, protegido, con la conclusión y el hash; el asesor lo descarga', async () => {
     const url = `/api/captacion/consultas-listas/${est.consultaId}`;
     const cierra = await ag.asesor.post(`${url}/cerrar`);
@@ -324,6 +367,10 @@ describe('Consulta en listas — asesor, Oficial de Cumplimiento y entrega', () 
     await expect(eliminarArchivo(a.id, { omitirS3: true })).rejects.toMatchObject({ code: 'ARCHIVO_PROTEGIDO' });
     // Cerrada, ya no se edita
     expect((await ag.asesor.put(url).send({ decisiones: [] })).body.code).toBe('CONSULTA_CERRADA');
+    // Cerrada, tampoco se agregan más adjuntos (el PDF ya quedó sellado)
+    expect((await ag.asesor.post(`${url}/adjuntos/solicitar`).send({ nombre: 'otro.pdf', mime: 'application/pdf', size: 1000 })).body.code).toBe('CONSULTA_CERRADA');
+    // La consulta cerrada conserva el adjunto y su hash
+    expect((await ag.asesor.get(`${est.url}/consulta-listas`)).body.actual.adjuntos).toHaveLength(1);
     expect((await pool.query(`SELECT 1 FROM captacion_eventos WHERE vinculacion_id = $1 AND tipo = 'consulta_listas_cerrada'`, [est.vinculacionId])).rowCount).toBe(1);
   });
 

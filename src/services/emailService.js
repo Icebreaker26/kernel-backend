@@ -6,11 +6,12 @@ import pool from '../db/database.js';
 import { buildCredencialesHtml } from './emailTemplates.js';
 
 // ── Relay HTTP (producción) ───────────────────────────────────────────────────
-const sendViaRelay = async (to, subject, html, text) => {
+// `opts.replyTo`: dirección a la que responde el destinatario (p. ej. el asesor que pidió una autorización)
+const sendViaRelay = async (to, subject, html, text, opts = {}) => {
   const res = await fetch(env.RELAY_URL + '/send-email', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.RELAY_SECRET}` },
-    body:    JSON.stringify({ to, subject, html, text }),
+    body:    JSON.stringify({ to, subject, html, text, ...(opts.replyTo ? { reply_to: opts.replyTo } : {}) }),
     signal:  AbortSignal.timeout(20000),
   });
   if (!res.ok) {
@@ -22,11 +23,11 @@ const sendViaRelay = async (to, subject, html, text) => {
 // ── Resend por HTTPS (respaldo de SES; Railway Hobby bloquea SMTP pero sí llega a 443) ──
 const resendConfigurado = () => !!(env.RESEND_API_KEY && env.RESEND_FROM);
 
-const sendViaResend = async (to, subject, html, text) => {
+const sendViaResend = async (to, subject, html, text, opts = {}) => {
   const res = await fetch('https://api.resend.com/emails', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.RESEND_API_KEY}` },
-    body:    JSON.stringify({ from: env.RESEND_FROM, to: [to], subject, html, ...(text ? { text } : {}) }),
+    body:    JSON.stringify({ from: env.RESEND_FROM, to: [to], subject, html, ...(text ? { text } : {}), ...(opts.replyTo ? { reply_to: opts.replyTo } : {}) }),
     signal:  AbortSignal.timeout(20000),
   });
   if (!res.ok) {
@@ -49,7 +50,7 @@ export const sesConfigurado = () => {
   return !!(env.SES_FROM && c.accessKeyId && c.secretAccessKey);
 };
 
-const sendViaSes = async (to, subject, html, text) => {
+const sendViaSes = async (to, subject, html, text, opts = {}) => {
   if (!ses) {
     ses = new SESv2Client({
       region: env.SES_REGION ?? env.AWS_REGION,
@@ -59,6 +60,7 @@ const sendViaSes = async (to, subject, html, text) => {
   await ses.send(new SendEmailCommand({
     FromEmailAddress: env.SES_FROM,
     Destination: { ToAddresses: [to] },
+    ...(opts.replyTo ? { ReplyToAddresses: [opts.replyTo] } : {}),
     Content: {
       Simple: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -140,13 +142,13 @@ export const estaSuprimido = async (email) => {
   return rowCount > 0;
 };
 
-export const enviarEmail = async (to, subject, html, text = '') => {
+export const enviarEmail = async (to, subject, html, text = '', opts = {}) => {
   if (await estaSuprimido(to)) {
     throw Object.assign(new Error('La dirección está en la lista de supresión (rebote o queja previa)'), { code: 'EMAIL_SUPRIMIDO' });
   }
   if (process.env.NODE_ENV === 'test') {
     if (simulacionDePrueba.fallar) throw new Error('Correo no disponible (simulado)');
-    emailsDePrueba.push({ to, subject, html, text });
+    emailsDePrueba.push({ to, subject, html, text, replyTo: opts.replyTo ?? null });
     return;
   }
   // Orden: Amazon SES (principal, cuota de 50.000/día) → Resend (respaldo) → relay; cada uno respalda al anterior
@@ -157,9 +159,9 @@ export const enviarEmail = async (to, subject, html, text = '') => {
   if (resendConfigurado()) canales.push(sendViaResend);
   if (env.RELAY_URL && env.RELAY_SECRET) canales.push(sendViaRelay);
   if (canales.length > 0) {
-    await enviarPorCadena(canales, [to, subject, html, text]);
+    await enviarPorCadena(canales, [to, subject, html, text, opts]);
   } else {
-    await getTransporter().sendMail({ from: env.SMTP_FROM, to, subject, html, text });
+    await getTransporter().sendMail({ from: env.SMTP_FROM, to, subject, html, text, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}) });
   }
 };
 

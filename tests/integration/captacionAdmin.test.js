@@ -27,6 +27,8 @@ const limpiar = async () => {
   await pool.query(`DELETE FROM captacion_eventos WHERE prospecto_id IN ${pros}`, [ids()]);
   await pool.query(`DELETE FROM captacion_beneficiarios WHERE vinculacion_id IN ${vincs}`, [ids()]);
   await pool.query(`DELETE FROM captacion_referencias WHERE vinculacion_id IN ${vincs}`, [ids()]);
+  await pool.query(`DELETE FROM captacion_verificaciones_identidad WHERE vinculacion_id IN ${vincs}`, [ids()]);
+  await pool.query(`DELETE FROM captacion_correcciones WHERE vinculacion_id IN ${vincs}`, [ids()]);
   await pool.query(`DELETE FROM captacion_vinculaciones WHERE prospecto_id IN ${pros}`, [ids()]);
   await pool.query(`DELETE FROM captacion_toques WHERE prospecto_id IN ${pros}`, [ids()]);
   await pool.query(`DELETE FROM captacion_prospectos WHERE asesor_uuid = ANY($1)`, [ids()]);
@@ -131,5 +133,75 @@ describe('Captación — alcance por rol', () => {
     const admin = await agentes.admin.get(url);
     expect(admin.status).toBe(200);
     expect(admin.body.abierta).toMatchObject({ items: ['datos'] });
+  });
+});
+
+describe('Captación — verificación de identidad contra la cédula (admin y asesor)', () => {
+  const urlDe = (quien) => `/api/captacion/vinculaciones/${creados[quien].vinculacionId}`;
+  const quienVerifico = async (quien) => (await pool.query(
+    `SELECT asesor_uuid, origen, ip FROM captacion_verificaciones_identidad WHERE vinculacion_id = $1 ORDER BY created_at DESC LIMIT 1`, [creados[quien].vinculacionId])).rows[0];
+
+  test('el admin confirma la identidad de la solicitud de otro asesor y queda registrado él como quien verificó', async () => {
+    const res = await agentes.admin.post(`${urlDe('asesorA')}/verificacion-identidad`);
+    expect(res.status).toBe(201);
+    expect(res.body.ok).toBe(true);
+    expect(await quienVerifico('asesorA')).toMatchObject({ asesor_uuid: usuarios.admin.id, origen: 'confirmada' });
+    const info = (await agentes.admin.get(`${urlDe('asesorA')}/correcciones`)).body;
+    expect(info.verificacion).toMatchObject({ origen: 'confirmada', cedula: usuarios.asesorA.cedula, vigente: true });
+    const { rows: [ev] } = await pool.query(`SELECT autor_tipo, autor_uuid FROM captacion_eventos WHERE vinculacion_id = $1 AND tipo = 'identidad_verificada' ORDER BY created_at DESC LIMIT 1`, [creados.asesorA.vinculacionId]);
+    expect(ev.autor_uuid).toBe(usuarios.admin.id);
+  });
+
+  test('el asesor dueño la confirma en lo suyo; otro asesor no puede en lo ajeno (404)', async () => {
+    expect((await agentes.asesorB.post(`${urlDe('asesorB')}/verificacion-identidad`)).status).toBe(201);
+    expect(await quienVerifico('asesorB')).toMatchObject({ asesor_uuid: usuarios.asesorB.id });
+    expect((await agentes.asesorA.post(`${urlDe('asesorB')}/verificacion-identidad`)).status).toBe(404);
+    expect((await agentes.asesorB.post(`${urlDe('asesorA')}/verificacion-identidad`)).status).toBe(404);
+  });
+
+  test('una solicitud inexistente o desactivada responde 404, también al admin', async () => {
+    expect((await agentes.admin.post('/api/captacion/vinculaciones/00000000-0000-4000-8000-000000000000/verificacion-identidad')).status).toBe(404);
+    const { rows: [v] } = await pool.query(`INSERT INTO captacion_vinculaciones (prospecto_id, is_active) VALUES ($1, false) RETURNING id`, [creados.asesorA.prospectoId]);
+    expect((await agentes.admin.post(`/api/captacion/vinculaciones/${v.id}/verificacion-identidad`)).status).toBe(404);
+  });
+
+  test('sin cédula o sin nombre, no hay nada que verificar (400), también para el admin', async () => {
+    const { rows: [p] } = await pool.query(`SELECT id FROM captacion_prospectos WHERE asesor_uuid = $1`, [usuarios.asesorA.id]);
+    const { rows: [v] } = await pool.query(`INSERT INTO captacion_vinculaciones (prospecto_id) VALUES ($1) RETURNING id`, [p.id]);
+    await pool.query(`UPDATE captacion_prospectos SET cedula = 'STAND_TEST_001' WHERE id = $1`, [p.id]);
+    try {
+      expect((await agentes.admin.post(`/api/captacion/vinculaciones/${v.id}/verificacion-identidad`)).status).toBe(400);
+    } finally {
+      await pool.query(`UPDATE captacion_prospectos SET cedula = $2 WHERE id = $1`, [p.id, usuarios.asesorA.cedula]);
+    }
+  });
+
+  test('el admin corrige cédula y nombre en la solicitud de otro asesor, con trazabilidad a su nombre', async () => {
+    const motivo = 'La cédula dice otro número; se escribió mal en el formulario';
+    expect((await agentes.asesorA.put(`${urlDe('asesorB')}/identidad`).send({ cedula: '77700088', motivo })).status).toBe(404);   // otro asesor: no
+    const res = await agentes.admin.put(`${urlDe('asesorB')}/identidad`).send({ cedula: '77700088', nombres: 'Persona Corregida', motivo });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, campos: ['cedula', 'nombres'], formato_resellado: false });
+    const { rows: [p] } = await pool.query(`SELECT cedula, nombres FROM captacion_prospectos WHERE id = $1`, [creados.asesorB.prospectoId]);
+    expect(p).toEqual({ cedula: '77700088', nombres: 'Persona Corregida' });
+    const { correcciones, verificacion } = (await agentes.admin.get(`${urlDe('asesorB')}/correcciones`)).body;
+    expect(correcciones).toHaveLength(1);
+    expect(correcciones[0]).toMatchObject({ antes: { cedula: usuarios.asesorB.cedula }, despues: { cedula: '77700088', nombres: 'Persona Corregida' }, motivo });
+    expect(verificacion).toMatchObject({ origen: 'corregida', cedula: '77700088', vigente: true });
+    const { rows: [c] } = await pool.query(`SELECT asesor_uuid FROM captacion_correcciones WHERE vinculacion_id = $1`, [creados.asesorB.vinculacionId]);
+    expect(c.asesor_uuid).toBe(usuarios.admin.id);
+    // Se restablece la cédula original para no afectar a las demás pruebas del archivo
+    await pool.query(`UPDATE captacion_prospectos SET cedula = $2, nombres = 'Persona asesorB' WHERE id = $1`, [creados.asesorB.prospectoId, usuarios.asesorB.cedula]);
+  });
+
+  test('el admin no puede corregir a una cédula que ya usa otra solicitud (409)', async () => {
+    const res = await agentes.admin.put(`${urlDe('asesorB')}/identidad`).send({ cedula: usuarios.asesorA.cedula, motivo: 'Probando que no se repita la cédula' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('CEDULA_DUPLICADA');
+  });
+
+  test('lo que el admin no puede hacer por el asesor sigue igual: pedir la subsanación (regla ya existente)', async () => {
+    const res = await agentes.admin.post(`${urlDe('asesorA')}/subsanacion`).send({ items: ['datos'], motivo: 'Falta corregir un dato del formulario' });
+    expect(res.status).toBe(404);
   });
 });

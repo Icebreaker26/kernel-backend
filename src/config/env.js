@@ -50,6 +50,8 @@ const envSchema = z.object({
   SES_ACCESS_KEY_ID:     z.string().min(16).optional(),
   SES_SECRET_ACCESS_KEY: z.string().min(32).optional(),
   REDIS_URL:             z.string().url().optional(),
+  // Clave privada Ed25519 (PEM PKCS8, con \n literales) con la que el servidor sella las constancias de firma. Si no se define se deriva de JWT_SECRET.
+  FIRMA_SELLO_PRIVATE_KEY: z.string().min(50).optional(),
   // true = lockdown middleware loguea pero NO bloquea (modo observación 2 semanas)
   LOCKDOWN_SHADOW_MODE:  z.string().optional().transform((v) => v === 'true'),
 });

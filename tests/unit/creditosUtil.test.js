@@ -138,7 +138,7 @@ describe('Créditos — Errores de negocio y respuesta HTTP', () => {
 
 describe('Créditos — Esquemas de validación (Zod)', () => {
   const valido = () => ({
-    asociado_codigo: '1088000111', categoria_id: uuid(), canal_origen: 'presencial', valor_solicitado: 5000000, monto_desembolso: 5000000,
+    asociado_codigo: '1088000111', categoria_id: uuid(), canal_origen: 'presencial', valor_solicitado: 5000000,
     forma_desembolso: 'cheque', modalidad_firma: 'presencial',
   });
   const ok = (schema, d) => schema.safeParse(d).success;
@@ -146,8 +146,8 @@ describe('Créditos — Esquemas de validación (Zod)', () => {
 
   test('radicar: acepta un cuerpo válido y convierte números que llegan como texto', () => {
     expect(ok(radicarSchema, valido())).toBe(true);
-    const r = radicarSchema.parse({ ...valido(), valor_solicitado: '8000000', monto_desembolso: '7500000', motivo_diferencia: 'Recoge un saldo', cuotas: '36', cuota_mensual: '260000' });
-    expect(r).toMatchObject({ valor_solicitado: 8000000, monto_desembolso: 7500000, cuotas: 36, cuota_mensual: 260000 });
+    const r = radicarSchema.parse({ ...valido(), valor_solicitado: '8000000', cuotas: '36', cuota_mensual: '260000' });
+    expect(r).toMatchObject({ valor_solicitado: 8000000, cuotas: 36, cuota_mensual: 260000 });
   });
 
   test('radicar: rechaza campos de más, montos no positivos, formas y canales desconocidos', () => {
@@ -156,10 +156,10 @@ describe('Créditos — Esquemas de validación (Zod)', () => {
     }
   });
 
-  test('radicar: el monto no supera el valor y una diferencia exige motivo', () => {
-    expect(mensajes(radicarSchema, { ...valido(), monto_desembolso: 6000000 })).toMatch(/no puede superar/);
-    expect(mensajes(radicarSchema, { ...valido(), monto_desembolso: 4000000 })).toMatch(/Explica la diferencia/);
-    expect(ok(radicarSchema, { ...valido(), monto_desembolso: 4000000, motivo_diferencia: 'Seguros' })).toBe(true);
+  test('radicar: el monto a desembolsar y su motivo ya no se aceptan (los calcula Cartera)', () => {
+    expect(ok(radicarSchema, { ...valido(), monto_desembolso: 4000000 })).toBe(false);
+    expect(ok(radicarSchema, { ...valido(), motivo_diferencia: 'Seguros' })).toBe(false);
+    expect(ok(actualizarSchema, { monto_desembolso: 4000000 })).toBe(false);
   });
 
   test('radicar: la firma externa exige proveedor; los textos vacíos cuentan como ausentes', () => {

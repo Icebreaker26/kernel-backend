@@ -17,8 +17,6 @@ const cuerpoBase = {
   categoria_id:      uuid,
   canal_origen:      z.enum(['whatsapp', 'presencial']),
   valor_solicitado:  dinero,
-  monto_desembolso:  dinero,
-  motivo_diferencia: texto(500),
   cuotas:            entero(1, 240).optional(),
   cuota_mensual:     dinero.optional(),
   forma_desembolso:  z.enum(FORMAS_DESEMBOLSO),
@@ -36,16 +34,12 @@ export const radicarSchema = z.object({
   override_motivo:        texto(500),
   emails_autorizacion:    z.array(email).max(5).optional(),
 }).strict().superRefine((d, ctx) => {
-  if (d.monto_desembolso > d.valor_solicitado) ctx.addIssue({ code: 'custom', path: ['monto_desembolso'], message: 'El monto a desembolsar no puede superar el valor solicitado' });
-  if (d.monto_desembolso < d.valor_solicitado && !d.motivo_diferencia) ctx.addIssue({ code: 'custom', path: ['motivo_diferencia'], message: 'Explica la diferencia entre el valor solicitado y el monto a desembolsar' });
   if (d.modalidad_firma === 'externa' && !d.proveedor_externo) ctx.addIssue({ code: 'custom', path: ['proveedor_externo'], message: 'Indica el proveedor de la firma electrónica externa' });
 });
 
 export const actualizarSchema = z.object({
   categoria_id:      uuid.optional(),
   valor_solicitado:  dinero.optional(),
-  monto_desembolso:  dinero.optional(),
-  motivo_diferencia: texto(500),
   cuotas:            entero(1, 240).optional(),
   cuota_mensual:     dinero.optional(),
   forma_desembolso:  z.enum(FORMAS_DESEMBOLSO).optional(),

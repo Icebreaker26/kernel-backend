@@ -2,7 +2,7 @@ import { manejar } from '../http.js';
 import * as svc from '../services/creditoService.js';
 import {
   radicarSchema, actualizarSchema, borradorSchema, adjuntoSchema, firmaExternaSchema, firmadoSchema,
-  autorizacionEnviarSchema, autorizacionRegistrarSchema, cierreSchema, configEmpresaSchema, reasignarSchema,
+  autorizacionEnviarSchema, autorizacionRegistrarSchema, cierreSchema, configEmpresaSchema, reasignarSchema, listarSchema,
 } from '../schemas/creditosSchema.js';
 
 // ── Catálogos y búsqueda ──────────────────────────────────────────────────────
@@ -13,9 +13,9 @@ export const urlArchivoDeAsociado = manejar(async (req, res) => res.json(await s
 export const infoAsociado = manejar(async (req, res) => res.json(await svc.infoAsociado(req.params.codigo)));
 
 // ── Solicitudes ───────────────────────────────────────────────────────────────
-export const listar = manejar(async (req, res) => {
-  res.json(await svc.listar(req.user, { estado: req.query.estado, q: req.query.q, todas: req.query.todas === '1' }));
-});
+export const listar = manejar(async (req, res) => res.json(await svc.listar(req.user, listarSchema.parse(req.query))));
+export const resumen = manejar(async (req, res) => res.json(await svc.resumenLista(req.user, listarSchema.parse(req.query))));
+export const filtros = manejar(async (req, res) => res.json(await svc.opcionesFiltros(req.user, { todas: req.query.todas === '1' })));
 
 export const radicar = manejar(async (req, res) => {
   const data = radicarSchema.parse(req.body);

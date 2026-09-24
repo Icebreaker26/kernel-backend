@@ -417,17 +417,62 @@ const FROM_LISTA = `
   JOIN credito_categorias c ON c.id = s.categoria_id
   JOIN global_usuarios u ON u.id = s.asesor_uuid`;
 
-export const listar = async (user, { estado, q, todas } = {}) => {
+const ORDEN_SQL = {
+  fecha: 's.created_at', valor: 's.valor_solicitado', dias: 's.created_at', estado: 's.estado', asociado: "(a.nombre || ' ' || a.apellido)", radicado: 's.radicado',
+};
+
+/** Arma el WHERE de la lista a partir de los filtros validados. `sinEstado` lo omite (para los conteos por estado). */
+const filtrosLista = async (user, f = {}, { sinEstado = false } = {}) => {
   const where = ['s.is_active = true'];
   const params = [];
-  if (!(todas && (await veTodas(user)))) { params.push(user.id); where.push(`s.asesor_uuid = $${params.length}`); }
-  if (estado) { params.push(estado); where.push(`s.estado = $${params.length}`); }
-  if (q && String(q).trim().length >= 2) {
-    params.push(`%${String(q).trim()}%`);
-    where.push(`(s.radicado ILIKE $${params.length} OR s.asociado_codigo ILIKE $${params.length} OR (a.nombre || ' ' || a.apellido) ILIKE $${params.length})`);
+  const p = (v) => { params.push(v); return `$${params.length}`; };
+  const verTodas = !!f.todas && (await veTodas(user));
+  if (!verTodas) where.push(`s.asesor_uuid = ${p(user.id)}`);
+  else if (f.asesor) where.push(`s.asesor_uuid = ${p(f.asesor)}`);   // filtrar por asesor solo tiene sentido viendo las de todos
+  if (f.estado && !sinEstado) where.push(`s.estado = ${p(f.estado)}`);
+  if (f.q && String(f.q).trim().length >= 2) {
+    const n = p(`%${String(f.q).trim()}%`);
+    where.push(`(s.radicado ILIKE ${n} OR s.asociado_codigo ILIKE ${n} OR (a.nombre || ' ' || a.apellido) ILIKE ${n})`);
   }
-  const { rows } = await pool.query(`SELECT ${COLUMNAS_LISTA} ${FROM_LISTA} WHERE ${where.join(' AND ')} ORDER BY s.created_at DESC LIMIT 200`, params);
+  if (f.categoria) where.push(`s.categoria_id = ${p(f.categoria)}`);
+  if (f.empresa) where.push(`s.empresa_codigo = ${p(f.empresa)}`);
+  if (f.forma) where.push(`s.forma_desembolso = ${p(f.forma)}`);
+  if (f.modalidad) where.push(`s.modalidad_firma = ${p(f.modalidad)}`);
+  if (f.desde) where.push(`(s.created_at AT TIME ZONE 'America/Bogota')::date >= ${p(f.desde)}::date`);
+  if (f.hasta) where.push(`(s.created_at AT TIME ZONE 'America/Bogota')::date <= ${p(f.hasta)}::date`);
+  if (f.min != null) where.push(`s.valor_solicitado >= ${p(f.min)}`);
+  if (f.max != null) where.push(`s.valor_solicitado <= ${p(f.max)}`);
+  if (f.dias != null) where.push(`GREATEST(0, (CURRENT_DATE - (s.created_at AT TIME ZONE 'America/Bogota')::date)) >= ${p(f.dias)}`);
+  if (f.accion) where.push(`s.estado IN ('en_tramite', 'devuelta')`);
+  return { where: where.join(' AND '), params };
+};
+
+export const LIMITE_LISTA = 500;
+
+export const listar = async (user, f = {}) => {
+  const { where, params } = await filtrosLista(user, f);
+  const orden = ORDEN_SQL[f.orden] ?? ORDEN_SQL.fecha;
+  // "dias" ordena por antigüedad: la fecha más vieja es la de más días
+  const dir = f.orden === 'dias' ? (f.dir === 'asc' ? 'DESC' : 'ASC') : (f.dir === 'asc' ? 'ASC' : 'DESC');
+  const { rows } = await pool.query(`SELECT ${COLUMNAS_LISTA} ${FROM_LISTA} WHERE ${where} ORDER BY ${orden} ${dir}, s.id LIMIT ${LIMITE_LISTA}`, params);
   return rows;
+};
+
+/** Conteo y valor solicitado por estado con los mismos filtros (menos el estado): sirve para las cabeceras del kanban y la franja de resumen */
+export const resumenLista = async (user, f = {}) => {
+  const { where, params } = await filtrosLista(user, f, { sinEstado: true });
+  const { rows } = await pool.query(`SELECT s.estado, COUNT(*)::int AS n, COALESCE(SUM(s.valor_solicitado), 0)::numeric AS valor ${FROM_LISTA} WHERE ${where} GROUP BY s.estado`, params);
+  return { limite: LIMITE_LISTA, estados: rows.map((r) => ({ estado: r.estado, n: r.n, valor: Number(r.valor) })) };
+};
+
+/** Opciones de los filtros: empresas y asesores que aparecen en lo que el usuario puede ver */
+export const opcionesFiltros = async (user, { todas } = {}) => {
+  const { where, params } = await filtrosLista(user, { todas });
+  const [{ rows: empresas }, { rows: asesores }] = await Promise.all([
+    pool.query(`SELECT DISTINCT e.codigo, e.nombre ${FROM_LISTA} WHERE ${where} ORDER BY e.nombre`, params),
+    pool.query(`SELECT DISTINCT u.id, u.nombre ${FROM_LISTA} WHERE ${where} ORDER BY u.nombre`, params),
+  ]);
+  return { empresas, asesores };
 };
 
 // Bandeja de Cartera por pestaña

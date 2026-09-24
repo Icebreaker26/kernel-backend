@@ -82,3 +82,30 @@ export const configEmpresaSchema = z.object({
   momento_autorizacion:  z.enum(['antes_firma', 'despues_firma', 'indiferente']),
   emails_autorizacion:   z.array(email).max(5),
 }).strict();
+
+// Filtros de la lista de solicitudes (todos opcionales; llegan como texto en la URL)
+export const ESTADOS_SOLICITUD = ['en_tramite', 'entregada', 'recibida', 'devuelta', 'rechazada', 'desistida', 'completada', 'en_tesoreria', 'pagada'];
+const numeroOpc = z.preprocess((v) => (v === '' || v == null ? undefined : Number(v)), z.number().min(0).max(9_999_999_999).optional());
+const bool1 = z.preprocess((v) => v === '1' || v === 'true' || v === true, z.boolean());
+export const ORDEN_LISTA = ['fecha', 'valor', 'dias', 'estado', 'asociado', 'radicado'];
+export const listarSchema = z.object({
+  estado:    z.preprocess(vacioAUndef, z.enum(ESTADOS_SOLICITUD).optional()),
+  q:         z.preprocess(vacioAUndef, z.string().trim().max(80).optional()),
+  todas:     bool1.optional(),
+  categoria: z.preprocess(vacioAUndef, uuid.optional()),
+  empresa:   z.preprocess(vacioAUndef, z.string().trim().max(60).optional()),
+  forma:     z.preprocess(vacioAUndef, z.enum(FORMAS_DESEMBOLSO).optional()),
+  modalidad: z.preprocess(vacioAUndef, z.enum(['presencial', 'externa']).optional()),
+  asesor:    z.preprocess(vacioAUndef, uuid.optional()),
+  desde:     z.preprocess(vacioAUndef, fecha.optional()),
+  hasta:     z.preprocess(vacioAUndef, fecha.optional()),
+  min:       numeroOpc,
+  max:       numeroOpc,
+  dias:      z.preprocess((v) => (v === '' || v == null ? undefined : Number(v)), z.number().int().min(0).max(3650).optional()),
+  accion:    bool1.optional(),   // solo lo que el asesor debe mover: en trámite o devuelta
+  orden:     z.preprocess(vacioAUndef, z.enum(ORDEN_LISTA).optional()),
+  dir:       z.preprocess(vacioAUndef, z.enum(['asc', 'desc']).optional()),
+}).strict().superRefine((d, ctx) => {
+  if (d.desde && d.hasta && d.desde > d.hasta) ctx.addIssue({ code: 'custom', path: ['hasta'], message: 'La fecha final es anterior a la inicial' });
+  if (d.min != null && d.max != null && d.min > d.max) ctx.addIssue({ code: 'custom', path: ['max'], message: 'El valor máximo es menor que el mínimo' });
+});

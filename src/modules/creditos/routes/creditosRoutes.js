@@ -38,6 +38,8 @@ router.get ('/config/empresas',         checkPermission('creditos', 'CONFIGURAR'
 router.put ('/config/empresas/:codigo', checkPermission('creditos', 'CONFIGURAR'), ctrl.guardarConfigEmpresa);
 
 // Solicitudes
+router.get ('/resumen', checkPermission('creditos', 'READ'), ctrl.resumen);
+router.get ('/filtros', checkPermission('creditos', 'READ'), ctrl.filtros);
 router.get ('/',    checkPermission('creditos', 'READ'),  ctrl.listar);
 router.post('/',    checkPermission('creditos', 'WRITE'), ctrl.radicar);
 router.get ('/:id', checkPermission('creditos', 'READ'),  ctrl.obtener);

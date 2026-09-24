@@ -99,7 +99,7 @@ describe('Cartera — PDF final', () => {
   test('estampa los tres sellos con sus textos y valores en el comprobante', async () => {
     const r = await armarPdfFinal([await entrada('comprobante.pdf', 1, { comprobante: true })], cierre(), solicitud);
     const txt = await contenido(r.bytes);
-    for (const t of ['AVAL FONDO REGIONAL', '10% · $500.000', 'FIRMA ELECTRONICA', '$15.000', 'DESEMBOLSO', '$4.485.000']) {
+    for (const t of ['AVAL FONDO REGIONAL', '$500.000', '10% del valor solicitado', 'FIRMA ELECTRONICA', '$15.000', 'costo del proveedor', 'DESEMBOLSO', '$4.485.000', 'valor neto a pagar']) {
       expect(txt).toContain(hexTexto(t));
     }
   });
@@ -118,6 +118,19 @@ describe('Cartera — PDF final', () => {
     expect(paginas).toHaveLength(2);
     expect(paginas[0]).not.toContain(hexTexto('DESEMBOLSO'));
     expect(paginas[1]).toContain(hexTexto('DESEMBOLSO'));
+  });
+
+  test('los tres textos del sello quedan DENTRO de su recuadro (rótulo, valor y aclaración)', async () => {
+    const c = cierre({ con_aval: false, sellos: { desembolso: { pagina: 0, x: 0.1, y: 0.2 } } });
+    const r = await armarPdfFinal([await entrada('c.pdf', 1, { comprobante: true })], c, { ...solicitud, modalidad_firma: 'presencial' });
+    const txt = await contenido(r.bytes);
+    const ys = [...txt.matchAll(/1 0 0 1 ([\d.]+) ([\d.]+) Tm/g)].map((m) => ({ x: Number(m[1]), y: Number(m[2]) }));
+    // Página 400 x 600: sello de 120 x 37,5 pt con su esquina superior izquierda en (40, 120 desde arriba)
+    const arriba = 600 - 120; const abajo = arriba - 120 / SELLO_ASPECTO;
+    expect(ys).toHaveLength(3);
+    for (const p of ys) { expect(p.y).toBeGreaterThan(abajo); expect(p.y).toBeLessThan(arriba); expect(p.x).toBeGreaterThan(40); expect(p.x).toBeLessThan(160); }
+    expect(ys[0].y).toBeGreaterThan(ys[1].y);   // rótulo arriba, valor en medio
+    expect(ys[1].y).toBeGreaterThan(ys[2].y);   // aclaración abajo
   });
 
   test('el sello queda dentro de la página aunque la posición guardada se salga', async () => {

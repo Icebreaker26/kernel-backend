@@ -44,41 +44,60 @@ export const dimensionesVisibles = (page) => {
   return { R, cb, W: rotada ? cb.height : cb.width, H: rotada ? cb.width : cb.height };
 };
 
-const AZUL = rgb(0.05, 0.22, 0.5);
+// Cada sello tiene su color (los mismos que la vista previa del navegador)
+export const COLOR_SELLO = { aval: rgb(0.05, 0.36, 0.55), firma: rgb(0.43, 0.26, 0.7), desembolso: rgb(0.05, 0.46, 0.29) };
+const GRIS = rgb(0.38, 0.4, 0.44);
 
-const dibujarSello = (page, fuentes, { titulo, detalle }, { x, y }) => {
+/**
+ * Sello: recuadro con doble borde, franja de color con el rótulo en blanco, el valor grande y una línea de aclaración.
+ * Las proporciones (franja 30 % de la altura) son las mismas de la vista previa, así lo que se ve al ubicarlo es lo que se estampa.
+ */
+const dibujarSello = (page, fuentes, clave, { titulo, valor, pie }, { x, y }) => {
   const dim = dimensionesVisibles(page);
   const w = SELLO_ANCHO * dim.W;
   const h = w / SELLO_ASPECTO;
   const u = Math.min(Math.max(x, 0), 1 - SELLO_ANCHO) * dim.W;
   const v = Math.min(Math.max(y, 0), 1 - (SELLO_ANCHO / SELLO_ASPECTO) * (dim.W / dim.H)) * dim.H;
   const giro = degrees(dim.R);
+  const color = COLOR_SELLO[clave];
+  const banda = h * 0.3;
+  const margen = h * 0.055;
 
-  const esquina = aPdf(dim, u, v + h);   // esquina inferior izquierda del sello tal como se ve
-  page.drawRectangle({ x: esquina.x, y: esquina.y, width: w, height: h, rotate: giro, borderColor: AZUL, borderWidth: 1.6, color: rgb(1, 1, 1), opacity: 0.92, borderOpacity: 1 });
+  // Rectángulo en coordenadas de la vista (u a la derecha, v hacia abajo desde la esquina del sello)
+  const rect = (du, dv, ancho, alto, opciones) => {
+    const p = aPdf(dim, u + du, v + dv + alto);   // esquina inferior izquierda tal como se ve
+    page.drawRectangle({ x: p.x, y: p.y, width: ancho, height: alto, rotate: giro, ...opciones });
+  };
+  rect(0, 0, w, h, { color: rgb(1, 1, 1), opacity: 0.96 });                       // fondo
+  rect(0, 0, w, banda, { color });                                                  // franja del rótulo
+  rect(0, 0, w, h, { borderColor: color, borderWidth: 1.8 });                       // borde exterior
+  rect(margen, banda + margen, w - 2 * margen, h - banda - 2 * margen, { borderColor: color, borderWidth: 0.5, borderOpacity: 0.55 });   // filete interior
 
-  const ajustar = (texto, fuente, tam) => {
+  const ajustar = (texto, fuente, tam, ancho) => {
     let t = tam;
-    while (t > 4 && fuente.widthOfTextAtSize(texto, t) > w * 0.9) t -= 0.5;
+    while (t > 3.5 && fuente.widthOfTextAtSize(texto, t) > ancho) t -= 0.25;
     return t;
   };
-  const t1 = seguro(titulo);
-  const t2 = seguro(detalle);
-  const s1 = ajustar(t1, fuentes.negrita, h * 0.27);
-  const s2 = ajustar(t2, fuentes.negrita, h * 0.36);
-  const linea = (texto, fuente, tam, vBase) => {
+  const linea = (texto, fuente, tam, vBase, opciones) => {
     const ancho = fuente.widthOfTextAtSize(texto, tam);
-    const p = aPdf(dim, u + (w - ancho) / 2, vBase);
-    page.drawText(texto, { x: p.x, y: p.y, size: tam, font: fuente, color: AZUL, rotate: giro });
+    const p = aPdf(dim, u + (w - ancho) / 2, v + vBase);
+    page.drawText(texto, { x: p.x, y: p.y, size: tam, font: fuente, rotate: giro, ...opciones });
   };
-  linea(t1, fuentes.negrita, s1, v + h * 0.38);
-  linea(t2, fuentes.negrita, s2, v + h * 0.78);
+  const t1 = seguro(titulo);
+  const t2 = seguro(valor);
+  const t3 = seguro(pie);
+  const s1 = ajustar(t1, fuentes.negrita, banda * 0.5, w * 0.9);
+  const s2 = ajustar(t2, fuentes.negrita, h * 0.34, w * 0.86);
+  const s3 = ajustar(t3, fuentes.normal, h * 0.125, w * 0.86);
+  linea(t1, fuentes.negrita, s1, banda * 0.68, { color: rgb(1, 1, 1) });
+  linea(t2, fuentes.negrita, s2, banda + (h - banda) * 0.58, { color });
+  linea(t3, fuentes.normal, s3, h - margen - h * 0.055, { color: GRIS });
 };
 
 const textoSello = (clave, c) => ({
-  aval: { titulo: 'AVAL FONDO REGIONAL', detalle: `${Number(c.aval_porcentaje)}% · ${pesos(c.aval_valor)}` },
-  firma: { titulo: 'FIRMA ELECTRONICA', detalle: pesos(c.firma_electronica_valor) },
-  desembolso: { titulo: 'DESEMBOLSO', detalle: pesos(c.desembolso_neto) },
+  aval: { titulo: 'AVAL FONDO REGIONAL', valor: pesos(c.aval_valor), pie: `${Number(c.aval_porcentaje)}% del valor solicitado` },
+  firma: { titulo: 'FIRMA ELECTRONICA', valor: pesos(c.firma_electronica_valor), pie: 'costo del proveedor' },
+  desembolso: { titulo: 'DESEMBOLSO', valor: pesos(c.desembolso_neto), pie: 'valor neto a pagar' },
 }[clave]);
 
 /** Qué sellos aplican a este crédito (el de aval solo si lleva aval; el de firma solo si se firmó con proveedor externo) */
@@ -131,7 +150,7 @@ export const armarPdfFinal = async (entradas, cierre, solicitud) => {
             if (!pos) continue;
             const pagina = paginas[pos.pagina];
             if (!pagina) throw new Error(`El sello ${clave} quedó en una página que no existe en el comprobante`);
-            dibujarSello(pagina, fuentes, textoSello(clave, cierre), pos);
+            dibujarSello(pagina, fuentes, clave, textoSello(clave, cierre), pos);
           }
         }
       } else {

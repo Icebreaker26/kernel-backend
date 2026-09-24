@@ -271,7 +271,7 @@ const BASE_REPORTE = `
   JOIN asociados a ON a.codigo = s.asociado_codigo
   JOIN empresas e ON e.codigo = s.empresa_codigo
   JOIN credito_categorias ca ON ca.id = s.categoria_id
- WHERE s.is_active AND s.estado = 'completada'
+ WHERE s.is_active AND s.estado IN ('completada', 'en_tesoreria', 'pagada')   -- ya completado por Cartera, esté donde esté después
    AND (s.completada_at AT TIME ZONE 'America/Bogota')::date >= $1::date
    AND (s.completada_at AT TIME ZONE 'America/Bogota')::date <  $2::date`;
 

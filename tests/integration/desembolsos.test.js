@@ -451,6 +451,12 @@ describe('Tesorería — pagar', () => {
     expect((await pool.query(`SELECT 1 FROM notificaciones WHERE usuario_uuid = $1 AND mensaje ILIKE '%pagó el desembolso%'`, [usuarios.asesor.id])).rowCount).toBeGreaterThan(0);
   });
 
+  test('los reportes mensuales de Cartera siguen incluyendo el crédito después de pagado', async () => {
+    const r = await ag.cartera.get(`/api/cartera/reportes/firmas-electronicas?mes=${MES}`);
+    expect(r.status).toBe(200);
+    expect(r.body.filas.some((f) => f.cedula === A.a8)).toBe(true);
+  });
+
   test('una orden pagada no se vuelve a pagar (409) ni se devuelve', async () => {
     expect((await pagar(orden.id, pagoValido())).status).toBe(409);
     expect((await ag.tes.post(`/api/tesoreria/desembolsos/${orden.id}/devolver`).send({ motivo: 'Ya pagada' })).status).toBe(409);

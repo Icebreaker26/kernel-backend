@@ -1,7 +1,7 @@
 import pool from '../db/database.js';
 import logger from '../config/logger.js';
 import { enviarEmail } from './emailService.js';
-import { notificarPorPermiso } from './notificationService.js';
+import { notificarPorPermiso, notificarUsuario } from './notificationService.js';
 
 /**
  * Cola de correos transaccionales. `enviarOEncolar` intenta enviar en el momento; si no hay canal disponible (relay y SES
@@ -30,12 +30,12 @@ const logEmail = async (tipo, destinatario, estado, errorMsg = null) => {
   } catch { /* el log no debe romper el envío */ }
 };
 
-export const encolarEmail = async ({ tipo, to, asunto, html, texto = '', referencia_tipo = null, referencia_id = null, error = null }) => {
+export const encolarEmail = async ({ tipo, to, asunto, html, texto = '', referencia_tipo = null, referencia_id = null, reply_to = null, error = null }) => {
   const { rows: [fila] } = await pool.query(
-    `INSERT INTO email_cola (tipo, destinatario, asunto, html, texto, referencia_tipo, referencia_id, ultimo_error, proximo_intento)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW() + make_interval(mins => $9))
+    `INSERT INTO email_cola (tipo, destinatario, asunto, html, texto, referencia_tipo, referencia_id, reply_to, ultimo_error, proximo_intento)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW() + make_interval(mins => $10))
      RETURNING id`,
-    [tipo, to, asunto, html, texto, referencia_tipo, referencia_id, error, ESPERAS_MIN[0]]);
+    [tipo, to, asunto, html, texto, referencia_tipo, referencia_id, reply_to, error, ESPERAS_MIN[0]]);
   return fila.id;
 };
 
@@ -45,7 +45,7 @@ export const encolarEmail = async ({ tipo, to, asunto, html, texto = '', referen
  */
 export const enviarOEncolar = async (msg) => {
   try {
-    await enviarEmail(msg.to, msg.asunto, msg.html, msg.texto ?? '');
+    await enviarEmail(msg.to, msg.asunto, msg.html, msg.texto ?? '', { replyTo: msg.reply_to ?? undefined });
     await logEmail(msg.tipo, msg.to, 'enviado');
     return 'enviado';
   } catch (err) {
@@ -61,7 +61,26 @@ export const enviarOEncolar = async (msg) => {
 };
 
 // Deja constancia en el historial de la solicitud a la que pertenece el correo
+// Correos de autorización de crédito: el resultado queda en la línea de tiempo de la solicitud y, si no salió, se avisa al asesor
+const alTerminarCredito = async (c, resultado, detalle) => {
+  const { rows: [r] } = await pool.query(
+    `SELECT a.id AS ronda_id, a.solicitud_id, s.radicado, s.asesor_uuid FROM credito_autorizaciones a JOIN credito_solicitudes s ON s.id = a.solicitud_id WHERE a.id = $1`, [c.referencia_id]);
+  if (!r) return;
+  const texto = {
+    enviado:   `Se envió a ${c.destinatario} el correo de autorización (estaba en cola)`,
+    suprimido: `No se envió el correo de autorización a ${c.destinatario}: la dirección rebotó antes (lista de supresión)`,
+    fallido:   `No se pudo enviar el correo de autorización a ${c.destinatario} tras ${MAX_INTENTOS} intentos${detalle ? `: ${detalle}` : ''}`,
+  }[resultado];
+  await pool.query(`INSERT INTO credito_eventos (solicitud_id, tipo, detalle, autor_tipo) VALUES ($1, $2, $3, 'sistema')`,
+    [r.solicitud_id, `correo_${resultado}`, JSON.stringify({ mensaje: texto, destinatario: c.destinatario })]);
+  if (resultado !== 'enviado') {
+    await pool.query(`UPDATE credito_autorizaciones SET estado = 'sin_destinatario' WHERE id = $1 AND estado = 'solicitada'`, [r.ronda_id]);
+    await notificarUsuario(r.asesor_uuid, { tipo: 'creditos', modulo: 'creditos', mensaje: `${texto}. Revisa la solicitud ${r.radicado}.` }).catch(() => {});
+  }
+};
+
 const alTerminar = async (c, resultado, detalle = null) => {
+  if (c.referencia_tipo === 'credito_autorizacion' && c.referencia_id) return alTerminarCredito(c, resultado, detalle);
   if (c.referencia_tipo !== 'pqrs' || !c.referencia_id) return;
   const etiqueta = c.tipo === 'pqrs_confirmacion' ? 'la confirmación' : 'la respuesta';
   const evento = {
@@ -107,7 +126,7 @@ export const procesarCola = async ({ limite = LOTE, ids = null } = {}) => {
   const r = { enviados: 0, reprogramados: 0, fallidos: 0, suprimidos: 0 };
   for (const c of lote) {
     try {
-      await enviarEmail(c.destinatario, c.asunto, c.html ?? '', c.texto ?? '');
+      await enviarEmail(c.destinatario, c.asunto, c.html ?? '', c.texto ?? '', { replyTo: c.reply_to ?? undefined });
       await cerrar(c.id, 'enviado');
       await logEmail(c.tipo, c.destinatario, 'enviado');
       await alTerminar(c, 'enviado');

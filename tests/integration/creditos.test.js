@@ -36,7 +36,7 @@ let categoriaId;
 
 const cuerpo = (asociado, extra = {}) => ({
   asociado_codigo: asociado, categoria_id: categoriaId, canal_origen: 'presencial',
-  valor_solicitado: 5000000, monto_desembolso: 5000000, cuotas: 24, cuota_mensual: 250000,
+  valor_solicitado: 5000000, cuotas: 24, cuota_mensual: 250000,
   forma_desembolso: 'cheque', modalidad_firma: 'externa', proveedor_externo: 'Proveedor X', ...extra,
 });
 const radicar = async (asociado, extra) => {
@@ -152,15 +152,17 @@ describe('Créditos — Búsqueda y validación', () => {
     expect(r2.config).toMatchObject({ momento_autorizacion: 'despues_firma', emails_autorizacion: ['nomina-e2@empresa.test'] });
   });
 
-  test('rechaza montos incoherentes, diferencia sin motivo, externa sin proveedor y campos de más (400)', async () => {
+  test('rechaza externa sin proveedor, campos de más y el monto a desembolsar (lo calcula Cartera) (400)', async () => {
     const post = (extra) => ag.asesor.post('/api/creditos').send(cuerpo(A.a1, extra));
-    expect((await post({ monto_desembolso: 6000000 })).status).toBe(400);
-    expect((await post({ monto_desembolso: 4000000 })).status).toBe(400);   // falta el motivo de la diferencia
+    expect((await post({ monto_desembolso: 4000000 })).status).toBe(400);   // el asesor ya no lo digita
+    expect((await post({ motivo_diferencia: 'Recoge un saldo' })).status).toBe(400);
     expect((await post({ proveedor_externo: '' })).status).toBe(400);
     expect((await post({ x: 1 })).status).toBe(400);
     expect((await post({ valor_solicitado: -5 })).status).toBe(400);
     expect((await post({ forma_desembolso: 'trueque' })).status).toBe(400);
-    expect((await post({ monto_desembolso: 4000000, motivo_diferencia: 'Recoge un saldo' })).status).toBe(201);
+    const ok = await post({});
+    expect(ok.status).toBe(201);
+    expect(ok.body.solicitud.monto_desembolso).toBeNull();   // se calcula al cerrar en Cartera
   });
 
   test('bloquea asociados inactivos, inexistentes y categorías inválidas', async () => {
@@ -485,14 +487,14 @@ describe('Créditos — Transferencia, firma presencial y devolución', () => {
     expect(sin.body.invalidados).toBe(0);
     expect((await detalle(id)).pistas.listo).toBe(true);   // solo cambió una observación
 
-    const res = await ag.asesor.put(`/api/creditos/${id}`).send({ valor_solicitado: 6000000, monto_desembolso: 6000000 });
+    const res = await ag.asesor.put(`/api/creditos/${id}`).send({ valor_solicitado: 6000000 });
     expect(res.status).toBe(200);
     expect(res.body.invalidados).toBeGreaterThanOrEqual(1);
     const d = await detalle(id);
     expect(d.pistas).toMatchObject({ firma_completa: false, autorizacion_estado: 'invalidada', listo: false });
     expect(d.eventos.map((e) => e.tipo)).toContain('cambio_posterior_a_firma');
     expect((await ag.asesor.post(`/api/creditos/${id}/entregar`)).status).toBe(409);
-    expect((await ag.asesor.put(`/api/creditos/${id}`).send({ monto_desembolso: 7000000 })).status).toBe(400);   // monto > valor
+    expect((await ag.asesor.put(`/api/creditos/${id}`).send({ monto_desembolso: 7000000 })).status).toBe(400);   // el monto no se digita
   });
 
   test('se puede cerrar una solicitud (desistida) y ya no admite nada', async () => {
@@ -671,7 +673,7 @@ describe('Créditos — Restricciones de la base de datos', () => {
   let id; let borradorId; let firmado;
 
   test('prepara una solicitud con un documento firmado', async () => {
-    id = (await radicar(A.a6, { valor_solicitado: 3000000, monto_desembolso: 3000000 })).solicitud.id;
+    id = (await radicar(A.a6, { valor_solicitado: 3000000 })).solicitud.id;
     borradorId = (await subirBorrador(id, 'pagare')).doc.id;
     const f = await firmarExterna(id, borradorId);
     expect(f.status).toBe(201);
@@ -682,8 +684,10 @@ describe('Créditos — Restricciones de la base de datos', () => {
     await expect(pool.query('UPDATE credito_solicitudes SET monto_desembolso = valor_solicitado + 1 WHERE id = $1', [id])).rejects.toThrow(/chk_credito_monto/);
   });
 
-  test('una diferencia entre valor y monto sin motivo se rechaza (CHECK)', async () => {
-    await expect(pool.query('UPDATE credito_solicitudes SET monto_desembolso = valor_solicitado - 1, motivo_diferencia = NULL WHERE id = $1', [id])).rejects.toThrow(/chk_credito_motivo_dif/);
+  test('el monto a desembolsar puede quedar vacío (lo calcula Cartera) o ser menor que el valor sin motivo', async () => {
+    await pool.query('UPDATE credito_solicitudes SET monto_desembolso = NULL WHERE id = $1', [id]);
+    await pool.query('UPDATE credito_solicitudes SET monto_desembolso = valor_solicitado - 1 WHERE id = $1', [id]);
+    await pool.query('UPDATE credito_solicitudes SET monto_desembolso = NULL WHERE id = $1', [id]);
   });
 
   test('valores inválidos de estado, canal, forma y modalidad se rechazan (CHECK)', async () => {
@@ -790,9 +794,9 @@ describe('Créditos — Reglas de la vista de pistas (v_credito_pistas)', () => 
 describe('Créditos — Correo de autorización: concurrencia', () => {
   test('cinco disparos simultáneos envían un solo correo y crean una sola ronda', async () => {
     const { rows: [s] } = await pool.query(
-      `INSERT INTO credito_solicitudes (radicado, asociado_codigo, empresa_codigo, categoria_id, asesor_uuid, canal_origen, valor_solicitado, monto_desembolso,
+      `INSERT INTO credito_solicitudes (radicado, asociado_codigo, empresa_codigo, categoria_id, asesor_uuid, canal_origen, valor_solicitado,
          forma_desembolso, modalidad_firma, autorizacion_requerida, autorizacion_momento)
-       VALUES ('CR-TEST-' || substr(md5(random()::text), 1, 8), $1, $2, $3, $4, 'presencial', 1000000, 1000000, 'cheque', 'externa', true, 'indiferente') RETURNING id`,
+       VALUES ('CR-TEST-' || substr(md5(random()::text), 1, 8), $1, $2, $3, $4, 'presencial', 1000000, 'cheque', 'externa', true, 'indiferente') RETURNING id`,
       [A.a3, E.e3, categoriaId, usuarios.asesor.id]);
     const antes = emailsDePrueba.length;
     const rs = await Promise.all(Array.from({ length: 5 }, () => dispararCorreoAutorizacion(s.id, { emails: ['conc@empresa.test'], actor: usuarios.asesor })));

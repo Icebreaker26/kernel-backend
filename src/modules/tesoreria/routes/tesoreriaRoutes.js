@@ -6,6 +6,7 @@ import * as ctrl from '../controllers/tesoreriaController.js';
 import { descargarAdjunto } from '../../contable/controllers/adjuntoController.js';
 import { costlyEndpointLimiter } from '../../../middlewares/rateLimiter.js';
 import { lockdownFinanciero } from '../../../middlewares/lockdown.js';
+import * as desembolsos from '../controllers/desembolsosController.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -22,6 +23,15 @@ const upload = multer({
 
 const router = Router();
 router.use(verifyToken);
+
+// Un identificador mal formado no debe llegar a la base de datos: se responde 404
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+router.param('ordenId', (req, res, next, v) => (UUID.test(v) ? next() : res.status(404).json({ error: 'No encontrado' })));
+
+// ── Desembolsos de crédito (órdenes de pago aprobadas por Control Interno) ────
+router.get ('/desembolsos',                    checkPermission('tesoreria', 'READ'),             desembolsos.listar);
+router.post('/desembolsos/:ordenId/pagar',     lockdownFinanciero, checkPermission('tesoreria', 'PAGAR_CREDITOS'), desembolsos.pagar);
+router.post('/desembolsos/:ordenId/devolver',  checkPermission('tesoreria', 'PAGAR_CREDITOS'),   desembolsos.devolver);
 
 // ── Dashboard ──────────────────────────────────────────────────────────────────
 router.get('/dashboard', checkPermission('tesoreria', 'READ'), ctrl.dashboard);

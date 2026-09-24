@@ -57,9 +57,9 @@ export const veTodas = async (user) =>
   (await tieneAccion(user, 'creditos', 'CONFIGURAR')) || (await tieneAccion(user, 'cartera', 'READ'));
 
 export const puedeModificar = (s, user) => s.asesor_uuid === user.id || user.rol === 'admin';
-const ESTADOS_TERMINALES = ['recibida', 'rechazada', 'desistida'];
+const ESTADOS_TERMINALES = ['recibida', 'rechazada', 'desistida', 'completada', 'en_tesoreria', 'pagada'];
 
-const cargarSolicitud = async (id, user, { paraEditar = false } = {}) => {
+export const cargarSolicitud = async (id, user, { paraEditar = false } = {}) => {
   const { rows: [s] } = await pool.query('SELECT * FROM credito_solicitudes WHERE id = $1 AND is_active = true', [id]);
   if (!s) throw new ErrorNegocio(404, 'Solicitud no encontrada');
   if (s.asesor_uuid !== user.id && !(await veTodas(user))) throw new ErrorNegocio(404, 'Solicitud no encontrada');
@@ -125,12 +125,12 @@ export const radicar = async (user, data, ip) => {
     ({ rows: [s] } = await pool.query(
       `INSERT INTO credito_solicitudes
          (radicado, clave_idempotencia, asociado_codigo, empresa_codigo, categoria_id, asesor_uuid, canal_origen,
-          valor_solicitado, monto_desembolso, motivo_diferencia, cuotas, cuota_mensual, forma_desembolso, modalidad_firma, proveedor_externo,
+          valor_solicitado, cuotas, cuota_mensual, forma_desembolso, modalidad_firma, proveedor_externo,
           autorizacion_requerida, autorizacion_momento, override_motivo, observaciones)
        VALUES ('CR-' || to_char(NOW() AT TIME ZONE 'America/Bogota', 'YYYY') || '-' || lpad(nextval('credito_radicado_seq')::text, 6, '0'),
-               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING *`,
+               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
       [data.clave ?? null, asoc.codigo, asoc.empresa_codigo, data.categoria_id, user.id, data.canal_origen,
-        data.valor_solicitado, data.monto_desembolso, data.motivo_diferencia ?? null, data.cuotas ?? null, data.cuota_mensual ?? null,
+        data.valor_solicitado, data.cuotas ?? null, data.cuota_mensual ?? null,
         data.forma_desembolso, data.modalidad_firma, data.proveedor_externo ?? null,
         requerida, cfg.momento_autorizacion, requerida !== cfg.requiere_autorizacion ? data.override_motivo : null, data.observaciones ?? null]));
   } catch (err) {
@@ -155,19 +155,17 @@ export const radicar = async (user, data, ip) => {
 export const actualizar = async (user, id, data, ip) => {
   const s = await cargarSolicitud(id, user, { paraEditar: true });
   const nuevo = { ...s, ...Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined)) };
-  if (Number(nuevo.monto_desembolso) > Number(nuevo.valor_solicitado)) throw new ErrorNegocio(400, 'El monto a desembolsar no puede superar el valor solicitado');
-  if (Number(nuevo.monto_desembolso) < Number(nuevo.valor_solicitado) && !nuevo.motivo_diferencia) throw new ErrorNegocio(400, 'Explica la diferencia entre el valor solicitado y el monto a desembolsar');
   if (nuevo.categoria_id !== s.categoria_id) {
     const { rowCount } = await pool.query('SELECT 1 FROM credito_categorias WHERE id = $1 AND is_active = true', [nuevo.categoria_id]);
     if (!rowCount) throw new ErrorNegocio(400, 'Categoría de crédito inválida');
   }
-  const cambiaCondiciones = ['valor_solicitado', 'monto_desembolso', 'cuotas', 'cuota_mensual'].some((k) => String(nuevo[k] ?? '') !== String(s[k] ?? ''));
+  const cambiaCondiciones = ['valor_solicitado', 'cuotas', 'cuota_mensual'].some((k) => String(nuevo[k] ?? '') !== String(s[k] ?? ''));
 
   const { rows: [act] } = await pool.query(
-    `UPDATE credito_solicitudes SET categoria_id = $2, valor_solicitado = $3, monto_desembolso = $4, motivo_diferencia = $5, cuotas = $6,
-            cuota_mensual = $7, forma_desembolso = $8, proveedor_externo = $9, observaciones = $10, updated_at = NOW()
+    `UPDATE credito_solicitudes SET categoria_id = $2, valor_solicitado = $3, cuotas = $4,
+            cuota_mensual = $5, forma_desembolso = $6, proveedor_externo = $7, observaciones = $8, updated_at = NOW()
       WHERE id = $1 RETURNING *`,
-    [id, nuevo.categoria_id, nuevo.valor_solicitado, nuevo.monto_desembolso, nuevo.motivo_diferencia ?? null, nuevo.cuotas ?? null,
+    [id, nuevo.categoria_id, nuevo.valor_solicitado, nuevo.cuotas ?? null,
       nuevo.cuota_mensual ?? null, nuevo.forma_desembolso, nuevo.proveedor_externo ?? null, nuevo.observaciones ?? null]);
   await evento(id, 'solicitud_editada', { campos: Object.keys(data) }, { autorUuid: user.id, ip });
 
@@ -190,14 +188,14 @@ export const actualizar = async (user, id, data, ip) => {
 // ── Documentos ────────────────────────────────────────────────────────────────
 const ENTIDAD = { a_firmar: 'credito_borrador', firmado: 'credito_firmado', adjunto: 'credito_adjunto', evidencia_externa: 'credito_evidencia', autorizacion: 'credito_autorizacion' };
 
-const guardarDocumento = async (user, s, { clase, tipo, file, extra = {} }, ip) => {
+export const guardarDocumento = async (user, s, { clase, tipo, file, extra = {} }, ip) => {
   const t = validarUpload(file, { permitidos: clase === 'a_firmar' ? ['pdf'] : ['pdf', 'jpg', 'png'] });
   const nombre = nombreSeguro(file.originalname, t.ext);
   const archivo = await subirBuffer(ENTIDAD[clase], s.id, file.buffer, { nombre, mime: t.mime }, user.id);
   const { rows: [d] } = await pool.query(
-    `INSERT INTO credito_documentos (solicitud_id, clase, tipo, nombre, archivo_id, sha256, borrador_id, proveedor, id_transaccion, fecha_firma, subido_por)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-    [s.id, clase, tipo, nombre, archivo.id, sha256(file.buffer), extra.borrador_id ?? null, extra.proveedor ?? null, extra.id_transaccion ?? null, extra.fecha_firma ?? null, user.id]);
+    `INSERT INTO credito_documentos (solicitud_id, clase, tipo, nombre, archivo_id, sha256, borrador_id, proveedor, id_transaccion, fecha_firma, subido_por, etapa)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+    [s.id, clase, tipo, nombre, archivo.id, sha256(file.buffer), extra.borrador_id ?? null, extra.proveedor ?? null, extra.id_transaccion ?? null, extra.fecha_firma ?? null, user.id, extra.etapa ?? 'asesor']);
   await evento(s.id, `documento_${clase}`, { tipo, nombre, sha256: d.sha256 }, { autorUuid: user.id, ip });
   return d;
 };
@@ -407,7 +405,7 @@ export const registrarAutorizacion = async (user, id, data, file, ip) => {
 const COLUMNAS_LISTA = `
   s.id, s.radicado, s.asociado_codigo, (a.nombre || ' ' || a.apellido) AS asociado_nombre, e.nombre AS empresa_nombre,
   c.nombre AS categoria, s.valor_solicitado, s.monto_desembolso, s.forma_desembolso, s.modalidad_firma, s.estado, s.created_at,
-  s.entregada_at, s.recibida_at, s.devuelta_at, u.nombre AS asesor_nombre,
+  s.entregada_at, s.recibida_at, s.devuelta_at, s.completada_at, u.nombre AS asesor_nombre,
   p.a_firmar, p.firmados, p.firma_completa, p.autorizacion_requerida, p.autorizacion_estado, p.autorizacion_ok,
   p.tiene_desprendible, p.certificado_requerido, p.tiene_certificado, p.documentos_ok, p.listo, p.expediente_completo,
   GREATEST(0, (CURRENT_DATE - (s.created_at AT TIME ZONE 'America/Bogota')::date)) AS dias`;
@@ -434,7 +432,7 @@ export const listar = async (user, { estado, q, todas } = {}) => {
 
 // Bandeja de Cartera por pestaña
 export const listarCartera = async ({ tab = 'entregadas', q } = {}) => {
-  const estados = { por_llegar: ['en_tramite'], entregadas: ['entregada'], recibidas: ['recibida'], devueltas: ['devuelta'] }[tab];
+  const estados = { por_llegar: ['en_tramite'], entregadas: ['entregada'], recibidas: ['recibida'], completadas: ['completada'], devueltas: ['devuelta'] }[tab];
   if (!estados) throw new ErrorNegocio(400, 'Pestaña inválida');
   const params = [estados];
   let filtro = '';
@@ -463,7 +461,7 @@ export const detalle = async (user, id) => {
     pool.query(`SELECT ${COLUMNAS_LISTA}, s.*, s.id AS id FROM credito_solicitudes s JOIN v_credito_pistas p ON p.solicitud_id = s.id JOIN asociados a ON a.codigo = s.asociado_codigo
                 JOIN empresas e ON e.codigo = s.empresa_codigo JOIN credito_categorias c ON c.id = s.categoria_id JOIN global_usuarios u ON u.id = s.asesor_uuid WHERE s.id = $1`, [id]),
     pool.query(`SELECT d.id, d.clase, d.tipo, d.nombre, d.sha256, d.borrador_id, d.folio, d.lote_id, d.proveedor, d.id_transaccion, d.fecha_firma, d.vigente,
-                       d.invalidado_motivo, d.archivo_id, d.created_at, ar.mime_type, ar.size_bytes, u.nombre AS subido_por_nombre
+                       d.invalidado_motivo, d.etapa, d.archivo_id, d.created_at, ar.mime_type, ar.size_bytes, u.nombre AS subido_por_nombre
                   FROM credito_documentos d JOIN archivos ar ON ar.id = d.archivo_id LEFT JOIN global_usuarios u ON u.id = d.subido_por
                  WHERE d.solicitud_id = $1 ORDER BY d.created_at`, [id]),
     pool.query(`SELECT a.*, ar.nombre AS archivo_nombre, u.nombre AS registrado_por_nombre FROM credito_autorizaciones a
@@ -605,7 +603,7 @@ export const armarExpediente = async (user, id, ip) => {
     `Empresa:             ${h.empresa_nombre}`,
     `Categoría:           ${h.categoria}`,
     `Valor solicitado:    ${pesos(h.valor_solicitado)}`,
-    `Monto a desembolsar: ${pesos(h.monto_desembolso)}${h.motivo_diferencia ? ` (${h.motivo_diferencia})` : ''}`,
+    `Desembolso neto:     ${h.monto_desembolso == null ? 'se calcula en Cartera (valor solicitado − aval − firma electrónica)' : pesos(h.monto_desembolso)}`,
     `Forma de desembolso: ${h.forma_desembolso}`,
     `Cuotas:              ${h.cuotas ? `${h.cuotas} × ${pesos(h.cuota_mensual ?? 0)}` : '—'}`,
     `Tipo de firma:       ${h.modalidad_firma === 'presencial' ? 'presencial (tableta / huellero)' : `externa (${h.proveedor_externo ?? ''})`}`,

@@ -121,6 +121,7 @@ const usuarios = {
   asesor:  { email: 'listas-asesor@kernel.test',  rol: 'asesor',  permisos: ['READ', 'WRITE', 'ENTREGAR'] },
   oficial: { email: 'listas-oficial@kernel.test', rol: 'asesor',  permisos: ['VALIDAR'] },
   admin:   { email: 'listas-admin@kernel.test',   rol: 'admin',   permisos: [] },
+  otro:    { email: 'listas-otro@kernel.test',    rol: 'asesor',  permisos: ['READ', 'WRITE'] },   // otro asesor, sin VALIDAR
 };
 const ag = {};
 const est = {};   // vinculacionId, consultaId…
@@ -245,6 +246,16 @@ describe('Consulta en listas — asesor, Oficial de Cumplimiento y entrega', () 
     // Volver a iniciar retoma la misma consulta
     const otra = await ag.asesor.post(`${est.url}/consulta-listas`).send({});
     expect([otra.status, otra.body.id, otra.body.existente]).toEqual([200, est.consultaId, true]);
+
+    // El admin y el Oficial de Cumplimiento (solo VALIDAR) también pueden hacerla; otro asesor no
+    for (const quien of ['admin', 'oficial']) {
+      const res = await ag[quien].post(`${est.url}/consulta-listas`).send({});
+      expect([quien, res.status, res.body.id]).toEqual([quien, 200, est.consultaId]);
+    }
+    expect((await ag.otro.post(`${est.url}/consulta-listas`).send({})).status).toBe(404);
+    expect((await ag.otro.put(`/api/captacion/consultas-listas/${est.consultaId}`).send({})).status).toBe(404);
+    expect((await ag.otro.get(`${est.url}/consulta-listas`)).status).toBe(404);
+    expect((await ag.admin.get(`${est.url}/consulta-listas`)).body.puede_consultar).toBe(true);
     est.ids = Object.fromEntries(r.body.coincidencias.map((x) => [x.fuente, x.id]));
   });
 

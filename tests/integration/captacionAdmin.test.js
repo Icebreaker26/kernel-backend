@@ -101,6 +101,21 @@ describe('Captación — alcance por rol', () => {
     expect(dePrueba).toHaveLength(2);
   });
 
+  test('?alcance=todos: el asesor ve las vinculaciones de todos con el nombre del asesor, pero no abre las ajenas', async () => {
+    const vincs = await agentes.asesorA.get('/api/captacion/vinculaciones?alcance=todos');
+    expect(vincs.status).toBe(200);
+    const dePrueba = vincs.body.filter((v) => ['77700001', '77700002'].includes(v.cedula));
+    expect(cedulas(dePrueba).sort()).toEqual(['77700001', '77700002']);
+    expect(dePrueba.find((v) => v.cedula === '77700002').asesor_nombre).toBe('Test asesorB');
+    expect((await agentes.asesorA.get(`/api/captacion/vinculaciones/${creados.asesorB.vinculacionId}`)).status).toBe(404);
+  });
+
+  test('?alcance=mias: el admin ve solo las suyas', async () => {
+    const vincs = await agentes.admin.get('/api/captacion/vinculaciones?alcance=mias');
+    expect(vincs.status).toBe(200);
+    expect(vincs.body.every((v) => v.asesor_uuid === usuarios.admin.id)).toBe(true);
+  });
+
   test('el admin abre el detalle, los documentos y el formato de cualquier asesor', async () => {
     for (const quien of ['asesorA', 'asesorB']) {
       const c = creados[quien];

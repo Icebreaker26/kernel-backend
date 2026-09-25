@@ -272,6 +272,10 @@ export const whatsappUrl = async (req, res, next) => {
 
 export const listarVinculaciones = async (req, res, next) => {
   try {
+    // ?alcance=todos → cualquier usuario con READ ve las de todos los asesores (solo el listado;
+    // el detalle sigue limitado al asesor dueño o al admin). ?alcance=mias → el admin ve solo las suyas.
+    const { alcance } = req.query;
+    const ambito = alcance === 'todos' ? null : alcance === 'mias' ? req.user.id : ambitoAsesor(req);
     const { rows } = await pool.query(
       `SELECT v.id, v.estado, v.created_at, v.updated_at,
               p.nombres, p.apellidos, p.cedula, p.celular, p.empresa_codigo,
@@ -287,7 +291,7 @@ export const listarVinculaciones = async (req, res, next) => {
          LEFT JOIN global_usuarios ua ON ua.id = p.asesor_uuid
         WHERE ($1::uuid IS NULL OR p.asesor_uuid = $1) AND v.is_active = true
         ORDER BY v.updated_at DESC`,
-      [ambitoAsesor(req)]
+      [ambito]
     );
     res.json(rows);
   } catch (err) { next(err); }

@@ -29,6 +29,10 @@ router.post('/agente/jobs/:id/resultado', verifyAgente, express.json({ limit: '1
 // ── Empleados (cookie + ACL) ──────────────────────────────────────────────────
 router.use(verifyToken);
 
+// El asesor titular sube su asociado desde la vinculación: se apoya en su permiso de captación (no necesita permisos rpa)
+router.get ('/vinculaciones/:id/estado', checkPermission('captacion', 'READ'),  ctrl.estadoVinculacion);
+router.post('/vinculaciones/:id/subir',  checkPermission('captacion', 'WRITE'), ctrl.subirVinculacion);
+
 router.get ('/jobs',                  checkPermission('rpa', 'READ'),    ctrl.listarJobs);
 router.get ('/jobs/:id',              checkPermission('rpa', 'READ'),    ctrl.getJob);
 router.get ('/capturas/:id',          checkPermission('rpa', 'READ'),    ctrl.verCaptura);

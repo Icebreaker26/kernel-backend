@@ -14,6 +14,7 @@ const u = {
   admin : { email: 'rpa-test@icebreaker.com',  permisos: ['READ', 'WRITE', 'APROBAR', 'ADMIN'], id: null },
   lector: { email: 'rpa-lector@icebreaker.com', permisos: ['READ'], id: null },
   asesor: { email: 'rpa-asesor@icebreaker.com', permisos: [], id: null },
+  otro  : { email: 'rpa-otro@icebreaker.com',   permisos: [], id: null },
 };
 const e = { vinc: {}, agenteId: null, token: null };
 const PNG_B64 = Buffer.alloc(300, 7).toString('base64'); // contenido cualquiera: solo se prueba el guardado
@@ -36,6 +37,12 @@ const limpiar = async () => {
   await pool.query(`DELETE FROM captacion_prospectos WHERE cedula LIKE '888010%'`);
 };
 
+// Visto bueno del Oficial de Cumplimiento: consulta en listas validada con los mismos datos de identidad de la solicitud
+const validarCumplimiento = (vinculacionId, cedula, estado = 'validada') => pool.query(
+  `INSERT INTO captacion_consultas_listas (vinculacion_id, asesor_uuid, cedula, nombres, apellidos, estado, validada_por, validada_at)
+   VALUES ($1, $2, $3::varchar, 'Ana', 'Prueba Rpa', $4::varchar, $5, CASE WHEN $4::varchar = 'validada' THEN NOW() END)`,
+  [vinculacionId, u.asesor.id, cedula, estado, u.admin.id]);
+
 const nuevaVinculacion = async (cedula, extra = {}) => {
   const { rows: [p] } = await pool.query(
     `INSERT INTO captacion_prospectos (empresa_codigo, asesor_uuid, nombres, apellidos, cedula, celular, correo, token_hash)
@@ -50,6 +57,7 @@ const nuevaVinculacion = async (cedula, extra = {}) => {
         'Calle 1 # 2-3', 'Pereira', 'Risaralda', 'F', 'soltero', 3, 'Operario RPA', 'Auxiliar',
         'Pereira', 'Risaralda', '2020-01-01', 2000000, 1000000, 200000, 3000000, 'mensual', 80000) RETURNING id`,
     [p.id, extra.estado ?? 'entregada']);
+  if (!extra.sinCumplimiento) await validarCumplimiento(v.id, cedula);
   return v.id;
 };
 
@@ -68,6 +76,11 @@ beforeAll(async () => {
         `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id)
          SELECT $1, m.id, a.id FROM modulos m, acciones a WHERE m.nombre = 'rpa' AND a.nombre = ANY($2) ON CONFLICT DO NOTHING`, [x.id, x.permisos]);
     }
+  }
+  for (const quien of [u.asesor, u.otro]) {
+    await pool.query(
+      `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id)
+       SELECT $1, m.id, a.id FROM modulos m, acciones a WHERE m.nombre = 'captacion' AND a.nombre IN ('READ', 'WRITE') ON CONFLICT DO NOTHING`, [quien.id]);
   }
   await pool.query(`UPDATE global_usuarios SET cedula = NULL WHERE cedula = $1`, [CED.asesor]);
   await pool.query(`UPDATE global_usuarios SET cedula = $2, nombre = 'Asesora Prueba Rpa' WHERE id = $1`, [u.asesor.id, CED.asesor]);
@@ -380,5 +393,187 @@ describe('RPA — Fallos y seguridad ante duplicados', () => {
     await agente('post', '/latido', {});
     const { rowCount } = await pool.query(`SELECT 1 FROM rpa_capturas WHERE job_id = $1`, [e.jobA]);
     expect(rowCount).toBe(0);
+  });
+});
+
+
+describe('RPA — Botón "Subir a SOLIDO" y visto bueno de Cumplimiento', () => {
+  let titular; let otro;
+  const CEDS = { sin: '88801010', cerrada: '88801011', ok: '88801012', cambio: '88801013' };
+  const v = {};
+  const estado = (ag, id) => ag.get(`/api/rpa/vinculaciones/${id}/estado`);
+
+  beforeAll(async () => {
+    titular = await login('asesor');
+    otro = await login('otro');
+    v.sin = await nuevaVinculacion(CEDS.sin, { sinCumplimiento: true });
+    v.cerrada = await nuevaVinculacion(CEDS.cerrada, { sinCumplimiento: true });
+    v.ok = await nuevaVinculacion(CEDS.ok);
+    v.cambio = await nuevaVinculacion(CEDS.cambio);
+  });
+
+  test('sin consulta ni visto bueno el botón no se habilita y el servidor lo rechaza', async () => {
+    const r = await estado(titular, v.sin);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ puede_subir: false, es_titular: true, cumplimiento: { estado: 'sin_consulta' } });
+    expect(r.body.motivo).toMatch(/Oficial de Cumplimiento/);
+    const s = await titular.post(`/api/rpa/vinculaciones/${v.sin}/subir`);
+    expect(s.status).toBe(409);
+    expect(s.body.cumplimiento).toBe('sin_consulta');
+    expect((await admin.post('/api/rpa/jobs').send({ vinculacion_id: v.sin })).status).toBe(409);   // tampoco por la ruta administrativa
+  });
+
+  test('consulta cerrada = espera el visto bueno; observada = hay que resolver; ambas bloquean', async () => {
+    await validarCumplimiento(v.cerrada, CEDS.cerrada, 'cerrada');
+    expect((await estado(titular, v.cerrada)).body.cumplimiento.estado).toBe('pendiente_validacion');
+    await pool.query(`UPDATE captacion_consultas_listas SET estado = 'observada' WHERE vinculacion_id = $1`, [v.cerrada]);
+    const r = await estado(titular, v.cerrada);
+    expect(r.body.cumplimiento.estado).toBe('observada');
+    expect(r.body.puede_subir).toBe(false);
+    expect((await titular.post(`/api/rpa/vinculaciones/${v.cerrada}/subir`)).status).toBe(409);
+  });
+
+  test('con el visto bueno vigente el titular puede subir; otro asesor no puede ni verlo', async () => {
+    const r = await estado(titular, v.ok);
+    expect(r.body).toMatchObject({ puede_subir: true, motivo: null, es_titular: true, cumplimiento: { estado: 'validada' } });
+    expect(JSON.stringify(r.body)).not.toMatch(/asesor_uuid/);              // no se filtra el uuid del titular
+    expect((await estado(otro, v.ok)).status).toBe(403);
+    expect((await otro.post(`/api/rpa/vinculaciones/${v.ok}/subir`)).status).toBe(403);
+    expect((await lector.get(`/api/rpa/vinculaciones/${v.ok}/estado`)).status).toBe(403);   // el lector rpa no tiene permiso de captación
+  });
+
+  test('quien puede ver el estado ajeno (rpa READ + captación READ) lo ve, pero si no es el titular no puede subir', async () => {
+    await pool.query(
+      `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id)
+       SELECT $1, m.id, a.id FROM modulos m, acciones a WHERE m.nombre = 'captacion' AND a.nombre = 'READ' ON CONFLICT DO NOTHING`, [u.admin.id]);
+    const r = await estado(admin, v.ok);
+    expect(r.status).toBe(200);
+    expect(r.body.es_titular).toBe(false);
+    expect(r.body.puede_subir).toBe(false);
+    expect(r.body.motivo).toMatch(/titular/);
+  });
+
+  test('al subir se crea el trabajo y el botón queda bloqueado por "carga en curso"', async () => {
+    const s = await titular.post(`/api/rpa/vinculaciones/${v.ok}/subir`);
+    expect(s.status).toBe(201);
+    expect(s.body.job).toMatchObject({ estado: 'pendiente' });
+    expect(s.body.puede_subir).toBe(false);
+    expect(s.body.motivo).toMatch(/en curso/);
+    expect((await titular.post(`/api/rpa/vinculaciones/${v.ok}/subir`)).status).toBe(409);
+  });
+
+  test('si cambia la identidad después del visto bueno, el trabajo vuelve a requiere_datos y se reintenta desde el mismo botón', async () => {
+    const s = await titular.post(`/api/rpa/vinculaciones/${v.cambio}/subir`);
+    expect(s.status).toBe(201);
+    const jobId = s.body.job.id;
+    // se corrige el nombre: la consulta hecha con el nombre anterior deja de valer
+    await pool.query(`UPDATE captacion_prospectos SET nombres = 'Ana Maria' WHERE cedula = $1`, [CEDS.cambio]);
+    const r = await admin.post(`/api/rpa/jobs/${jobId}/reevaluar`);
+    expect(r.status).toBe(409);      // un job pendiente no se reevalúa; el agente lo detectará al reclamarlo
+    const info = await estado(titular, v.cambio);
+    expect(info.body.cumplimiento.estado).toBe('desactualizada');
+    // El agente NO recibe el trabajo: al reclamarlo se revalida y vuelve a requiere_datos
+    await pool.query(`UPDATE rpa_jobs SET estado = 'cancelado' WHERE estado = 'pendiente' AND id <> $1`, [jobId]);   // que reclame ESTE
+    const ag = await admin.post('/api/rpa/agentes').send({ nombre: 'agente-test-cump' });
+    const rec = await request(app).post('/api/rpa/agente/reclamar').set('Authorization', `Bearer ${ag.body.token}`).send({});
+    expect(rec.body.job === null || rec.body.job.id !== jobId).toBe(true);
+    const { rows: [j] } = await pool.query(`SELECT estado, faltantes FROM rpa_jobs WHERE id = $1`, [jobId]);
+    expect(j.estado).toBe('requiere_datos');
+    expect(j.faltantes.map((f) => f.campo)).toContain('cumplimiento');
+    // El asesor vuelve a consultar y el Oficial valida con los datos nuevos
+    await pool.query(`DELETE FROM captacion_consultas_listas WHERE vinculacion_id = $1`, [v.cambio]);
+    await pool.query(`INSERT INTO captacion_consultas_listas (vinculacion_id, asesor_uuid, cedula, nombres, apellidos, estado, validada_por, validada_at)
+                      VALUES ($1, $2, $3::varchar, 'Ana Maria', 'Prueba Rpa', 'validada', $4, NOW())`, [v.cambio, u.asesor.id, CEDS.cambio, u.admin.id]);
+    const otra = await estado(titular, v.cambio);
+    expect(otra.body).toMatchObject({ puede_subir: true, reintento: true });
+    const again = await titular.post(`/api/rpa/vinculaciones/${v.cambio}/subir`);
+    expect(again.status).toBe(201);
+    expect(again.body.job.estado).toBe('pendiente');
+    expect(again.body.job.id).toBe(jobId);                 // se reutiliza el mismo trabajo
+  });
+
+  test('un asociado ya cargado no se puede subir otra vez', async () => {
+    await pool.query(`UPDATE rpa_jobs SET estado = 'cargado', terminado_at = NOW() WHERE vinculacion_id = $1`, [v.ok]);
+    await pool.query(`UPDATE captacion_vinculaciones SET solido_estado = 'cargado', solido_cargado_at = NOW() WHERE id = $1`, [v.ok]);
+    const r = await estado(titular, v.ok);
+    expect(r.body).toMatchObject({ puede_subir: false });
+    expect(r.body.motivo).toMatch(/ya está en SOLIDO/);
+    expect(r.body.job.estado).toBe('cargado');
+  });
+
+  test('el listado de vinculaciones de captación trae el estado de SOLIDO', async () => {
+    const r = await titular.get('/api/captacion/vinculaciones');
+    expect(r.status).toBe(200);
+    const fila = r.body.find((x) => x.id === v.ok);
+    expect(fila).toMatchObject({ solido_estado: 'cargado' });
+    expect(fila.solido_cargado_at).not.toBeNull();
+  });
+});
+
+describe('RPA — Estado del agente: activo, trabajando, sesión bloqueada, pausado, apagado', () => {
+  let ag;
+  const estadoAgente = async () => (await admin.get('/api/rpa/agentes')).body.find((a) => a.id === ag.id);
+  const latido = (body = {}) => request(app).post('/api/rpa/agente/latido').set('Authorization', `Bearer ${ag.token}`).send(body);
+
+  beforeAll(async () => {
+    ag = (await admin.post('/api/rpa/agentes').send({ nombre: 'agente-test-estado' })).body;
+  });
+
+  test('sin latidos: apagado', async () => {
+    const a = await estadoAgente();
+    expect(a).toMatchObject({ estado: 'apagado', en_linea: false });
+  });
+
+  test('con latido reciente: activo', async () => {
+    expect((await latido({ version: '0.1.0', sesion_bloqueada: false })).status).toBe(200);
+    expect(await estadoAgente()).toMatchObject({ estado: 'activo', en_linea: true, sesion_bloqueada: false });
+  });
+
+  test('con la pantalla de Windows bloqueada: bloqueado (sigue en línea)', async () => {
+    await latido({ sesion_bloqueada: true });
+    expect(await estadoAgente()).toMatchObject({ estado: 'bloqueado', en_linea: true, sesion_bloqueada: true });
+    await latido({ sesion_bloqueada: false });
+    expect((await estadoAgente()).estado).toBe('activo');
+  });
+
+  test('un latido sin el campo no borra el último estado de la sesión conocido', async () => {
+    await latido({ sesion_bloqueada: true });
+    await latido({ version: '0.1.1' });
+    expect((await estadoAgente()).sesion_bloqueada).toBe(true);
+    await latido({ sesion_bloqueada: false });
+  });
+
+  test('pausado desde Kernel (o por un error fatal)', async () => {
+    await admin.put(`/api/rpa/agentes/${ag.id}`).send({ pausado: true });
+    expect((await estadoAgente()).estado).toBe('pausado');
+    await admin.put(`/api/rpa/agentes/${ag.id}`).send({ pausado: false });
+  });
+
+  test('sin latido hace más de 6 minutos: apagado', async () => {
+    await pool.query(`UPDATE rpa_agentes SET ultimo_latido = NOW() - INTERVAL '10 minutes' WHERE id = $1`, [ag.id]);
+    expect(await estadoAgente()).toMatchObject({ estado: 'apagado', en_linea: false });
+  });
+
+  test('con un llenado en curso NO se ve apagado aunque no haya latidos (un llenado dura minutos)', async () => {
+    const vin = await nuevaVinculacion('88801020');
+    const { rows: [j] } = await pool.query(
+      `INSERT INTO rpa_jobs (vinculacion_id, cedula, estado, agente_id) VALUES ($1, '88801020', 'llenando', $2) RETURNING id`, [vin, ag.id]);
+    expect((await estadoAgente()).estado).toBe('trabajando');
+    await pool.query(`UPDATE rpa_jobs SET updated_at = NOW() - INTERVAL '20 minutes' WHERE id = $1`, [j.id]);   // atascado: ya no cuenta
+    expect((await estadoAgente()).estado).toBe('apagado');
+    await pool.query(`DELETE FROM rpa_jobs WHERE id = $1`, [j.id]);
+  });
+
+  test('el latido rechaza un valor que no es booleano', async () => {
+    expect((await latido({ sesion_bloqueada: 'si' })).status).toBe(400);
+  });
+
+  test('el asesor ve un resumen del agente (el mejor estado) sin datos internos', async () => {
+    await latido({ sesion_bloqueada: true });
+    const vin = await nuevaVinculacion('88801021');
+    const t = await login('asesor');
+    const r = await t.get(`/api/rpa/vinculaciones/${vin}/estado`);
+    expect(['activo', 'trabajando', 'bloqueado', 'pausado', 'apagado', 'sin_agente']).toContain(r.body.agente.estado);
+    expect(Object.keys(r.body.agente).sort()).toEqual(['estado', 'segundos_sin_latido']);
   });
 });

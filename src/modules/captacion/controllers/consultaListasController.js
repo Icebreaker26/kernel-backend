@@ -4,6 +4,7 @@ import logger from '../../../config/logger.js';
 import { notificarUsuario } from '../../../services/notificationService.js';
 import { subirBuffer, leerBuffer, leerPorKey, validarArchivo, generarPresignedUpload, guardarArchivo, generarPresignedDescarga } from '../../../services/archivoService.js';
 import { canonicalizar, sha256 } from '../../../services/hashCanonico.js';
+import { ambitoLectura } from '../services/captacionService.js';
 import { PARAMETROS_COTEJO } from '../listas/normalizar.js';
 import { FUENTES, estadoFuentes, actualizarTodas } from '../listas/fuentes.js';
 import { cotejar } from '../listas/cotejo.js';
@@ -102,7 +103,7 @@ const evento = (v, tipo, req, payload = {}, autor = 'asesor') => pool.query(
 
 export const getConsultaListas = async (req, res, next) => {
   try {
-    const v = await cargarVinculacion(req.params.id, ambito(req));
+    const v = await cargarVinculacion(req.params.id, await ambitoLectura(req));
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
     const [exigida, verificada, fuentes, { rows }] = await Promise.all([
       consultaListasExigida(), identidadVerificada(v.id), estadoFuentes(),

@@ -16,6 +16,7 @@ const usuarios = {
   admin:   { email: 'captacionadmin-admin@kernel.test',   rol: 'admin',  cedula: null },
   asesorA: { email: 'captacionadmin-a@kernel.test',       rol: 'asesor', cedula: '77700001' },
   asesorB: { email: 'captacionadmin-b@kernel.test',       rol: 'asesor', cedula: '77700002' },
+  revisor: { email: 'captacionadmin-revisor@kernel.test', rol: 'asesor', cedula: null },   // con captacion READ_ALL
 };
 const agentes = {};
 const creados = {};   // quien → { prospectoId, vinculacionId }
@@ -48,6 +49,11 @@ beforeAll(async () => {
     await pool.query(
       `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id)
        SELECT $1, m.id, a.id FROM modulos m, acciones a WHERE m.nombre = 'captacion' AND a.nombre IN ('READ','WRITE') ON CONFLICT DO NOTHING`, [u.id]);
+    if (quien === 'revisor') {
+      await pool.query(
+        `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id)
+         SELECT $1, m.id, a.id FROM modulos m, acciones a WHERE m.nombre = 'captacion' AND a.nombre = 'READ_ALL' ON CONFLICT DO NOTHING`, [u.id]);
+    }
     agentes[quien] = request.agent(app);
     await agentes[quien].post('/api/auth/login').send({ email: u.email, password: pass });
   }
@@ -101,13 +107,35 @@ describe('Captación — alcance por rol', () => {
     expect(dePrueba).toHaveLength(2);
   });
 
-  test('?alcance=todos: el asesor ve las vinculaciones de todos con el nombre del asesor, pero no abre las ajenas', async () => {
+  test('?alcance=todos sin READ_ALL: el asesor sigue viendo solo las suyas', async () => {
     const vincs = await agentes.asesorA.get('/api/captacion/vinculaciones?alcance=todos');
     expect(vincs.status).toBe(200);
+    expect(cedulas(vincs.body)).toEqual([usuarios.asesorA.cedula]);
+    expect((await agentes.asesorA.get('/api/captacion/vinculaciones-alcance')).body).toEqual({ ve_todas: false });
+  });
+
+  test('READ_ALL: ve las de todos con el nombre del asesor y las abre en solo lectura', async () => {
+    expect((await agentes.revisor.get('/api/captacion/vinculaciones-alcance')).body).toEqual({ ve_todas: true });
+    expect(cedulas((await agentes.revisor.get('/api/captacion/vinculaciones')).body)).toEqual([]);   // sin alcance: las suyas
+    const vincs = await agentes.revisor.get('/api/captacion/vinculaciones?alcance=todos');
     const dePrueba = vincs.body.filter((v) => ['77700001', '77700002'].includes(v.cedula));
     expect(cedulas(dePrueba).sort()).toEqual(['77700001', '77700002']);
     expect(dePrueba.find((v) => v.cedula === '77700002').asesor_nombre).toBe('Test asesorB');
-    expect((await agentes.asesorA.get(`/api/captacion/vinculaciones/${creados.asesorB.vinculacionId}`)).status).toBe(404);
+
+    const c = creados.asesorB;
+    const det = await agentes.revisor.get(`/api/captacion/vinculaciones/${c.vinculacionId}`);
+    expect(det.status).toBe(200);
+    expect(det.body.asesor_uuid).toBe(usuarios.asesorB.id);
+    for (const ruta of ['documentos', 'correcciones', 'subsanacion', 'validacion-voz', 'consulta-listas']) {
+      expect([ruta, (await agentes.revisor.get(`/api/captacion/vinculaciones/${c.vinculacionId}/${ruta}`)).status]).toEqual([ruta, 200]);
+    }
+  });
+
+  test('READ_ALL no da acciones sobre solicitudes ajenas', async () => {
+    const url = `/api/captacion/vinculaciones/${creados.asesorA.vinculacionId}`;
+    const rechazada = (res) => expect([403, 404]).toContain(res.status);   // 403 sin la acción, 404 si no es el dueño
+    rechazada(await agentes.revisor.post(`${url}/subsanacion`).send({ items: ['datos'], motivo: 'Falta corregir un dato del formulario' }));
+    rechazada(await agentes.revisor.post(`${url}/entregar`));
   });
 
   test('?alcance=mias: el admin ve solo las suyas', async () => {

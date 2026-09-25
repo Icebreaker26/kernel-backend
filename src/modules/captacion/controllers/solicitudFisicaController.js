@@ -3,6 +3,7 @@ import logger from '../../../config/logger.js';
 import { validarArchivo, generarPresignedUpload, guardarArchivo, generarPresignedDescarga, leerPorKey } from '../../../services/archivoService.js';
 import { canonicalizar, sha256 } from '../../../services/hashCanonico.js';
 import { subsanacionAbierta } from '../services/subsanacion.js';
+import { ambitoLectura } from '../services/captacionService.js';
 import { aplicarAportes } from './captacionController.js';
 import { solicitudFisicaSchema, firmaFisicaSchema } from '../schemas/captacionSchema.js';
 
@@ -229,14 +230,14 @@ export const registrarFirmaFisica = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// URL temporal (15 min) del escaneo. Es un dato personal firmado: solo el asesor dueño y queda en el registro
+// URL temporal (15 min) del escaneo. Es un dato personal firmado: el asesor dueño o quien tenga captacion READ_ALL, y queda en el registro
 export const verEscaneoFirma = async (req, res, next) => {
   try {
     const { rows: [v] } = await pool.query(
       `SELECT v.id, v.prospecto_id, v.firma_fisica_archivo_id, v.firma_fisica_hash
          FROM captacion_vinculaciones v JOIN captacion_prospectos p ON p.id = v.prospecto_id
         WHERE v.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND v.is_active = true`,
-      [req.params.id, req.user.rol === 'admin' ? null : req.user.id]);
+      [req.params.id, await ambitoLectura(req)]);
     if (!v?.firma_fisica_archivo_id) return res.status(404).json({ error: 'La solicitud no tiene escaneo firmado' });
     const descarga = await generarPresignedDescarga(v.firma_fisica_archivo_id);
     await evento(v.prospecto_id, v.id, 'escaneo_firma_visto', 'firma', req).catch((err) => logger.warn(`captacion: no se registró la vista del escaneo: ${err.message}`));

@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import pool from '../../../db/database.js';
 import logger from '../../../config/logger.js';
 import { construirPayload, llaveCiudad, norm } from './payloadSolido.js';
+import { codigoDane } from './divipola.js';
 import { consultaVigente } from '../../captacion/listas/consultas.js';
 
 /**
@@ -36,7 +37,8 @@ const cargarEquivalencias = async (cn = pool) => {
   const mapa = new Map(rows.map((r) => [`${r.catalogo}|${r.texto_norm}`, r.codigo_solido]));
   return (catalogo, texto, depto) => {
     if (catalogo === 'ciudad') {
-      return (depto && mapa.get(`ciudad|${llaveCiudad(texto, depto)}`)) || mapa.get(`ciudad|${norm(texto)}`) || null;
+      // Una equivalencia manual siempre gana; si no hay, se traduce con el índice DANE (solo si es inequívoco)
+      return (depto && mapa.get(`ciudad|${llaveCiudad(texto, depto)}`)) || mapa.get(`ciudad|${norm(texto)}`) || codigoDane(texto, depto) || null;
     }
     return mapa.get(`${catalogo}|${norm(texto)}`) || null;
   };

@@ -54,7 +54,7 @@ const nuevaVinculacion = async (cedula, extra = {}) => {
         direccion_residencia, ciudad_residencia, departamento_residencia, genero, estado_civil, estrato, profesion, cargo,
         ciudad_trabajo, departamento_trabajo, fecha_ingreso, ingresos_mensuales, egresos_mensuales, total_pasivos, total_activos, periodicidad_descuento, valor_aporte)
      VALUES ($1, $2, 'CC', 'Pereira', '2010-01-01', '1990-02-03', 'Pereira', 'Risaralda',
-        'Calle 1 # 2-3', 'Pereira', 'Risaralda', 'F', 'soltero', 3, 'Operario RPA', 'Auxiliar',
+        'Calle 1 # 2-3', 'Villa Ficticia', 'Risaralda', 'F', 'soltero', 3, 'Operario RPA', 'Auxiliar',
         'Pereira', 'Risaralda', '2020-01-01', 2000000, 1000000, 200000, 3000000, 'mensual', 80000) RETURNING id`,
     [p.id, extra.estado ?? 'entregada']);
   if (!extra.sinCumplimiento) await validarCumplimiento(v.id, cedula);
@@ -95,7 +95,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await limpiar();
-  await pool.query(`DELETE FROM rpa_equivalencias WHERE texto_original IN ('Pereira, Risaralda','Operario RPA') OR texto_norm = $1`, [EMPRESA.toLowerCase()]);
+  await pool.query(`DELETE FROM rpa_equivalencias WHERE texto_original IN ('Pereira, Risaralda','Villa Ficticia, Risaralda','Operario RPA') OR texto_norm = $1`, [EMPRESA.toLowerCase()]);
   await pool.query(`DELETE FROM permisos WHERE usuario_uuid = ANY($1)`, [Object.values(u).map((x) => x.id)]);
   await pool.query(`UPDATE global_usuarios SET cedula = NULL WHERE id = $1`, [u.asesor.id]);
   await pool.query(`DELETE FROM global_usuarios WHERE email LIKE 'rpa-%@icebreaker.com'`);
@@ -181,7 +181,7 @@ describe('RPA — Cola y equivalencias', () => {
 
   test('crear equivalencias y reevaluar deja el job pendiente', async () => {
     for (const eqv of [
-      { catalogo: 'ciudad', texto: 'Pereira', departamento: 'Risaralda', codigo_solido: '66001' },
+      { catalogo: 'ciudad', texto: 'Villa Ficticia', departamento: 'Risaralda', codigo_solido: '66001' },
       { catalogo: 'empresa', texto: EMPRESA, codigo_solido: '0101' },
     ]) {
       const r = await admin.post('/api/rpa/equivalencias').send(eqv);
@@ -235,7 +235,10 @@ describe('RPA — Ciclo del agente', () => {
     expect(r.status).toBe(200);
     expect(r.body.job).toMatchObject({ id: e.jobA, fase: 'llenar', cedula: CED.a });
     const p = r.body.job.payload;
-    expect(p.pagina1).toMatchObject({ tipo_correo: 'EXTERNO', ciiu: '10', pais_nacimiento: '54', asesor: CED.asesor, ciudad: '66001', empresa: '0101', clase_dscto: 'Nomina', periodo_dcto: 'Mensual' });
+    expect(p.pagina1).toMatchObject({ tipo_correo: 'EXTERNO', ciiu: '10', pais_nacimiento: '54', asesor: CED.asesor, ciudad: '66001', ciudad_nacimiento: '66001', empresa: '0101', clase_dscto: 'Nomina', periodo_dcto: 'Mensual' });
+    // ciudad_nacimiento (Pereira, Risaralda) no tiene equivalencia manual: la resolvió el índice DANE
+    const { rows: [{ n }] } = await pool.query(`SELECT count(*)::int AS n FROM rpa_equivalencias WHERE texto_norm LIKE 'pereira%' AND is_active`);
+    expect(n).toBe(0);
     expect(p.pagina1.ciudad_envio).toBeNull();
     expect(p.pagina2).toMatchObject({ tipo_salario: '2- ley 50', codigo_interno: CED.a, jornada_laboral: 'Total', profesion: null, cargo: null });
     expect(p.pagina3).toEqual({ egresos: 1000000, deudas_terceros: 200000 });

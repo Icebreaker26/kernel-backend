@@ -1,0 +1,165 @@
+import crypto from 'crypto';
+import pool from '../../../db/database.js';
+import {
+  encolarSchema, equivalenciaSchema, equivalenciaUpdateSchema, cedulaUsuarioSchema, crearAgenteSchema,
+  estadoAgenteSchema, latidoSchema, resultadoSchema, resolverRevisionSchema,
+} from '../schemas/rpaSchema.js';
+import * as svc from '../services/rpaService.js';
+import { norm, llaveCiudad } from '../services/payloadSolido.js';
+
+// Los ErrorRpa (409, 404…) se contestan con su mensaje; el errorHandler oculta el detalle de cualquier otro error en producción
+const manejar = (fn) => async (req, res, next) => {
+  try { await fn(req, res); } catch (err) {
+    if (err instanceof svc.ErrorRpa) return res.status(err.status).json({ error: err.message, ...err.extra });
+    next(err);
+  }
+};
+
+// ── Jobs ──────────────────────────────────────────────────────────────────────
+
+const SELECT_JOB = `
+  SELECT j.id, j.estado, j.cedula, j.intentos, j.error, j.faltantes, j.resultado, j.created_at, j.updated_at, j.terminado_at,
+         j.aprobado_at, j.vinculacion_id, j.agente_id,
+         p.nombres, p.apellidos, u.nombre AS asesor_nombre, ap.nombre AS aprobado_por_nombre
+    FROM rpa_jobs j
+    JOIN captacion_vinculaciones v ON v.id = j.vinculacion_id
+    JOIN captacion_prospectos p ON p.id = v.prospecto_id
+    LEFT JOIN global_usuarios u ON u.id = p.asesor_uuid
+    LEFT JOIN global_usuarios ap ON ap.id = j.aprobado_por`;
+
+export const listarJobs = manejar(async (req, res) => {
+  const estado = typeof req.query.estado === 'string' ? req.query.estado : null;
+  const { rows } = await pool.query(
+    `${SELECT_JOB} WHERE j.is_active ${estado ? 'AND j.estado = $1' : ''} ORDER BY j.created_at DESC LIMIT 200`,
+    estado ? [estado] : []);
+  res.json(rows);
+});
+
+export const getJob = manejar(async (req, res) => {
+  const { rows: [job] } = await pool.query(`${SELECT_JOB} WHERE j.id = $1`, [req.params.id]);
+  if (!job) return res.status(404).json({ error: 'Job no encontrado' });
+  const { rows: capturas } = await pool.query(
+    `SELECT id, etiqueta, created_at FROM rpa_capturas WHERE job_id = $1 ORDER BY created_at`, [job.id]);
+  // Lo que se digitará, para que quien aprueba lo compare con las capturas
+  const abierto = ['requiere_datos', 'pendiente', 'listo_para_aprobar', 'aprobado'].includes(job.estado);
+  const { payload } = abierto ? await svc.armarPayload(job.vinculacion_id) : { payload: null };
+  res.json({ ...job, capturas, payload });
+});
+
+export const verCaptura = manejar(async (req, res) => {
+  const { rows: [c] } = await pool.query(`SELECT mime, datos FROM rpa_capturas WHERE id = $1`, [req.params.id]);
+  if (!c) return res.status(404).json({ error: 'Captura no encontrada' });
+  res.setHeader('Content-Type', c.mime);
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.send(c.datos);
+});
+
+export const encolar = manejar(async (req, res) => {
+  const { vinculacion_id } = encolarSchema.parse(req.body);
+  res.status(201).json(await svc.encolar(vinculacion_id, req.user.id));
+});
+export const reevaluar = manejar(async (req, res) => res.json(await svc.reevaluar(req.params.id)));
+export const aprobar   = manejar(async (req, res) => res.json(await svc.aprobar(req.params.id, req.user.id)));
+export const cancelar  = manejar(async (req, res) => res.json(await svc.cancelar(req.params.id)));
+export const resolver  = manejar(async (req, res) => {
+  res.json(await svc.resolverRevision(req.params.id, resolverRevisionSchema.parse(req.body), req.user.id));
+});
+
+// ── Equivalencias texto → código SOLIDO ───────────────────────────────────────
+
+export const listarEquivalencias = manejar(async (req, res) => {
+  const catalogo = typeof req.query.catalogo === 'string' ? req.query.catalogo : null;
+  const { rows } = await pool.query(
+    `SELECT id, catalogo, texto_original, texto_norm, codigo_solido, descripcion, created_at
+       FROM rpa_equivalencias WHERE is_active ${catalogo ? 'AND catalogo = $1' : ''} ORDER BY catalogo, texto_norm LIMIT 2000`,
+    catalogo ? [catalogo] : []);
+  res.json(rows);
+});
+
+export const crearEquivalencia = manejar(async (req, res) => {
+  const d = equivalenciaSchema.parse(req.body);
+  const llave = d.catalogo === 'ciudad' ? llaveCiudad(d.texto, d.departamento) : norm(d.texto);
+  const { rows: [r] } = await pool.query(
+    `INSERT INTO rpa_equivalencias (catalogo, texto_norm, texto_original, codigo_solido, descripcion, creado_por)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (catalogo, texto_norm) DO UPDATE
+       SET codigo_solido = EXCLUDED.codigo_solido, descripcion = EXCLUDED.descripcion, is_active = true, updated_at = NOW()
+     RETURNING id, catalogo, texto_original, texto_norm, codigo_solido, descripcion`,
+    [d.catalogo, llave, d.departamento ? `${d.texto}, ${d.departamento}` : d.texto, d.codigo_solido, d.descripcion ?? null, req.user.id]);
+  res.status(201).json(r);
+});
+
+export const actualizarEquivalencia = manejar(async (req, res) => {
+  const d = equivalenciaUpdateSchema.parse(req.body);
+  const { rows: [r] } = await pool.query(
+    `UPDATE rpa_equivalencias SET codigo_solido = COALESCE($2, codigo_solido), descripcion = COALESCE($3, descripcion), updated_at = NOW()
+      WHERE id = $1 AND is_active RETURNING id, catalogo, texto_original, codigo_solido, descripcion`,
+    [req.params.id, d.codigo_solido ?? null, d.descripcion ?? null]);
+  if (!r) return res.status(404).json({ error: 'Equivalencia no encontrada' });
+  res.json(r);
+});
+
+export const eliminarEquivalencia = manejar(async (req, res) => {
+  const { rowCount } = await pool.query(`UPDATE rpa_equivalencias SET is_active = false, updated_at = NOW() WHERE id = $1 AND is_active`, [req.params.id]);
+  if (!rowCount) return res.status(404).json({ error: 'Equivalencia no encontrada' });
+  res.json({ ok: true });
+});
+
+// ── Cédula de los asesores ────────────────────────────────────────────────────
+
+export const sugerirCedulas = manejar(async (_req, res) => res.json(await svc.sugerirCedulas()));
+
+export const asignarCedula = manejar(async (req, res) => {
+  const { cedula } = cedulaUsuarioSchema.parse(req.body);
+  const { rows: [u] } = await pool.query(
+    `UPDATE global_usuarios SET cedula = $2, updated_at = NOW() WHERE id = $1 RETURNING id, nombre, cedula`, [req.params.id, cedula]);
+  if (!u) return res.status(404).json({ error: 'Usuario no encontrado' });
+  // Aviso (no bloqueo): todos los empleados deberían ser asociados, así que la cédula debería estar en el padrón
+  let en_padron = null;
+  if (cedula) en_padron = (await pool.query(`SELECT 1 FROM asociados WHERE codigo = $1`, [cedula])).rowCount > 0;
+  res.json({ ...u, en_padron });
+});
+
+// ── Agentes (administración) ──────────────────────────────────────────────────
+
+export const listarAgentes = manejar(async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, nombre, pausado, permite_guardar, ultimo_latido, version, huella_ui, created_at,
+            (ultimo_latido IS NOT NULL AND ultimo_latido > NOW() - INTERVAL '3 minutes') AS en_linea
+       FROM rpa_agentes WHERE is_active ORDER BY nombre`);
+  res.json(rows);
+});
+
+export const crearAgente = manejar(async (req, res) => {
+  const { nombre } = crearAgenteSchema.parse(req.body);
+  const token = `rpa_${crypto.randomBytes(32).toString('base64url')}`;
+  const { rows: [a] } = await pool.query(
+    `INSERT INTO rpa_agentes (nombre, token_hash) VALUES ($1, $2) RETURNING id, nombre, pausado, permite_guardar`,
+    [nombre, svc.hashToken(token)]);
+  // El token se muestra una sola vez: en la base solo queda su hash
+  res.status(201).json({ ...a, token });
+});
+
+export const estadoAgente = manejar(async (req, res) => {
+  const d = estadoAgenteSchema.parse(req.body);
+  const { rows: [a] } = await pool.query(
+    `UPDATE rpa_agentes SET pausado = COALESCE($2, pausado), permite_guardar = COALESCE($3, permite_guardar), updated_at = NOW()
+      WHERE id = $1 AND is_active RETURNING id, nombre, pausado, permite_guardar`,
+    [req.params.id, d.pausado ?? null, d.permite_guardar ?? null]);
+  if (!a) return res.status(404).json({ error: 'Agente no encontrado' });
+  res.json(a);
+});
+
+// ── Endpoints del agente (autenticados con su token, no con cookie) ───────────
+
+export const agenteLatido = manejar(async (req, res) => {
+  res.json(await svc.latido(req.agente, latidoSchema.parse(req.body ?? {})));
+});
+export const agenteReclamar = manejar(async (req, res) => {
+  await svc.latido(req.agente, {});
+  res.json({ job: await svc.reclamar(req.agente) });
+});
+export const agenteResultado = manejar(async (req, res) => {
+  const j = await svc.registrarResultado(req.agente, req.params.id, resultadoSchema.parse(req.body));
+  res.json({ id: j.id, estado: j.estado });
+});

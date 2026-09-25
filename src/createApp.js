@@ -34,7 +34,9 @@ export const createApp = async () => {
     if (origin && origenSitio === origin && esPublico(req.originalUrl)) return cb(null, { origin: true, credentials: false });
     return cb(null, { origin: false });
   }));
-  app.use(express.json({ limit: '2mb' }));
+  // El resultado del agente RPA lleva capturas en base64: esa ruta lee su propio JSON con un límite mayor (ver rpaRoutes)
+  const json2mb = express.json({ limit: '2mb' });
+  app.use((req, res, next) => (req.path.startsWith('/api/rpa/agente/jobs/') ? next() : json2mb(req, res, next)));
   app.use(cookieParser());
   app.use(globalLimiter);
 

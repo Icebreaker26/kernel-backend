@@ -1,5 +1,6 @@
 import pool from '../db/database.js';
 
+// `accion` puede ser una lista: basta con tener cualquiera de ellas (p. ej. ['WRITE', 'VALIDAR'])
 export const checkPermission = (modulo, accion) => async (req, res, next) => {
   if (req.user.rol === 'admin') return next();
 
@@ -9,8 +10,8 @@ export const checkPermission = (modulo, accion) => async (req, res, next) => {
       `SELECT 1 FROM permisos p
        JOIN modulos m ON m.id = p.modulo_id
        JOIN acciones a ON a.id = p.accion_id
-       WHERE p.usuario_uuid = $1 AND m.nombre = $2 AND a.nombre = $3`,
-      [usuario_uuid, modulo, accion]
+       WHERE p.usuario_uuid = $1 AND m.nombre = $2 AND a.nombre = ANY($3::text[])`,
+      [usuario_uuid, modulo, [].concat(accion)]
     );
     if (!rows.length) return res.status(403).json({ error: 'Sin permiso' });
     next();

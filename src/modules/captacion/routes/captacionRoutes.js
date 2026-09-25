@@ -89,15 +89,17 @@ router.get ('/vinculaciones',                  checkPermission('captacion', 'REA
 router.get ('/vinculaciones-alcance',          checkPermission('captacion', 'READ'),     ctrl.miAlcanceVinculaciones);
 router.get ('/vinculaciones/:id',              checkPermission('captacion', 'READ'),     ctrl.getVinculacion);
 // Consulta en listas restrictivas y fuentes abiertas: la hace el asesor; el Oficial de Cumplimiento valida que se hizo bien
+// Hacer la consulta en listas: el asesor (WRITE, solo en las suyas) o el Oficial de Cumplimiento (VALIDAR, en cualquiera)
+const HACER_CONSULTA = ['WRITE', 'VALIDAR'];
 router.get ('/vinculaciones/:id/consulta-listas', checkPermission('captacion', 'READ'),  listas.getConsultaListas);
-router.post('/vinculaciones/:id/consulta-listas', checkPermission('captacion', 'WRITE'), listas.iniciarConsultaListas);
-router.put ('/consultas-listas/:cid',             checkPermission('captacion', 'WRITE'), listas.guardarConsultaListas);
-router.post('/consultas-listas/:cid/adjuntos/solicitar', checkPermission('captacion', 'WRITE'), listas.solicitarAdjunto);
-router.post('/consultas-listas/:cid/adjuntos',    checkPermission('captacion', 'WRITE'), listas.confirmarAdjunto);
+router.post('/vinculaciones/:id/consulta-listas', checkPermission('captacion', HACER_CONSULTA), listas.iniciarConsultaListas);
+router.put ('/consultas-listas/:cid',             checkPermission('captacion', HACER_CONSULTA), listas.guardarConsultaListas);
+router.post('/consultas-listas/:cid/adjuntos/solicitar', checkPermission('captacion', HACER_CONSULTA), listas.solicitarAdjunto);
+router.post('/consultas-listas/:cid/adjuntos',    checkPermission('captacion', HACER_CONSULTA), listas.confirmarAdjunto);
 router.get ('/consultas-listas/:cid/adjuntos/:aid', checkPermission('captacion', 'READ'), listas.urlAdjuntoAsesor);
 router.get ('/cumplimiento/consultas/:cid/adjuntos/:aid', checkPermission('captacion', 'VALIDAR'), listas.urlAdjuntoOficial);
-router.post('/consultas-listas/:cid/buscar',      checkPermission('captacion', 'WRITE'), listas.buscarWebConsulta);
-router.post('/consultas-listas/:cid/cerrar',      checkPermission('captacion', 'WRITE'), listas.cerrarConsultaListas);
+router.post('/consultas-listas/:cid/buscar',      checkPermission('captacion', HACER_CONSULTA), listas.buscarWebConsulta);
+router.post('/consultas-listas/:cid/cerrar',      checkPermission('captacion', HACER_CONSULTA), listas.cerrarConsultaListas);
 router.get ('/consultas-listas/:cid/pdf',         checkPermission('captacion', 'READ'),  listas.pdfConsultaAsesor);
 router.get ('/cumplimiento/consultas',            checkPermission('captacion', 'VALIDAR'), listas.listarConsultasCumplimiento);
 router.get ('/cumplimiento/consultas/:cid',       checkPermission('captacion', 'VALIDAR'), listas.getConsultaCumplimiento);

@@ -48,6 +48,16 @@ const reglasSchema = z.object({ validacion_voz: z.boolean().optional(), consulta
 
 const ambito = (req) => (req.user.rol === 'admin' ? null : req.user.id);
 
+// Hacer la consulta (iniciar, guardar, adjuntar, buscar, cerrar): el asesor dueño, el admin o el Oficial de Cumplimiento
+// (captacion VALIDAR) en cualquier solicitud. null = sin filtro de asesor.
+const ambitoConsulta = async (req) => {
+  if (req.user.rol === 'admin') return null;
+  const { rowCount } = await pool.query(
+    `SELECT 1 FROM permisos p JOIN modulos m ON m.id = p.modulo_id JOIN acciones a ON a.id = p.accion_id
+      WHERE p.usuario_uuid = $1 AND m.nombre = 'captacion' AND a.nombre = 'VALIDAR'`, [req.user.id]);
+  return rowCount ? null : req.user.id;
+};
+
 // ── Consulta → respuesta de la API ───────────────────────────────────────────
 
 const pendientesDe = (c) => {
@@ -112,8 +122,10 @@ export const getConsultaListas = async (req, res, next) => {
     const vigentes = rows.filter((c) => c.estado !== 'anulada');
     const actual = vigentes[0] ?? null;
     const valida = !!actual && actual.estado === 'validada' && actual.cedula === v.cedula && actual.nombres === v.nombres && actual.apellidos === v.apellidos;
+    const puedeConsultar = v.asesor_uuid === req.user.id || (await ambitoConsulta(req)) === null;
     res.json({
       exigida, vigente: valida, identidad_verificada: verificada, entregada: v.estado === 'entregada',
+      puede_consultar: puedeConsultar,   // dueño, admin u Oficial de Cumplimiento: ve las acciones aunque abra la solicitud en solo lectura
       actual: actual ? formato(actual) : null,
       // La consulta quedó desactualizada si después se corrigió la identidad
       desactualizada_por_identidad: !!actual && !['anulada'].includes(actual.estado) && (actual.cedula !== v.cedula || actual.nombres !== v.nombres || actual.apellidos !== v.apellidos),
@@ -126,7 +138,7 @@ export const getConsultaListas = async (req, res, next) => {
 export const iniciarConsultaListas = async (req, res, next) => {
   try {
     const { repetir } = iniciarSchema.parse(req.body ?? {});
-    const v = await cargarVinculacion(req.params.id, req.user.id);
+    const v = await cargarVinculacion(req.params.id, await ambitoConsulta(req));
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
     if (v.estado === 'entregada') return res.status(400).json({ error: 'Ya fue entregada' });
     if (!v.nombres || String(v.cedula).startsWith('STAND_')) return res.status(400).json({ error: 'La persona aún no da su cédula y su nombre' });
@@ -183,7 +195,7 @@ export const iniciarConsultaListas = async (req, res, next) => {
 const cargarConsultaDelAsesor = async (cid, req) => {
   const { rows: [c] } = await pool.query(
     `${SELECT_CONSULTA} JOIN captacion_vinculaciones v ON v.id = c.vinculacion_id JOIN captacion_prospectos p ON p.id = v.prospecto_id
-      WHERE c.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true`, [cid, req.user.id]);
+      WHERE c.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND v.is_active = true`, [cid, await ambitoConsulta(req)]);
   return c ?? null;
 };
 

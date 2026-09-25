@@ -81,7 +81,12 @@ const yaEstaEnPadron = async (cedula, cn = pool) => {
 
 // ── Encolar / reevaluar / aprobar / cancelar ──────────────────────────────────
 
-export const encolar = async (vinculacionId, usuarioId) => {
+/**
+ * `directo`: "Subir = aprobar". El trabajo nace APROBADO (aprobado_por = quien lo sube) y el agente llena y guarda de una vez, sin
+ * llenado en seco ni revision previa. Siguen valiendo: visto bueno de Cumplimiento, datos completos, permite_guardar del agente en
+ * Kernel, SOLIDO_PERMITIR_GUARDAR en el PC, que la cedula no exista en SOLIDO y la relectura comparada tras guardar.
+ */
+export const encolar = async (vinculacionId, usuarioId, { directo = false } = {}) => {
   const { payload: _p, faltantes, cedula, vinculacion } = await armarPayload(vinculacionId);
   if (!vinculacion.is_active) throw new ErrorRpa(409, 'La vinculación está inactiva');
   if (vinculacion.estado !== 'entregada') throw new ErrorRpa(409, 'Solo se cargan a SOLIDO las vinculaciones entregadas');
@@ -96,12 +101,13 @@ export const encolar = async (vinculacionId, usuarioId) => {
     return job;
   }
 
-  const estado = faltantes.length ? 'requiere_datos' : 'pendiente';
+  const estado = faltantes.length ? 'requiere_datos' : (directo ? 'aprobado' : 'pendiente');
   try {
     const { rows: [job] } = await pool.query(
-      `INSERT INTO rpa_jobs (vinculacion_id, cedula, estado, faltantes, creado_por)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [vinculacionId, cedula, estado, faltantes.length ? JSON.stringify(faltantes) : null, usuarioId]);
+      `INSERT INTO rpa_jobs (vinculacion_id, cedula, estado, faltantes, creado_por, aprobado_por, aprobado_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [vinculacionId, cedula, estado, faltantes.length ? JSON.stringify(faltantes) : null, usuarioId,
+       estado === 'aprobado' ? usuarioId : null, estado === 'aprobado' ? new Date() : null]);
     await pool.query(`UPDATE captacion_vinculaciones SET solido_estado = 'en_cola' WHERE id = $1`, [vinculacionId]);
     return job;
   } catch (err) {
@@ -117,19 +123,21 @@ const cargarJob = async (id, cn = pool) => {
 };
 
 // Vuelve a revisar los datos de un job que esperaba equivalencias, o reabre uno fallido ANTES de guardar
-export const reevaluar = async (id) => {
+export const reevaluar = async (id, { directo = false, usuarioId = null } = {}) => {
   const job = await cargarJob(id);
   if (!['requiere_datos', 'fallido'].includes(job.estado)) throw new ErrorRpa(409, `Un job en estado ${job.estado} no se reevalúa`);
   if (job.estado === 'fallido' && job.guardar_iniciado_at) {
     throw new ErrorRpa(409, 'Este job llegó a intentar guardar: verifica primero en SOLIDO y resuélvelo desde revisión');
   }
   const { faltantes } = await armarPayload(job.vinculacion_id);
-  const estado = faltantes.length ? 'requiere_datos' : 'pendiente';
+  const estado = faltantes.length ? 'requiere_datos' : (directo && usuarioId ? 'aprobado' : 'pendiente');
   try {
     const { rows: [j] } = await pool.query(
-      `UPDATE rpa_jobs SET estado = $2, faltantes = $3, error = NULL, intentos = 0, terminado_at = NULL, updated_at = NOW()
+      `UPDATE rpa_jobs SET estado = $2, faltantes = $3, error = NULL, intentos = 0, terminado_at = NULL, updated_at = NOW(),
+              aprobado_por = CASE WHEN $4::boolean THEN $5::uuid ELSE aprobado_por END,
+              aprobado_at  = CASE WHEN $4::boolean THEN NOW() ELSE aprobado_at END
         WHERE id = $1 RETURNING *`,
-      [id, estado, faltantes.length ? JSON.stringify(faltantes) : null]);
+      [id, estado, faltantes.length ? JSON.stringify(faltantes) : null, estado === 'aprobado', usuarioId]);
     return j;
   } catch (err) {
     if (err.code === '23505') throw new ErrorRpa(409, 'Esta vinculación ya tiene otra carga en curso');
@@ -273,15 +281,22 @@ export const registrarResultado = async (agente, jobId, body) => {
       case 'guardado_con_diferencias': estado = 'revision_humana'; error = error ?? 'Lo guardado en SOLIDO no coincide con Kernel'; break;
       case 'guardado_incierto':        estado = 'revision_humana'; error = error ?? 'No se pudo confirmar el guardado'; break;
       default:                         // fallido
-        if (guardando) estado = 'revision_humana';                               // tras Guardar jamás se reintenta solo
+        if (guardando && body.antes_de_guardar) {
+          // El agente asegura que NO llegó a pulsar Guardar (no encontró un campo, SOLIDO no abrió, se bloqueó la sesión…): no hay
+          // nada que verificar en SOLIDO. Reintentable (bloqueo, red) → vuelve a 'aprobado'; si no, 'fallido' y una persona decide.
+          estado = body.reintentable && job.intentos + 1 < MAX_INTENTOS ? 'aprobado' : 'fallido';
+        } else if (guardando) estado = 'revision_humana';                         // tras Guardar jamás se reintenta solo
         else estado = body.reintentable && job.intentos < MAX_INTENTOS ? 'pendiente' : 'fallido';
     }
     const terminal = ['cargado', 'ya_existe', 'fallido'].includes(estado);
 
     const { rows: [j] } = await cn.query(
-      `UPDATE rpa_jobs SET estado = $2, error = $3, resultado = $4, terminado_at = $5, updated_at = NOW()
+      `UPDATE rpa_jobs SET estado = $2, error = $3, resultado = $4, terminado_at = $5, updated_at = NOW(),
+              guardar_iniciado_at = CASE WHEN $6 THEN NULL ELSE guardar_iniciado_at END,
+              intentos = intentos + (CASE WHEN $6 THEN 1 ELSE 0 END)
         WHERE id = $1 RETURNING *`,
-      [jobId, estado, error, body.detalle ? JSON.stringify(body.detalle) : null, terminal ? new Date() : null]);
+      [jobId, estado, error, body.detalle ? JSON.stringify(body.detalle) : null, terminal ? new Date() : null,
+       guardando && resultado === 'fallido' && !!body.antes_de_guardar]);
 
     for (const c of body.capturas) {
       await cn.query(`INSERT INTO rpa_capturas (job_id, etiqueta, mime, datos) VALUES ($1, $2, $3, $4)`,

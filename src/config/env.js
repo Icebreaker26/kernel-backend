@@ -9,6 +9,8 @@ const envSchema = z.object({
   NODE_ENV:     z.enum(['development', 'production', 'test']).default('development'),
   FRONTEND_URL: z.string().url(),
   PORTAL_URL:   z.string().url().optional(),
+  // RPA de SOLIDO: 'true' = subir a SOLIDO ya aprueba y guarda (sin llenado en seco); 'false' = revisión previa con capturas
+  RPA_GUARDADO_DIRECTO: z.enum(['true', 'false']).default('true'),
   // Origen del sitio público de la cooperativa cuando vive en otro dominio (p. ej. https://cooperativaprogresemos.coop):
   // se agrega a los orígenes permitidos por CORS para que ese sitio lea la API pública.
   SITIO_URL:    z.string().url().optional(),

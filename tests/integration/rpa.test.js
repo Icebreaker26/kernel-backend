@@ -459,7 +459,7 @@ describe('RPA — Botón "Subir a SOLIDO" y visto bueno de Cumplimiento', () => 
   test('al subir se crea el trabajo y el botón queda bloqueado por "carga en curso"', async () => {
     const s = await titular.post(`/api/rpa/vinculaciones/${v.ok}/subir`);
     expect(s.status).toBe(201);
-    expect(s.body.job).toMatchObject({ estado: 'pendiente' });
+    expect(s.body.job).toMatchObject({ estado: 'aprobado' });      // "Subir = aprobar": nace aprobado y el agente guarda
     expect(s.body.puede_subir).toBe(false);
     expect(s.body.motivo).toMatch(/en curso/);
     expect((await titular.post(`/api/rpa/vinculaciones/${v.ok}/subir`)).status).toBe(409);
@@ -476,8 +476,9 @@ describe('RPA — Botón "Subir a SOLIDO" y visto bueno de Cumplimiento', () => 
     const info = await estado(titular, v.cambio);
     expect(info.body.cumplimiento.estado).toBe('desactualizada');
     // El agente NO recibe el trabajo: al reclamarlo se revalida y vuelve a requiere_datos
-    await pool.query(`UPDATE rpa_jobs SET estado = 'cancelado' WHERE estado = 'pendiente' AND id <> $1`, [jobId]);   // que reclame ESTE
+    await pool.query(`UPDATE rpa_jobs SET estado = 'cancelado' WHERE estado IN ('pendiente','aprobado') AND id <> $1`, [jobId]);   // que reclame ESTE
     const ag = await admin.post('/api/rpa/agentes').send({ nombre: 'agente-test-cump' });
+    await admin.put(`/api/rpa/agentes/${ag.body.id}`).send({ permite_guardar: true });   // el trabajo nace aprobado: solo lo recibe un agente que puede guardar
     const rec = await request(app).post('/api/rpa/agente/reclamar').set('Authorization', `Bearer ${ag.body.token}`).send({});
     expect(rec.body.job === null || rec.body.job.id !== jobId).toBe(true);
     const { rows: [j] } = await pool.query(`SELECT estado, faltantes FROM rpa_jobs WHERE id = $1`, [jobId]);
@@ -491,8 +492,83 @@ describe('RPA — Botón "Subir a SOLIDO" y visto bueno de Cumplimiento', () => 
     expect(otra.body).toMatchObject({ puede_subir: true, reintento: true });
     const again = await titular.post(`/api/rpa/vinculaciones/${v.cambio}/subir`);
     expect(again.status).toBe(201);
-    expect(again.body.job.estado).toBe('pendiente');
+    expect(again.body.job.estado).toBe('aprobado');
     expect(again.body.job.id).toBe(jobId);                 // se reutiliza el mismo trabajo
+  });
+
+  describe('Subir = aprobar (guardado directo)', () => {
+    const cedulaN = (n) => `8880102${n}`;
+    const crearAgente = async (nombre, permiteGuardar) => {
+      const ag = await admin.post('/api/rpa/agentes').send({ nombre });
+      if (permiteGuardar) await admin.put(`/api/rpa/agentes/${ag.body.id}`).send({ permite_guardar: true });
+      return { id: ag.body.id, token: ag.body.token };
+    };
+    const reclamar = (ag) => request(app).post('/api/rpa/agente/reclamar').set('Authorization', `Bearer ${ag.token}`).send({});
+    const resultado = (ag, jobId, body) => request(app).post(`/api/rpa/agente/jobs/${jobId}/resultado`)
+      .set('Authorization', `Bearer ${ag.token}`).set('X-Requested-With', 'XMLHttpRequest').send(body);
+    const soloEste = (jobId) => pool.query(`UPDATE rpa_jobs SET estado = 'cancelado' WHERE estado IN ('pendiente','aprobado') AND id <> $1`, [jobId]);
+
+    test('subir deja el trabajo APROBADO por quien lo sube, sin llenado en seco', async () => {
+      const vid = await nuevaVinculacion(cedulaN(1));
+      const s = await titular.post(`/api/rpa/vinculaciones/${vid}/subir`);
+      expect(s.status).toBe(201);
+      expect(s.body.job.estado).toBe('aprobado');
+      const { rows: [j] } = await pool.query(`SELECT aprobado_por, aprobado_at FROM rpa_jobs WHERE id = $1`, [s.body.job.id]);
+      expect(j.aprobado_por).toBe(u.asesor.id);
+      expect(j.aprobado_at).not.toBeNull();
+    });
+
+    test('un agente SIN permite_guardar en Kernel no recibe el trabajo; con el permiso lo recibe directo en fase guardar', async () => {
+      const vid = await nuevaVinculacion(cedulaN(2));
+      const s = await titular.post(`/api/rpa/vinculaciones/${vid}/subir`);
+      await soloEste(s.body.job.id);
+      const sin = await crearAgente('agente-test-directo-sin', false);
+      expect((await reclamar(sin)).body.job).toBeNull();
+      const con = await crearAgente('agente-test-directo-con', true);
+      const rec = await reclamar(con);
+      expect(rec.body.job).toMatchObject({ id: s.body.job.id, fase: 'guardar', cedula: cedulaN(2) });
+      expect(rec.body.job.payload.pagina1.pais_residencia).toBe('54');
+    });
+
+    test('RPA_GUARDADO_DIRECTO=false conserva la revisión previa: el trabajo nace pendiente', async () => {
+      const { env } = await import('../../src/config/env.js');
+      const antes = env.RPA_GUARDADO_DIRECTO;
+      env.RPA_GUARDADO_DIRECTO = 'false';
+      try {
+        const vid = await nuevaVinculacion(cedulaN(3));
+        const s = await titular.post(`/api/rpa/vinculaciones/${vid}/subir`);
+        expect(s.body.job.estado).toBe('pendiente');
+      } finally { env.RPA_GUARDADO_DIRECTO = antes; }
+    });
+
+    test('un fallo ANTES de pulsar Guardar no va a revisión humana: reintentable vuelve a aprobado, si no queda fallido', async () => {
+      const vid = await nuevaVinculacion(cedulaN(4));
+      const s = await titular.post(`/api/rpa/vinculaciones/${vid}/subir`);
+      await soloEste(s.body.job.id);
+      const ag = await crearAgente('agente-test-directo-fallo', true);
+      const rec = await reclamar(ag);
+      expect(rec.body.job.fase).toBe('guardar');
+      const r1 = await resultado(ag, s.body.job.id, { resultado: 'fallido', error: 'Se bloqueó la sesión', reintentable: true, antes_de_guardar: true });
+      expect(r1.status).toBe(200);
+      expect(r1.body.estado).toBe('aprobado');
+      const { rows: [j1] } = await pool.query(`SELECT guardar_iniciado_at, intentos FROM rpa_jobs WHERE id = $1`, [s.body.job.id]);
+      expect(j1.guardar_iniciado_at).toBeNull();
+      expect(j1.intentos).toBe(1);
+      const rec2 = await reclamar(ag);
+      expect(rec2.body.job.id).toBe(s.body.job.id);
+      const r2 = await resultado(ag, s.body.job.id, { resultado: 'fallido', error: 'No se encontró el campo', antes_de_guardar: true });
+      expect(r2.body.estado).toBe('fallido');
+    });
+
+    test('sin la marca antes_de_guardar, un fallo en la fase de guardar SIGUE yendo a revisión humana', async () => {
+      const vid = await nuevaVinculacion(cedulaN(5));
+      const s = await titular.post(`/api/rpa/vinculaciones/${vid}/subir`);
+      await soloEste(s.body.job.id);
+      const ag = await crearAgente('agente-test-directo-incierto', true);
+      await reclamar(ag);
+      const r = await resultado(ag, s.body.job.id, { resultado: 'fallido', error: 'algo tras el clic' });
+      expect(r.body.estado).toBe('revision_humana');
+    });
   });
 
   test('un asociado ya cargado no se puede subir otra vez', async () => {

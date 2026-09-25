@@ -7,6 +7,8 @@ import { ErrorNegocio } from '../../creditos/http.js';
 import {
   cargarSolicitud, evento, guardarDocumento, sha256, validarUpload, detectarTipo,
 } from '../../creditos/services/creditoService.js';
+import { interpretarCertificado, textoDePdf } from './lecturaCertificado.js';
+import { textoDeImagen, textoDePdfEscaneado } from './ocr.js';
 import { armarPdfFinal, ordenarDocumentos, sellosAplicables } from './pdfFinal.js';
 
 export const TIPOS_CARTERA = ['comprobante_aprobacion', 'formato_estudio_credito'];
@@ -89,6 +91,29 @@ export const obtenerCierre = async (user, id) => {
     sellos_aplicables: sellosAplicables(previo, s),
     puede_editar: s.estado === 'recibida', puede_completar: s.estado === 'recibida' && faltantes.length === 0,
   };
+};
+
+// El OCR es pesado: de a una lectura a la vez, para que varias personas abriendo cierres no saturen el servidor
+let colaOcr = Promise.resolve();
+const enColaOcr = (tarea) => { const r = colaOcr.then(tarea, tarea); colaOcr = r.catch(() => {}); return r; };
+
+// ── Lectura del certificado bancario (sugerencia para Cartera) ────────────────
+export const leerCertificado = async (user, id) => {
+  const s = await cargarParaCierre(user, id);
+  const { rows: [d] } = await pool.query(
+    `SELECT d.archivo_id, ar.mime_type FROM credito_documentos d JOIN archivos ar ON ar.id = d.archivo_id
+      WHERE d.solicitud_id = $1 AND d.clase = 'adjunto' AND d.tipo = 'certificado_bancario' AND d.vigente ORDER BY d.created_at DESC LIMIT 1`, [s.id]);
+  if (!d) return { estado: 'sin_certificado', alertas: [] };
+  const buf = await leerBuffer(d.archivo_id);
+  if (!buf) return { estado: 'sin_certificado', alertas: [] };
+  const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+  const opciones = { asociadoCodigo: s.asociado_codigo, hoy };
+  // Un PDF con texto se lee directo (fiable). Si no lo trae (escaneo) o es una foto, se recurre al OCR local, que solo sugiere.
+  const esPdf = d.mime_type === 'application/pdf';
+  const texto = esPdf ? await textoDePdf(buf) : '';
+  if (texto.length >= 20) return interpretarCertificado(texto, opciones);
+  const leido = await enColaOcr(() => (esPdf ? textoDePdfEscaneado(buf) : textoDeImagen(buf)));
+  return interpretarCertificado(leido, { ...opciones, origen: 'ocr' });
 };
 
 // ── Documentos de Cartera ─────────────────────────────────────────────────────
@@ -321,14 +346,3 @@ export const COLUMNAS_FIRMAS = [
   { campo: 'documentos', titulo: 'DOCUMENTOS_FIRMADOS' }, { campo: 'valor', titulo: 'VALOR' },
 ];
 
-// ── Bandeja de Control Interno (solo la cola por ahora) ───────────────────────
-export const listarCompletadas = async () => {
-  const { rows } = await pool.query(
-    `SELECT s.id, s.radicado, s.asociado_codigo, (a.nombre || ' ' || a.apellido) AS asociado_nombre, e.nombre AS empresa_nombre,
-            ca.nombre AS categoria, s.valor_solicitado, s.monto_desembolso, s.modalidad_firma, s.forma_desembolso, s.completada_at, s.completada_por,
-            c.con_aval, c.aval_porcentaje, c.aval_valor, c.firma_electronica_valor, c.desembolso_neto
-       FROM credito_solicitudes s JOIN credito_cierre c ON c.solicitud_id = s.id JOIN asociados a ON a.codigo = s.asociado_codigo
-       JOIN empresas e ON e.codigo = s.empresa_codigo JOIN credito_categorias ca ON ca.id = s.categoria_id
-      WHERE s.is_active AND s.estado = 'completada' ORDER BY s.completada_at ASC LIMIT 500`);
-  return rows;
-};

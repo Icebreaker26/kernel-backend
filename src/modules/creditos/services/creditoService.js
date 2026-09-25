@@ -408,7 +408,7 @@ const COLUMNAS_LISTA = `
   s.entregada_at, s.recibida_at, s.devuelta_at, s.completada_at, u.nombre AS asesor_nombre,
   p.a_firmar, p.firmados, p.firma_completa, p.autorizacion_requerida, p.autorizacion_estado, p.autorizacion_ok,
   p.tiene_desprendible, p.certificado_requerido, p.tiene_certificado, p.documentos_ok, p.listo, p.expediente_completo,
-  GREATEST(0, (CURRENT_DATE - (s.created_at AT TIME ZONE 'America/Bogota')::date)) AS dias`;
+  GREATEST(0, ((NOW() AT TIME ZONE 'America/Bogota')::date - (s.created_at AT TIME ZONE 'America/Bogota')::date)) AS dias`;
 const FROM_LISTA = `
   FROM credito_solicitudes s
   JOIN v_credito_pistas p ON p.solicitud_id = s.id
@@ -417,12 +417,12 @@ const FROM_LISTA = `
   JOIN credito_categorias c ON c.id = s.categoria_id
   JOIN global_usuarios u ON u.id = s.asesor_uuid`;
 
-const ORDEN_SQL = {
+export const ORDEN_SQL = {
   fecha: 's.created_at', valor: 's.valor_solicitado', dias: 's.created_at', estado: 's.estado', asociado: "(a.nombre || ' ' || a.apellido)", radicado: 's.radicado',
 };
 
 /** Arma el WHERE de la lista a partir de los filtros validados. `sinEstado` lo omite (para los conteos por estado). */
-const filtrosLista = async (user, f = {}, { sinEstado = false, sinAlcance = false } = {}) => {
+export const filtrosLista = async (user, f = {}, { sinEstado = false, sinAlcance = false } = {}) => {
   const where = ['s.is_active = true'];
   const params = [];
   const p = (v) => { params.push(v); return `$${params.length}`; };
@@ -442,7 +442,7 @@ const filtrosLista = async (user, f = {}, { sinEstado = false, sinAlcance = fals
   if (f.hasta) where.push(`(s.created_at AT TIME ZONE 'America/Bogota')::date <= ${p(f.hasta)}::date`);
   if (f.min != null) where.push(`s.valor_solicitado >= ${p(f.min)}`);
   if (f.max != null) where.push(`s.valor_solicitado <= ${p(f.max)}`);
-  if (f.dias != null) where.push(`GREATEST(0, (CURRENT_DATE - (s.created_at AT TIME ZONE 'America/Bogota')::date)) >= ${p(f.dias)}`);
+  if (f.dias != null) where.push(`GREATEST(0, ((NOW() AT TIME ZONE 'America/Bogota')::date - (s.created_at AT TIME ZONE 'America/Bogota')::date)) >= ${p(f.dias)}`);
   if (f.accion) where.push(`s.estado IN ('en_tramite', 'devuelta')`);
   return { where: where.join(' AND '), params };
 };

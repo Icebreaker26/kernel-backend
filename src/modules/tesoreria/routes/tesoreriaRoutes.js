@@ -30,6 +30,8 @@ router.param('ordenId', (req, res, next, v) => (UUID.test(v) ? next() : res.stat
 
 // ── Desembolsos de crédito (órdenes de pago aprobadas por Control Interno) ────
 router.get ('/desembolsos',                    checkPermission('tesoreria', 'READ'),             desembolsos.listar);
+router.get ('/desembolsos/resumen',            checkPermission('tesoreria', 'READ'),             desembolsos.resumen);
+router.get ('/desembolsos/filtros',            checkPermission('tesoreria', 'READ'),             desembolsos.filtros);
 router.post('/desembolsos/:ordenId/pagar',     lockdownFinanciero, checkPermission('tesoreria', 'PAGAR_CREDITOS'), desembolsos.pagar);
 router.post('/desembolsos/:ordenId/devolver',  checkPermission('tesoreria', 'PAGAR_CREDITOS'),   desembolsos.devolver);
 

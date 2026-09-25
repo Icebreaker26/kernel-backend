@@ -6,7 +6,7 @@ import logger from '../../../config/logger.js';
 import { notificarPorPermiso, notificarUsuario } from '../../../services/notificationService.js';
 import { generarPresignedDescarga } from '../../../services/archivoService.js';
 import { ErrorNegocio } from '../http.js';
-import { evento } from './creditoService.js';
+import { evento, tieneAccion } from './creditoService.js';
 
 const norm = (v) => String(v ?? '').replace(/[\s.-]/g, '').toUpperCase();
 export const ultimos4 = (n) => (n ? String(n).slice(-4) : '');
@@ -62,9 +62,10 @@ const cargarCierre = async (id, db = pool, { bloquear = false } = {}) => {
 export const detalleRevision = async (user, id) => {
   const { solicitud: s, cierre: c } = await cargarCierre(id);
   if (!['completada', 'en_tesoreria', 'pagada'].includes(s.estado)) throw new ErrorNegocio(404, 'Este crédito no está en Control Interno');
-  const [{ rows: [aso] }, { rows: docs }, { rows: [aut] }, { rows: revisiones }, { rows: [orden] }, { rows: [cat] }, { rows: [cpor] }, { rows: eventos }] = await Promise.all([
+  const [{ rows: [aso] }, { rows: docs }, { rows: [aut] }, { rows: revisiones }, { rows: [orden] }, { rows: [cat] }, { rows: [cpor] }, { rows: eventos }, { rows: [ase] }] = await Promise.all([
     pool.query(`SELECT a.codigo, a.nombre, a.apellido, e.nombre AS empresa FROM asociados a LEFT JOIN empresas e ON e.codigo = a.empresa_dsto WHERE a.codigo = $1`, [s.asociado_codigo]),
-    pool.query(`SELECT d.id, d.clase, d.tipo, d.nombre, d.etapa, d.folio, d.proveedor, d.created_at FROM credito_documentos d
+    pool.query(`SELECT d.id, d.clase, d.tipo, d.nombre, d.etapa, d.folio, d.proveedor, d.created_at, ar.mime_type, ar.size_bytes, u.nombre AS subido_por_nombre
+                  FROM credito_documentos d JOIN archivos ar ON ar.id = d.archivo_id LEFT JOIN global_usuarios u ON u.id = d.subido_por
                  WHERE d.solicitud_id = $1 AND d.vigente AND d.clase IN ('firmado', 'adjunto', 'evidencia_externa') ORDER BY d.etapa, d.created_at`, [id]),
     pool.query(`SELECT estado, fecha_autorizacion, canal FROM credito_autorizaciones WHERE solicitud_id = $1 ORDER BY created_at DESC LIMIT 1`, [id]),
     pool.query(`SELECT r.id, r.decision, r.destino, r.motivo, r.created_at, u.nombre AS revisor FROM credito_revisiones_ci r LEFT JOIN global_usuarios u ON u.id = r.revisor_uuid WHERE r.solicitud_id = $1 ORDER BY r.created_at DESC`, [id]),
@@ -72,6 +73,7 @@ export const detalleRevision = async (user, id) => {
     pool.query('SELECT nombre FROM credito_categorias WHERE id = $1', [s.categoria_id]),
     pool.query('SELECT nombre FROM global_usuarios WHERE id = $1', [s.completada_por]),
     pool.query(`SELECT ev.id, ev.tipo, ev.detalle, ev.autor_tipo, ev.created_at, u.nombre AS autor_nombre FROM credito_eventos ev LEFT JOIN global_usuarios u ON u.id = ev.autor_uuid WHERE ev.solicitud_id = $1 ORDER BY ev.created_at, ev.id`, [id]),
+    pool.query('SELECT nombre FROM global_usuarios WHERE id = $1', [s.asesor_uuid]),
   ]);
   if (!c) throw new ErrorNegocio(409, 'El crédito no tiene cierre de Cartera');
   const claves = itemsAplicables({ solicitud: s, cierre: c });
@@ -79,7 +81,8 @@ export const detalleRevision = async (user, id) => {
   const bloqueo = s.estado !== 'completada' ? 'Este crédito ya no está pendiente de revisión' : (s.completada_por === user.id ? 'Tú completaste este crédito en Cartera: lo debe revisar otra persona' : null);
   return {
     id: s.id, radicado: s.radicado, estado: s.estado, categoria: cat?.nombre, empresa: aso?.empresa, forma_desembolso: s.forma_desembolso, modalidad_firma: s.modalidad_firma,
-    completada_at: s.completada_at, completada_por_nombre: cpor?.nombre,
+    completada_at: s.completada_at, completada_por_nombre: cpor?.nombre, entregada_at: s.entregada_at, recibida_at: s.recibida_at, radicada_at: s.created_at,
+    asesor_nombre: ase?.nombre, proveedor_externo: s.proveedor_externo ?? null, observaciones: s.observaciones ?? null,
     asociado: { codigo: s.asociado_codigo, nombre },
     valores: {
       valor_solicitado: Number(s.valor_solicitado), aval_porcentaje: c.con_aval ? Number(c.aval_porcentaje) : null, aval_valor: Number(c.aval_valor),
@@ -162,21 +165,88 @@ export const revisar = async (user, id, { decision, lista = {}, destino, motivo 
 };
 
 // ── Tesorería ─────────────────────────────────────────────────────────────────
+const HOY_BOGOTA = "(NOW() AT TIME ZONE 'America/Bogota')::date";
+const DIA = (col) => `(${col} AT TIME ZONE 'America/Bogota')::date`;
+// Días que lleva esperando (pendiente) o que esperó hasta pagarse (pagada); una orden devuelta no tiene un cierre registrado
+const DIAS_ESPERA = `CASE WHEN o.estado = 'pendiente' THEN GREATEST(0, ${HOY_BOGOTA} - ${DIA('o.aprobada_at')})
+                         WHEN o.estado = 'pagada' THEN GREATEST(0, ${DIA('o.pagada_at')} - ${DIA('o.aprobada_at')}) END`;
 const COLUMNAS_ORDEN = `
   o.id, o.solicitud_id, o.estado, o.radicado, o.asociado_codigo, o.asociado_nombre, o.forma_pago, o.monto, o.banco, o.tipo_cuenta, o.numero_cuenta,
   o.titular_nombre, o.titular_documento, o.titular_es_asociado, o.aprobada_at, o.fecha_pago, o.referencia_pago, o.pagada_at, o.anulada_motivo,
-  o.cuenta_origen_id, ct.nombre AS cuenta_origen_nombre, ua.nombre AS aprobada_por_nombre, up.nombre AS pagada_por_nombre,
-  GREATEST(0, (CURRENT_DATE - (o.aprobada_at AT TIME ZONE 'America/Bogota')::date)) AS dias_espera`;
+  o.cuenta_origen_id, ct.nombre AS cuenta_origen_nombre, ua.nombre AS aprobada_por_nombre, up.nombre AS pagada_por_nombre, o.aprobada_por,
+  s.empresa_codigo, e.nombre AS empresa_nombre, ${DIAS_ESPERA} AS dias_espera`;
 const FROM_ORDEN = `
   FROM credito_ordenes_pago o
+  JOIN credito_solicitudes s ON s.id = o.solicitud_id
+  JOIN empresas e ON e.codigo = s.empresa_codigo
   LEFT JOIN tesoreria_cuentas ct ON ct.id = o.cuenta_origen_id
   LEFT JOIN global_usuarios ua ON ua.id = o.aprobada_por
   LEFT JOIN global_usuarios up ON up.id = o.pagada_por`;
+const ORDEN_SQL_ORDENES = { aprobada: 'o.aprobada_at', monto: 'o.monto', dias: 'o.aprobada_at', asociado: 'o.asociado_nombre', radicado: 'o.radicado', pago: 'o.fecha_pago' };
+export const LIMITE_ORDENES = 500;
 
-export const listarOrdenes = async ({ estado = 'pendiente' } = {}) => {
-  if (!['pendiente', 'pagada', 'anulada'].includes(estado)) throw new ErrorNegocio(400, 'Estado inválido');
-  const { rows } = await pool.query(`SELECT ${COLUMNAS_ORDEN} ${FROM_ORDEN} WHERE o.estado = $1 ORDER BY o.aprobada_at ASC LIMIT 500`, [estado]);
-  return rows;
+/** WHERE de la lista. `sinEstado` lo omite (para los contadores de cada pestaña). */
+const filtrosOrdenes = (f = {}, { sinEstado = false } = {}) => {
+  const where = ['1 = 1'];
+  const params = [];
+  const p = (v) => { params.push(v); return `$${params.length}`; };
+  if (!sinEstado && f.estado && f.estado !== 'todas') where.push(`o.estado = ${p(f.estado)}`);
+  if (f.q && String(f.q).trim().length >= 2) {
+    const n = p(`%${String(f.q).trim()}%`);
+    where.push(`(o.radicado ILIKE ${n} OR o.asociado_codigo ILIKE ${n} OR o.asociado_nombre ILIKE ${n} OR o.titular_nombre ILIKE ${n} OR o.referencia_pago ILIKE ${n})`);
+  }
+  if (f.forma) where.push(`o.forma_pago = ${p(f.forma)}`);
+  if (f.empresa) where.push(`s.empresa_codigo = ${p(f.empresa)}`);
+  if (f.aprobador) where.push(`o.aprobada_por = ${p(f.aprobador)}`);
+  if (f.cuenta) where.push(`o.cuenta_origen_id = ${p(f.cuenta)}`);
+  if (f.desde) where.push(`${DIA('o.aprobada_at')} >= ${p(f.desde)}::date`);
+  if (f.hasta) where.push(`${DIA('o.aprobada_at')} <= ${p(f.hasta)}::date`);
+  if (f.min != null) where.push(`o.monto >= ${p(f.min)}`);
+  if (f.max != null) where.push(`o.monto <= ${p(f.max)}`);
+  if (f.dias != null) where.push(`(${DIAS_ESPERA}) >= ${p(f.dias)}`);
+  if (f.tercero) where.push('o.titular_es_asociado = false');
+  return { where: where.join(' AND '), params };
+};
+
+export const listarOrdenes = async (user, f = {}) => {
+  if (f.estado && !['pendiente', 'pagada', 'anulada', 'todas'].includes(f.estado)) throw new ErrorNegocio(400, 'Estado inválido');
+  const estado = f.estado ?? 'pendiente';
+  const { where, params } = filtrosOrdenes({ ...f, estado });
+  const columna = ORDEN_SQL_ORDENES[f.orden];
+  // "dias" ordena por espera: la aprobación más vieja es la de más días
+  const dir = f.orden === 'dias' ? (f.dir === 'asc' ? 'DESC' : 'ASC') : (f.dir === 'asc' ? 'ASC' : 'DESC');
+  // Sin orden elegido: lo por pagar, lo más antiguo primero (FIFO); lo demás, lo más reciente primero
+  const orden = columna ? `${columna} ${dir}`
+    : estado === 'pendiente' ? 'o.aprobada_at ASC'
+      : estado === 'todas' ? "CASE WHEN o.estado = 'pendiente' THEN o.aprobada_at END ASC NULLS LAST, COALESCE(o.pagada_at, o.aprobada_at) DESC"
+        : 'COALESCE(o.pagada_at, o.aprobada_at) DESC';
+  const { rows } = await pool.query(`SELECT ${COLUMNAS_ORDEN} ${FROM_ORDEN} WHERE ${where} ORDER BY ${orden}, o.id LIMIT ${LIMITE_ORDENES}`, params);
+  // Quién puede pagar cada orden: hay que tener el permiso y no haber sido quien la aprobó en Control Interno (segregación de funciones)
+  const tienePermiso = await tieneAccion(user, 'tesoreria', 'PAGAR_CREDITOS');
+  return rows.map(({ aprobada_por: aprobadaPor, ...o }) => {
+    const bloqueo = o.estado !== 'pendiente' ? null
+      : !tienePermiso ? 'No tienes el permiso para pagar desembolsos'
+        : aprobadaPor === user.id ? 'Tú aprobaste este crédito en Control Interno: lo debe pagar otra persona' : null;
+    // Devolver una orden que no se puede pagar solo pide el permiso: quien la aprobó también puede señalar que hay un problema
+    return { ...o, puede_pagar: o.estado === 'pendiente' && !bloqueo, puede_devolver: o.estado === 'pendiente' && tienePermiso, motivo_bloqueo: bloqueo };
+  });
+};
+
+/** Conteo y monto por estado con los mismos filtros (sin estado): contadores de las pestañas y columnas del tablero */
+export const resumenOrdenes = async (f = {}) => {
+  const { where, params } = filtrosOrdenes(f, { sinEstado: true });
+  const { rows } = await pool.query(`SELECT o.estado, COUNT(*)::int AS n, COALESCE(SUM(o.monto), 0)::numeric AS valor ${FROM_ORDEN} WHERE ${where} GROUP BY o.estado`, params);
+  return { limite: LIMITE_ORDENES, estados: rows.map((r) => ({ estado: r.estado, n: r.n, valor: Number(r.valor) })) };
+};
+
+/** Empresas, quienes aprobaron y cuentas de origen que aparecen en las órdenes, para armar los filtros */
+export const opcionesOrdenes = async () => {
+  const [{ rows: empresas }, { rows: aprobadores }, { rows: cuentas }] = await Promise.all([
+    pool.query(`SELECT DISTINCT e.codigo, e.nombre ${FROM_ORDEN} ORDER BY e.nombre`),
+    pool.query(`SELECT DISTINCT ua.id, ua.nombre ${FROM_ORDEN} WHERE ua.id IS NOT NULL ORDER BY ua.nombre`),
+    pool.query(`SELECT DISTINCT ct.id, ct.nombre ${FROM_ORDEN} WHERE ct.id IS NOT NULL ORDER BY ct.nombre`),
+  ]);
+  return { empresas, aprobadores, cuentas };
 };
 
 const cargarOrden = async (id, db = pool, bloquear = false) => {
@@ -200,6 +270,8 @@ export const pagar = async (user, id, { cuenta_origen_id: cuentaId, referencia, 
     if (cuenta.tipo === 'tarjeta') throw new ErrorNegocio(400, 'No se paga un desembolso con una tarjeta de crédito');
     if (o.forma_pago !== 'efectivo' && cuenta.tipo !== 'banco') throw new ErrorNegocio(400, 'Una transferencia o un cheque salen de una cuenta bancaria de la cooperativa');
     if (fechaPago > new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })) throw new ErrorNegocio(400, 'La fecha de pago no puede ser futura');
+    const diaAprobacion = new Date(o.aprobada_at).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    if (fechaPago < diaAprobacion) throw new ErrorNegocio(400, `La fecha de pago no puede ser anterior a la aprobación de Control Interno (${diaAprobacion})`);
     const { rowCount: repetida } = await cn.query(
       `SELECT 1 FROM credito_ordenes_pago WHERE estado = 'pagada' AND cuenta_origen_id = $1 AND lower(referencia_pago) = lower($2)`, [cuentaId, referencia]);
     if (repetida) throw new ErrorNegocio(409, 'Esa referencia ya se usó en otro desembolso desde esta cuenta');

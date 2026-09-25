@@ -33,6 +33,8 @@ router.put('/datos-bancarios/:id/rechazar',       checkPermission('control_inter
 
 // ── Créditos completados por Cartera (bandeja) ──────────────────────────────
 router.get('/creditos',                       checkPermission('control_interno', 'READ'), creditosCI.listar);
+router.get('/creditos/resumen',               checkPermission('control_interno', 'READ'), creditosCI.resumen);
+router.get('/creditos/filtros',               checkPermission('control_interno', 'READ'), creditosCI.filtros);
 const alias = (req, res, next) => { req.params.id = req.params.creditoId; next(); };
 router.get('/creditos/:creditoId',             checkPermission('control_interno', 'READ'), alias, creditosCI.detalle);
 router.get('/creditos/:creditoId/certificado', checkPermission('control_interno', 'READ'), alias, creditosCI.certificado);

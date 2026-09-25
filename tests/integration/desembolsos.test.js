@@ -209,6 +209,15 @@ describe('Control Interno — revisión', () => {
     expect(d.documentos.some((x) => x.tipo === 'comprobante_aprobacion' && x.etapa === 'cartera')).toBe(true);
   });
 
+  test('el detalle trae lo necesario para mostrar el avance: fechas de cada etapa, asesor y datos de cada documento', async () => {
+    const d = await detalleCI(id);
+    expect(d).toMatchObject({ asesor_nombre: expect.any(String), entregada_at: expect.any(String), recibida_at: expect.any(String), radicada_at: expect.any(String), completada_at: expect.any(String) });
+    expect(new Date(d.entregada_at) <= new Date(d.recibida_at)).toBe(true);
+    expect(new Date(d.recibida_at) <= new Date(d.completada_at)).toBe(true);
+    const doc = d.documentos.find((x) => x.tipo === 'comprobante_aprobacion');
+    expect(doc).toMatchObject({ mime_type: 'application/pdf', size_bytes: expect.any(Number), subido_por_nombre: expect.any(String) });
+  });
+
   test('si el titular no es el asociado se agrega la confirmación de tercero y se marca', async () => {
     const otro = await crearCompletado(A.a4, { cuenta: { titular_documento: '1234567', titular_nombre: 'Luis Ruiz' } });
     const d = await detalleCI(otro);
@@ -406,6 +415,14 @@ describe('Tesorería — pagar', () => {
   test('no acepta una fecha futura', async () => {
     const manana = new Date(Date.now() + 2 * 864e5).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
     expect((await pagar(orden.id, pagoValido({ fecha_pago: manana }))).status).toBe(400);
+  });
+
+  test('no acepta una fecha anterior a la aprobación de Control Interno (no se paga antes de aprobar)', async () => {
+    const antes = new Date(Date.now() - 3 * 864e5).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const r = await pagar(orden.id, pagoValido({ fecha_pago: antes }));
+    expect(r.status).toBe(400);
+    expect(r.body.error).toMatch(/anterior a la aprobación de Control Interno/);
+    expect((await pool.query('SELECT estado FROM credito_ordenes_pago WHERE id = $1', [orden.id])).rows[0].estado).toBe('pendiente');
   });
 
   test('no se paga en un período contable cerrado', async () => {

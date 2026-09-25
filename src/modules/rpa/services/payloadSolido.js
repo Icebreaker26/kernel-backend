@@ -20,6 +20,7 @@
 
 export const REGLAS_FIJAS = Object.freeze({
   tipo_correo: 'EXTERNO',
+  nat_juridica: 'Natural',        // combo Natjur (1= Natural. / 2= Juridica.); SOLIDO lo deja en Juridica por defecto y los asociados son personas
   ciiu: '10',
   pais_nacimiento: '54',
   clase: 'ASOCIADO',
@@ -112,6 +113,7 @@ export const construirPayload = ({ v, p, asesorCedula, eq, hoy = fecha(new Date(
     factura: REGLAS_FIJAS.factura,
     direccion_envio: REGLAS_FIJAS.direccion_envio,
     tipo_correo: REGLAS_FIJAS.tipo_correo,
+    nat_juridica: REGLAS_FIJAS.nat_juridica,
     ciiu: REGLAS_FIJAS.ciiu,
     ciudad_nacimiento: codigo('ciudad_nacimiento', 'ciudad', v.ciudad_nacimiento, v.departamento_nacimiento),
     pais_nacimiento: REGLAS_FIJAS.pais_nacimiento,

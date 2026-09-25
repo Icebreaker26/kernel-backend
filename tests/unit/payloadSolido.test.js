@@ -29,7 +29,7 @@ describe('payloadSolido — reglas fijas', () => {
 
   test('Página 1: reglas fijas de la cooperativa', () => {
     expect(payload.pagina1).toMatchObject({
-      tipo_correo: 'EXTERNO', ciiu: '10', pais_nacimiento: '54', clase: 'ASOCIADO', clase_dscto: 'Nomina',
+      tipo_correo: 'EXTERNO', nat_juridica: 'Natural', ciiu: '10', pais_nacimiento: '54', clase: 'ASOCIADO', clase_dscto: 'Nomina',
       grupo_etnico: 'NINGUNO', factura: 'NO', direccion_envio: 'email', asesor: '52111222',
     });
   });

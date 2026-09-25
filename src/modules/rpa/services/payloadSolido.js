@@ -23,6 +23,7 @@ export const REGLAS_FIJAS = Object.freeze({
   nat_juridica: 'Natural',        // combo Natjur (1= Natural. / 2= Juridica.); SOLIDO lo deja en Juridica por defecto y los asociados son personas
   ciiu: '10',
   pais_nacimiento: '54',
+  pais_residencia: '54',          // SOLIDO lo exige al guardar ("Código de país de residencia no existe o esta vacío"); Colombia
   clase: 'ASOCIADO',
   clase_dscto_nomina: 'Nomina',   // empresa con descuento por nómina (tiene equivalencia)
   clase_dscto_caja: 'Caja',       // particular: empresa por defecto
@@ -117,6 +118,7 @@ export const construirPayload = ({ v, p, asesorCedula, eq, hoy = fecha(new Date(
     ciiu: REGLAS_FIJAS.ciiu,
     ciudad_nacimiento: codigo('ciudad_nacimiento', 'ciudad', v.ciudad_nacimiento, v.departamento_nacimiento),
     pais_nacimiento: REGLAS_FIJAS.pais_nacimiento,
+    pais_residencia: REGLAS_FIJAS.pais_residencia,
     estrato: v.estrato ?? null,
     nivel_academico: v.nivel_academico || null,
     cabeza_de_familia: v.cabeza_de_hogar ?? null,

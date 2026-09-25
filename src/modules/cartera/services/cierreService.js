@@ -47,8 +47,10 @@ const cargarParaCierre = async (user, id, { editar = false } = {}) => {
 
 const documentosCartera = async (solicitudId, db = pool) => {
   const { rows } = await db.query(
-    `SELECT d.id, d.clase, d.tipo, d.nombre, d.sha256, d.borrador_id, d.folio, d.vigente, d.archivo_id, d.created_at
-       FROM credito_documentos d WHERE d.solicitud_id = $1 AND d.etapa = 'cartera' ORDER BY d.created_at`, [solicitudId]);
+    `SELECT d.id, d.clase, d.tipo, d.nombre, d.sha256, d.borrador_id, d.folio, d.vigente, d.archivo_id, d.created_at,
+            ar.mime_type, ar.size_bytes, u.nombre AS subido_por_nombre
+       FROM credito_documentos d JOIN archivos ar ON ar.id = d.archivo_id LEFT JOIN global_usuarios u ON u.id = d.subido_por
+      WHERE d.solicitud_id = $1 AND d.etapa = 'cartera' ORDER BY d.created_at`, [solicitudId]);
   return rows;
 };
 
@@ -83,7 +85,7 @@ export const obtenerCierre = async (user, id) => {
   return {
     solicitud_id: s.id, estado: s.estado, radicado: s.radicado, valor_solicitado: Number(s.valor_solicitado), firma_externa: externa,
     forma_desembolso: s.forma_desembolso, asociado: { codigo: s.asociado_codigo },
-    tarifa_firma_electronica: tarifa, cierre: previo, documentos: docs, faltantes,
+    tarifa_firma_electronica: tarifa, cierre: previo, cierre_guardado: !!cierre, documentos: docs, faltantes,
     sellos_aplicables: sellosAplicables(previo, s),
     puede_editar: s.estado === 'recibida', puede_completar: s.estado === 'recibida' && faltantes.length === 0,
   };

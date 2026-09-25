@@ -23,6 +23,8 @@ router.get('/reportes/firmas-electronicas',  checkPermission('cartera', 'READ'),
 router.get('/parametros',                    checkPermission('cartera', 'READ'),       ctrl.obtenerParametros);
 router.put('/parametros/tarifa-firma',       checkPermission('cartera', 'CONFIGURAR'), ctrl.guardarTarifa);
 
+router.get ('/resumen',                 checkPermission('cartera', 'READ'),  ctrl.resumen);
+router.get ('/filtros',                 checkPermission('cartera', 'READ'),  ctrl.filtros);
 router.get ('/',                        checkPermission('cartera', 'READ'),  ctrl.listar);
 router.get ('/:id',                     checkPermission('cartera', 'READ'),  ctrl.obtener);
 router.get ('/:id/archivos/:archivoId/url', checkPermission('cartera', 'READ'), ctrl.urlArchivo);

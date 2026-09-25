@@ -86,6 +86,7 @@ router.get ('/config/validacion-voz',          checkPermission('captacion', 'REA
 router.put ('/config/validacion-voz',          checkPermission('captacion', 'CONFIGURAR'), ctrl.actualizarExigenciaVoz);
 
 router.get ('/vinculaciones',                  checkPermission('captacion', 'READ'),     ctrl.listarVinculaciones);
+router.get ('/vinculaciones-alcance',          checkPermission('captacion', 'READ'),     ctrl.miAlcanceVinculaciones);
 router.get ('/vinculaciones/:id',              checkPermission('captacion', 'READ'),     ctrl.getVinculacion);
 // Consulta en listas restrictivas y fuentes abiertas: la hace el asesor; el Oficial de Cumplimiento valida que se hizo bien
 router.get ('/vinculaciones/:id/consulta-listas', checkPermission('captacion', 'READ'),  listas.getConsultaListas);

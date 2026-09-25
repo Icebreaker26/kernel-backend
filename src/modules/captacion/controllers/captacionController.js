@@ -8,7 +8,7 @@ import { validarArchivo, generarPresignedUpload, guardarArchivo, generarPresigne
 import logger from '../../../config/logger.js';
 import { TARIFAS } from '../tarifas.js';
 import { generarFormatoVinculacion } from '../services/formatoVinculacionPdf.js';
-import { SQL_SIN_IDENTIFICAR } from '../services/captacionService.js';
+import { SQL_SIN_IDENTIFICAR, veTodasLasVinculaciones, ambitoLectura } from '../services/captacionService.js';
 import { canonicalizar, sha256 } from '../../../services/hashCanonico.js';
 import { registrarTexto } from '../services/textosConsentimiento.js';
 import { subsanacionAbierta, archivarFirma, textoSubsanacion } from '../services/subsanacion.js';
@@ -272,10 +272,11 @@ export const whatsappUrl = async (req, res, next) => {
 
 export const listarVinculaciones = async (req, res, next) => {
   try {
-    // ?alcance=todos → cualquier usuario con READ ve las de todos los asesores (solo el listado;
-    // el detalle sigue limitado al asesor dueño o al admin). ?alcance=mias → el admin ve solo las suyas.
+    // ?alcance=todos → las de todos los asesores, solo si tiene captacion READ_ALL (o es admin); si no, las suyas.
+    // ?alcance=mias → solo las suyas (útil para el admin, que por defecto ve todas).
     const { alcance } = req.query;
-    const ambito = alcance === 'todos' ? null : alcance === 'mias' ? req.user.id : ambitoAsesor(req);
+    const ambito = alcance === 'mias' ? req.user.id
+      : alcance === 'todos' && await veTodasLasVinculaciones(req.user) ? null : ambitoAsesor(req);
     const { rows } = await pool.query(
       `SELECT v.id, v.estado, v.created_at, v.updated_at,
               p.nombres, p.apellidos, p.cedula, p.celular, p.empresa_codigo,
@@ -297,11 +298,16 @@ export const listarVinculaciones = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// Qué puede ver el usuario en Vinculaciones (el frontend muestra el botón "Ver las de todos" solo si puede)
+export const miAlcanceVinculaciones = async (req, res, next) => {
+  try { res.json({ ve_todas: await veTodasLasVinculaciones(req.user) }); } catch (err) { next(err); }
+};
+
 export const getVinculacion = async (req, res, next) => {
   try {
     const { rows: [v] } = await pool.query(
       `SELECT v.*,
-              p.nombres, p.apellidos, p.cedula, p.celular, p.correo, p.empresa_codigo,
+              p.nombres, p.apellidos, p.cedula, p.celular, p.correo, p.empresa_codigo, p.asesor_uuid,
               p.habeas_data_at, p.habeas_data_origen, p.habeas_data_version,
               e.nombre AS empresa_nombre,
               (SELECT json_agg(json_build_object('seccion', ev.seccion, 'autor_tipo', ev.autor_tipo, 'created_at', ev.created_at)
@@ -323,9 +329,9 @@ export const getVinculacion = async (req, res, next) => {
          LEFT JOIN captacion_beneficiarios b ON b.vinculacion_id = v.id
          LEFT JOIN captacion_referencias r ON r.vinculacion_id = v.id
         WHERE v.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND v.is_active = true
-        GROUP BY v.id, p.nombres, p.apellidos, p.cedula, p.celular, p.correo,
+        GROUP BY v.id, p.nombres, p.apellidos, p.cedula, p.celular, p.correo, p.asesor_uuid,
                  p.empresa_codigo, p.habeas_data_at, p.habeas_data_origen, p.habeas_data_version, e.nombre`,
-      [req.params.id, ambitoAsesor(req)]
+      [req.params.id, await ambitoLectura(req)]
     );
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
     res.json({ ...v, tarifas: TARIFAS });
@@ -389,7 +395,7 @@ const sellarFormato = async (vinculacionId, { reemplazar = false, correccionId =
 // dueño, sin caché, y cada descarga queda en captacion_eventos.
 export const descargarFormato = async (req, res, next) => {
   try {
-    const v = await cargarDatosFormato(req.params.id, ambitoAsesor(req));
+    const v = await cargarDatosFormato(req.params.id, await ambitoLectura(req));
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
 
     let pdf = null;
@@ -439,7 +445,7 @@ export const getDocumentosVinculacion = async (req, res, next) => {
          FROM captacion_vinculaciones v
          JOIN captacion_prospectos p ON p.id = v.prospecto_id
         WHERE v.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND v.is_active = true`,
-      [req.params.id, ambitoAsesor(req)]
+      [req.params.id, await ambitoLectura(req)]
     );
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
 
@@ -547,7 +553,7 @@ export const getCorrecciones = async (req, res, next) => {
   try {
     const { rows: [v] } = await pool.query(
       `SELECT v.id FROM captacion_vinculaciones v JOIN captacion_prospectos p ON p.id = v.prospecto_id
-        WHERE v.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND v.is_active = true`, [req.params.id, ambitoAsesor(req)]);
+        WHERE v.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND v.is_active = true`, [req.params.id, await ambitoLectura(req)]);
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
     const { rows } = await pool.query(
       `SELECT c.id, c.antes, c.despues, c.motivo, c.created_at, u.nombre AS asesor_nombre
@@ -678,7 +684,7 @@ export const getSubsanacion = async (req, res, next) => {
     const { rows: [v] } = await pool.query(
       `SELECT v.id, p.token FROM captacion_vinculaciones v JOIN captacion_prospectos p ON p.id = v.prospecto_id
         WHERE v.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND v.is_active = true`,
-      [req.params.id, ambitoAsesor(req)]
+      [req.params.id, await ambitoLectura(req)]
     );
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
     const [abierta, { rows: historial }, { rows: [firmas] }] = await Promise.all([
@@ -759,7 +765,7 @@ export const getValidacionVoz = async (req, res, next) => {
       `SELECT v.id, v.seccion_firma_at, v.origen_solicitud, p.celular
          FROM captacion_vinculaciones v JOIN captacion_prospectos p ON p.id = v.prospecto_id
         WHERE v.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND v.is_active = true`,
-      [req.params.id, ambitoAsesor(req)]
+      [req.params.id, await ambitoLectura(req)]
     );
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
     const [exigida, vigente, { rows: historial }] = await Promise.all([

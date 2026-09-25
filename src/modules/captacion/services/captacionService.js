@@ -11,6 +11,21 @@ import logger from '../../../config/logger.js';
 export const SQL_SIN_IDENTIFICAR = `(p.cedula LIKE 'STAND_%' AND p.nombres = '')`;
 
 /**
+ * Ver y abrir (solo lectura) las vinculaciones de todos los asesores: el admin o quien tenga captacion READ_ALL.
+ * Sin eso, el asesor solo ve y abre las que él captó. Las acciones sobre la solicitud no cambian: siguen siendo del dueño.
+ */
+export const veTodasLasVinculaciones = async (user) => {
+  if (user.rol === 'admin') return true;
+  const { rowCount } = await pool.query(
+    `SELECT 1 FROM permisos p JOIN modulos m ON m.id = p.modulo_id JOIN acciones a ON a.id = p.accion_id
+      WHERE p.usuario_uuid = $1 AND m.nombre = 'captacion' AND a.nombre = 'READ_ALL'`, [user.id]);
+  return rowCount > 0;
+};
+
+/** Filtro de asesor para leer una vinculación: null = cualquiera; si no, el uuid del asesor dueño. */
+export const ambitoLectura = async (req) => ((await veTodasLasVinculaciones(req.user)) ? null : req.user.id);
+
+/**
  * Da de baja (borrado lógico) los prospectos sin identificar que llevan más de `horas` sin
  * que nadie los complete. Solo toca los que no tienen ninguna vinculación iniciada.
  * `asesorUuid` limita el alcance (lo usan los tests); el programador lo llama sin él.

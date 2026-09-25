@@ -1548,4 +1548,52 @@ describe('Captacion — Enlace público para grupos', () => {
     expect(otra.body.token).toBe(token);
     expect((await request(app).get(`/api/captacion/pub/enlace/${token}`)).status).toBe(200);
   });
+
+  describe('enlace libre (la persona elige su empresa)', () => {
+    let libre;
+
+    test('se crea aparte del de la empresa, es uno por asesor e idempotente', async () => {
+      const a = await pedir({ libre: true });
+      expect(a.status).toBe(200);
+      libre = a.body.token;
+      expect(libre).not.toBe(token);
+      expect((await pedir({ libre: true })).body.token).toBe(libre);
+      const { rows } = await pool.query(
+        `SELECT 1 FROM captacion_enlaces_publicos WHERE asesor_uuid = $1 AND empresa_codigo IS NULL`, [asesorUuid]);
+      expect(rows).toHaveLength(1);
+    });
+
+    test('GET muestra el asesor y la lista de empresas, sin empresa fija', async () => {
+      const res = await request(app).get(`/api/captacion/pub/enlace/${libre}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ pide_empresa: true, asesor_nombre: 'Asesor Test' });
+      expect(res.body.empresas.some((e) => e.codigo === empresaCodigo)).toBe(true);
+      expect(Object.keys(res.body).sort()).toEqual(['asesor_nombre', 'empresas', 'pide_empresa', 'tarifas']);
+    });
+
+    test('iniciar exige una empresa válida', async () => {
+      expect((await request(app).post(`/api/captacion/pub/enlace/${libre}/iniciar`).send({})).status).toBe(400);
+      expect((await request(app).post(`/api/captacion/pub/enlace/${libre}/iniciar`).send({ empresa_codigo: 'NO-EXISTE' })).status).toBe(400);
+    });
+
+    test('iniciar crea el prospecto con la empresa elegida y a nombre del asesor del enlace', async () => {
+      const res = await request(app).post(`/api/captacion/pub/enlace/${libre}/iniciar`).send({ empresa_codigo: empresaCodigo });
+      expect(res.status).toBe(201);
+      const { rows: [p] } = await pool.query(`SELECT asesor_uuid, empresa_codigo FROM captacion_prospectos WHERE token = $1`, [res.body.token]);
+      expect(p).toEqual({ asesor_uuid: asesorUuid, empresa_codigo: empresaCodigo });
+    });
+
+    test('renovar y desactivar funcionan con el enlace libre sin tocar el de la empresa', async () => {
+      const r = await pedir({ libre: true, renovar: true });
+      expect(r.body.token).not.toBe(libre);
+      expect((await request(app).get(`/api/captacion/pub/enlace/${libre}`)).status).toBe(404);
+      libre = r.body.token;
+
+      const ag = agent();
+      await loginAsesor(ag);
+      expect((await ag.delete('/api/captacion/enlaces-publicos/libre')).status).toBe(200);
+      expect((await request(app).get(`/api/captacion/pub/enlace/${libre}`)).status).toBe(404);
+      expect((await request(app).get(`/api/captacion/pub/enlace/${token}`)).status).toBe(200);   // el de la empresa sigue
+    });
+  });
 });

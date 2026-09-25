@@ -88,7 +88,7 @@ export const ESTADOS_SOLICITUD = ['en_tramite', 'entregada', 'recibida', 'devuel
 const numeroOpc = z.preprocess((v) => (v === '' || v == null ? undefined : Number(v)), z.number().min(0).max(9_999_999_999).optional());
 const bool1 = z.preprocess((v) => v === '1' || v === 'true' || v === true, z.boolean());
 export const ORDEN_LISTA = ['fecha', 'valor', 'dias', 'estado', 'asociado', 'radicado'];
-const listarBase = z.object({
+export const listarBase = z.object({
   estado:    z.preprocess(vacioAUndef, z.enum(ESTADOS_SOLICITUD).optional()),
   q:         z.preprocess(vacioAUndef, z.string().trim().max(80).optional()),
   todas:     bool1.optional(),
@@ -106,7 +106,7 @@ const listarBase = z.object({
   orden:     z.preprocess(vacioAUndef, z.enum(ORDEN_LISTA).optional()),
   dir:       z.preprocess(vacioAUndef, z.enum(['asc', 'desc']).optional()),
 });
-const validarRangos = (d, ctx) => {
+export const validarRangos = (d, ctx) => {
   if (d.desde && d.hasta && d.desde > d.hasta) ctx.addIssue({ code: 'custom', path: ['hasta'], message: 'La fecha final es anterior a la inicial' });
   if (d.min != null && d.max != null && d.min > d.max) ctx.addIssue({ code: 'custom', path: ['max'], message: 'El valor máximo es menor que el mínimo' });
 };
@@ -116,4 +116,15 @@ export const listarSchema = listarBase.strict().superRefine(validarRangos);
 export const TABS_CARTERA = ['entregadas', 'recibidas', 'completadas', 'devueltas', 'por_llegar', 'todas'];
 export const listarCarteraSchema = listarBase.omit({ estado: true, todas: true, accion: true })
   .extend({ tab: z.preprocess(vacioAUndef, z.enum(TABS_CARTERA).default('entregadas')) })
+  .strict().superRefine(validarRangos);
+
+// Bandeja de Control Interno: la pestaña define el estado; Control Interno ve a todos los asesores y "requiere acción" no aplica.
+// "dias" aquí son los días que lleva el crédito en Control Interno (desde que Cartera lo completó).
+export const TABS_CI = ['por_revisar', 'en_tesoreria', 'pagados', 'devueltos', 'todas'];
+export const ORDEN_CI = ['fecha', 'valor', 'desembolso', 'dias', 'asociado', 'radicado'];
+export const listarCISchema = listarBase.omit({ estado: true, todas: true, accion: true, orden: true })
+  .extend({
+    tab:   z.preprocess(vacioAUndef, z.enum(TABS_CI).default('por_revisar')),
+    orden: z.preprocess(vacioAUndef, z.enum(ORDEN_CI).optional()),
+  })
   .strict().superRefine(validarRangos);

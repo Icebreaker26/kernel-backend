@@ -1,7 +1,8 @@
 import request from 'supertest';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, StandardFonts } from 'pdf-lib';
+import { createCanvas } from '@napi-rs/canvas';
 import { createApp } from '../../src/createApp.js';
 import pool from '../../src/db/database.js';
 
@@ -31,18 +32,19 @@ const login = async (quien) => {
 };
 
 // Deja una solicitud en estado "recibida" (firma externa, sin autorización de empresa, desembolso por cheque)
-const llegarARecibida = async (asociado, extra = {}) => {
+const llegarARecibida = async (asociado, { certificado, ...extra } = {}) => {
   const res = await ag.asesor.post('/api/creditos').send({
     asociado_codigo: asociado, categoria_id: categoriaId, canal_origen: 'presencial', valor_solicitado: 5000000,
     cuotas: 24, cuota_mensual: 250000, forma_desembolso: 'cheque', modalidad_firma: 'externa', proveedor_externo: 'Proveedor X', ...extra,
   });
-  expect(res.status).toBe(201);
+  expect([res.status, res.body.error]).toEqual([201, undefined]);   // si falla, se ve el motivo y no solo el código
   const id = res.body.solicitud.id;
   const b = await ag.asesor.post(`/api/creditos/${id}/documentos/borrador`).field('tipo', 'pagare').attach('archivo', await pdfReal(2), 'pagare.pdf');
   expect(b.status).toBe(201);
   expect((await ag.asesor.post(`/api/creditos/${id}/firma-externa`).field('borrador_id', b.body.id).field('proveedor', 'Proveedor X')
     .field('id_transaccion', 'TX-1').field('fecha_firma', '2026-09-20').attach('archivo', await pdfReal(2), 'firmado.pdf')).status).toBe(201);
   expect((await ag.asesor.post(`/api/creditos/${id}/documentos/adjunto`).field('tipo', 'desprendible_nomina').attach('archivo', await pdfReal(1), 'desp.pdf')).status).toBe(201);
+  if (certificado) expect((await ag.asesor.post(`/api/creditos/${id}/documentos/adjunto`).field('tipo', 'certificado_bancario').attach('archivo', certificado, certificado[0] === 0x89 ? 'certificado.png' : 'certificado.pdf')).status).toBe(201);
   expect((await ag.asesor.post(`/api/creditos/${id}/entregar`)).status).toBe(200);
   expect((await ag.cartera.post(`/api/cartera/${id}/recibir`)).status).toBe(200);
   return id;
@@ -481,5 +483,115 @@ describe('Cierre de Cartera — Reportes mensuales', () => {
     const r = await ag.lector.get(`/api/cartera/reportes/firmas-electronicas?mes=${mes}&formato=csv`);
     expect(r.headers['content-disposition']).toContain(`firmas_electronicas_${mes}.csv`);
     expect(texto(r)).toContain('FECHA;RADICADO;CEDULA;ASOCIADO;EMPRESA;PROVEEDOR;DOCUMENTOS_FIRMADOS;VALOR');
+  });
+});
+
+// ── Lectura del certificado bancario ──────────────────────────────────────────
+const MESES_ES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+const hoyEs = () => { const [a, m, d] = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' }).split('-').map(Number); return `${d} de ${MESES_ES[m - 1]} de ${a}`; };
+// PDF con texto seleccionable y la forma del certificado digital de Bancolombia (datos inventados)
+const pdfCertificado = async ({ doc = '005', cuenta = '12345678901' } = {}) => {
+  const d = await PDFDocument.create(); d.setTitle(crypto.randomUUID());
+  const fuente = await d.embedFont(StandardFonts.Helvetica);
+  const p = d.addPage([600, 800]);
+  [`Jueves, ${hoyEs()}`, 'A quien le interese', 'Bancolombia S.A. se permite informar que MARIA PEREZ', `identificado(a) con CC ${doc}, a la fecha de expedicion de esta certificacion, tiene con`,
+    'el Banco los siguientes productos:', 'Cuenta de ahorros', cuenta, '2025-06-17', 'Activo'].forEach((l, i) => p.drawText(l, { x: 30, y: 760 - i * 16, size: 9, font: fuente }));
+  return Buffer.from(await d.save());
+};
+// Imagen con el texto del certificado (como una foto o un escaneo): el OCR la lee sin que el archivo traiga texto
+const pngCertificado = ({ doc = '005', cuenta = '12345678901' } = {}) => {
+  const c = createCanvas(1400, 520); const x = c.getContext('2d');
+  x.fillStyle = '#ffffff'; x.fillRect(0, 0, 1400, 520); x.fillStyle = '#000000'; x.font = '34px sans-serif';
+  [`Jueves, ${hoyEs()}`, 'Bancolombia S.A. se permite informar que MARIA PEREZ', `identificado(a) con CC ${doc}, a la fecha de expedicion de esta certificacion`, 'tiene con el Banco los siguientes productos:', `Cuenta de ahorros ${cuenta} 2025-06-17 Activo`]
+    .forEach((l, i) => x.fillText(l, 30, 70 + i * 90));
+  return c.toBuffer('image/png');
+};
+const pdfEscaneado = async (opts) => {
+  const d = await PDFDocument.create(); d.setTitle(crypto.randomUUID());
+  const img = await d.embedPng(pngCertificado(opts));
+  d.addPage([700, 260]).drawImage(img, { x: 0, y: 0, width: 700, height: 260 });
+  return Buffer.from(await d.save());
+};
+const certificado = async (id, quien = 'cartera') => ag[quien].get(`/api/cartera/${id}/cierre/certificado`);
+
+describe('Cierre de Cartera — lectura del certificado bancario', () => {
+  test('sin certificado subido dice que no hay nada que leer', async () => {
+    const id = await llegarARecibida(A.a5);
+    const r = await certificado(id);
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ estado: 'sin_certificado', alertas: [] });
+  });
+
+  test('lee el certificado del asociado: banco, titular, cuenta y sin alertas', async () => {
+    const id = await llegarARecibida(A.a5, { forma_desembolso: 'transferencia', certificado: await pdfCertificado() });
+    const r = await certificado(id);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ estado: 'leido', plantilla: 'bancolombia', banco: 'Bancolombia', titular_documento: '005', dias: 0, alertas: [] });
+    expect(r.body.cuentas).toEqual([{ tipo_cuenta: 'ahorros', numero_cuenta: '12345678901', apertura: '2025-06-17', estado: 'activo' }]);
+  });
+
+  test('un certificado de otra persona avisa que sería pago a un tercero', async () => {
+    const id = await llegarARecibida(A.a5, { forma_desembolso: 'transferencia', certificado: await pdfCertificado({ doc: '999' }) });
+    const r = await certificado(id);
+    expect(r.body.estado).toBe('leido');
+    expect(r.body.alertas.map((a) => a.codigo)).toEqual(['titular_distinto']);
+  });
+
+  test('un PDF sin texto (foto o escaneo) no se inventa nada', async () => {
+    const id = await llegarARecibida(A.a5, { forma_desembolso: 'transferencia', certificado: await pdfReal() });
+    expect((await certificado(id)).body).toEqual({ estado: 'sin_texto', alertas: [] });
+  });
+
+  test('una foto del certificado se lee por OCR local y queda marcada como sugerencia por verificar', async () => {
+    const id = await llegarARecibida(A.a5, { forma_desembolso: 'transferencia', certificado: pngCertificado() });
+    const r = await certificado(id);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ estado: 'leido', origen: 'ocr', banco: 'Bancolombia', titular_documento: '005' });
+    // El OCR puede confundir un dígito (aquí lee un 0 como 3): por eso es solo una sugerencia y siempre lleva la alerta de verificar
+    expect(r.body.cuentas[0]).toMatchObject({ tipo_cuenta: 'ahorros' });
+    expect(r.body.cuentas[0].numero_cuenta).toMatch(/^\d{11}$/);
+    expect(r.body.alertas.map((a) => a.codigo)).toContain('lectura_ocr');
+  });
+
+  test('un PDF escaneado (solo imagen) también se lee por OCR', async () => {
+    const id = await llegarARecibida(A.a5, { forma_desembolso: 'transferencia', certificado: await pdfEscaneado() });
+    const r = await certificado(id);
+    expect(r.body).toMatchObject({ estado: 'leido', origen: 'ocr', titular_documento: '005' });
+    expect(r.body.cuentas[0].numero_cuenta).toMatch(/^\d{11}$/);
+  });
+
+  test('un PDF con texto NO pasa por OCR (se lee directo y es fiable)', async () => {
+    const id = await llegarARecibida(A.a5, { forma_desembolso: 'transferencia', certificado: await pdfCertificado() });
+    const r = await certificado(id);
+    expect(r.body.origen).toBe('texto');
+    expect(r.body.alertas.map((a) => a.codigo)).not.toContain('lectura_ocr');
+  });
+
+  test('una imagen sin texto legible no se inventa nada', async () => {
+    const c = createCanvas(300, 200); const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, 300, 200);
+    const id = await llegarARecibida(A.a5, { forma_desembolso: 'transferencia', certificado: c.toBuffer('image/png') });
+    expect((await certificado(id)).body).toEqual({ estado: 'sin_texto', alertas: [] });
+  });
+
+  test('dos lecturas a la vez se atienden sin fallar (van en cola)', async () => {
+    const id = await llegarARecibida(A.a5, { forma_desembolso: 'transferencia', certificado: pngCertificado() });
+    const [a, b] = await Promise.all([certificado(id), certificado(id)]);
+    expect([a.body.estado, b.body.estado]).toEqual(['leido', 'leido']);
+  });
+
+  test('leerlo no guarda nada: la cuenta sigue sin capturar hasta que Cartera guarde', async () => {
+    const id = await llegarARecibida(A.a5, { forma_desembolso: 'transferencia', certificado: await pdfCertificado() });
+    await certificado(id);
+    expect((await cierre(id)).cierre.numero_cuenta ?? null).toBeNull();
+    expect((await cierre(id)).cierre_guardado).toBe(false);
+  });
+
+  test('exige sesión y permiso de Cartera; un asesor no lo lee', async () => {
+    const id = await llegarARecibida(A.a5);
+    expect((await request(app).get(`/api/cartera/${id}/cierre/certificado`)).status).toBe(401);
+    expect((await certificado(id, 'asesor')).status).toBe(403);
+    expect((await certificado(id, 'nada')).status).toBe(403);
+    expect((await certificado(id, 'lector')).status).toBe(200);
+    expect((await ag.cartera.get('/api/cartera/no-es-uuid/cierre/certificado')).status).toBe(404);
   });
 });

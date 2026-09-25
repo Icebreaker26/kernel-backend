@@ -1,8 +1,12 @@
 import { manejar } from '../../creditos/http.js';
 import * as cierre from '../../cartera/services/cierreService.js';
+import * as ci from '../services/creditosCIService.js';
+import { listarCISchema } from '../../creditos/schemas/creditosSchema.js';
 
-// Bandeja de Control Interno: créditos que Cartera marcó como COMPLETADOS (por ahora solo la cola y el PDF final; la validación se define aparte)
-export const listar = manejar(async (req, res) => res.json(await cierre.listarCompletadas()));
+// Bandeja de Control Interno: por pestaña (por revisar, en Tesorería, pagados, devueltos), con filtros, orden y resumen
+export const listar = manejar(async (req, res) => res.json(await ci.listarCI(listarCISchema.parse(req.query))));
+export const resumen = manejar(async (req, res) => res.json(await ci.resumenCI(listarCISchema.parse(req.query))));
+export const filtros = manejar(async (req, res) => res.json(await ci.opcionesCI()));
 
 import * as desembolso from '../../creditos/services/desembolsoService.js';
 import { revisionSchema } from '../../creditos/schemas/desembolsoSchema.js';

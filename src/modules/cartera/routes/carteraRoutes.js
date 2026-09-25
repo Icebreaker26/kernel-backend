@@ -35,6 +35,7 @@ router.post('/:id/devolver',            checkPermission('cartera', 'WRITE'), ctr
 
 // Cierre: comprobante y estudio firmados, aval, desembolso neto, sellos, PDF final y paso a Control Interno
 router.get ('/:id/cierre',                         checkPermission('cartera', 'READ'),  ctrl.obtenerCierre);
+router.get ('/:id/cierre/certificado',              checkPermission('cartera', 'READ'),  ctrl.certificado);
 router.put ('/:id/cierre',                         checkPermission('cartera', 'WRITE'), ctrl.guardarCierre);
 router.post('/:id/cierre/documentos',              checkPermission('cartera', 'WRITE'), subir.single('archivo'), ctrl.subirDocumento);
 router.get ('/:id/cierre/documentos/:docId/contenido', checkPermission('cartera', 'WRITE'), ctrl.contenidoDocumento);

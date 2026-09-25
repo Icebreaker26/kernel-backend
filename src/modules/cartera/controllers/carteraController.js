@@ -30,6 +30,7 @@ export const devolver = manejar(async (req, res) => {
 // ── Cierre: documentos de Cartera, aval, sellos, PDF final, completar ─────────
 
 export const obtenerCierre = manejar(async (req, res) => res.json(await cierre.obtenerCierre(req.user, req.params.id)));
+export const certificado = manejar(async (req, res) => res.json(await cierre.leerCertificado(req.user, req.params.id)));
 export const guardarCierre = manejar(async (req, res) => res.json(await cierre.guardarCierre(req.user, req.params.id, cierreSchema.parse(req.body), req.ip)));
 export const subirDocumento = manejar(async (req, res) => res.status(201).json(await cierre.subirDocumento(req.user, req.params.id, tipoDocumentoSchema.parse(req.body), req.file, req.ip)));
 export const contenidoDocumento = manejar(async (req, res) => {

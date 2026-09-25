@@ -979,11 +979,25 @@ export const pubIniciarDesdeStand = async (req, res, next) => {
 
 // ── Enlace público de presentación (para compartir en grupos) ────────────────
 
-// El asesor obtiene (o crea) su enlace para una empresa. `renovar` genera uno nuevo e invalida el anterior
-// (por si se filtró a quien no debía). Idempotente: pedirlo varias veces devuelve el mismo enlace.
+// El asesor obtiene (o crea) su enlace para una empresa, o su enlace "libre" (`libre: true`): sin empresa fija, quien
+// lo abre la elige como en /asociate. `renovar` genera uno nuevo e invalida el anterior (por si se filtró a quien no debía).
+// Idempotente: pedirlo varias veces devuelve el mismo enlace. Ninguno caduca.
 export const obtenerEnlacePublico = async (req, res, next) => {
   try {
-    const { empresa_codigo, renovar } = req.body || {};
+    const { empresa_codigo, renovar, libre } = req.body || {};
+    if (libre === true) {
+      const { rows: [e] } = await pool.query(
+        `INSERT INTO captacion_enlaces_publicos (token, asesor_uuid, empresa_codigo)
+         VALUES ($1, $2, NULL)
+         ON CONFLICT (asesor_uuid) WHERE empresa_codigo IS NULL DO UPDATE
+           SET is_active = true,
+               token = CASE WHEN $3::boolean THEN EXCLUDED.token ELSE captacion_enlaces_publicos.token END,
+               updated_at = NOW()
+         RETURNING token`,
+        [crypto.randomBytes(16).toString('base64url'), req.user.id, renovar === true]
+      );
+      return res.json({ token: e.token });
+    }
     if (!empresa_codigo) return res.status(400).json({ error: 'empresa_codigo requerido' });
 
     const { rowCount: emp } = await pool.query(
@@ -1006,12 +1020,14 @@ export const obtenerEnlacePublico = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// :empresa = 'libre' desactiva el enlace sin empresa fija
 export const desactivarEnlacePublico = async (req, res, next) => {
   try {
+    const libre = req.params.empresa === 'libre';
     const { rowCount } = await pool.query(
       `UPDATE captacion_enlaces_publicos SET is_active = false, updated_at = NOW()
-        WHERE asesor_uuid = $1 AND empresa_codigo = $2 AND is_active = true`,
-      [req.user.id, req.params.empresa]
+        WHERE asesor_uuid = $1 AND ${libre ? 'empresa_codigo IS NULL' : 'empresa_codigo = $2'} AND is_active = true`,
+      libre ? [req.user.id] : [req.user.id, req.params.empresa]
     );
     if (!rowCount) return res.status(404).json({ error: 'No hay un enlace activo para esa empresa' });
     res.json({ ok: true });
@@ -1022,9 +1038,10 @@ const enlacePublicoVigente = async (token) => {
   const { rows: [e] } = await pool.query(
     `SELECT l.asesor_uuid, l.empresa_codigo, emp.nombre AS empresa_nombre, u.nombre AS asesor_nombre
        FROM captacion_enlaces_publicos l
-       JOIN empresas emp ON emp.codigo = l.empresa_codigo
+       LEFT JOIN empresas emp ON emp.codigo = l.empresa_codigo
        JOIN global_usuarios u ON u.id = l.asesor_uuid
-      WHERE l.token = $1 AND l.is_active = true AND emp.is_active = true AND u.is_active = true`,
+      WHERE l.token = $1 AND l.is_active = true AND u.is_active = true
+        AND (l.empresa_codigo IS NULL OR emp.is_active = true)`,
     [token]
   );
   return e || null;
@@ -1034,6 +1051,10 @@ export const pubGetEnlace = async (req, res, next) => {
   try {
     const e = await enlacePublicoVigente(req.params.token);
     if (!e) return res.status(404).json({ error: 'Enlace no válido' });
+    if (!e.empresa_codigo) {   // enlace libre: la persona elige su empresa
+      const { rows: empresas } = await pool.query(`SELECT codigo, nombre FROM empresas WHERE is_active = true ORDER BY nombre ASC`);
+      return res.json({ pide_empresa: true, empresas, asesor_nombre: e.asesor_nombre, tarifas: TARIFAS });
+    }
     res.json({ empresa_nombre: e.empresa_nombre, asesor_nombre: e.asesor_nombre, asociados_empresa: await asociadosDeEmpresa(e.empresa_codigo), tarifas: TARIFAS });
   } catch (err) { next(err); }
 };
@@ -1206,8 +1227,15 @@ export const pubIniciarDesdeEnlace = async (req, res, next) => {
     const e = await enlacePublicoVigente(req.params.token);
     if (!e) return res.status(404).json({ error: 'Enlace no válido' });
 
+    let empresaCodigo = e.empresa_codigo;
+    if (!empresaCodigo) {   // enlace libre: la empresa la elige la persona
+      const { empresa_codigo } = iniciarWebSchema.parse(req.body);
+      const { rows: [emp] } = await pool.query(`SELECT codigo FROM empresas WHERE codigo = $1 AND is_active = true`, [empresa_codigo]);
+      if (!emp) return res.status(400).json({ error: 'Elige tu empresa de la lista' });
+      empresaCodigo = emp.codigo;
+    }
     const p = await crearProspectoSinIdentificar({
-      empresaCodigo: e.empresa_codigo, asesorUuid: e.asesor_uuid, ip: req.ip, evento: 'enlace_publico_init',
+      empresaCodigo, asesorUuid: e.asesor_uuid, ip: req.ip, evento: 'enlace_publico_init',
     });
     res.status(201).json({ token: p.token });
   } catch (err) { next(err); }

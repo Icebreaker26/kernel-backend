@@ -157,7 +157,10 @@ describe('Firma — Sello, registro y verificación', () => {
     const [cuerpo, firma] = body.token.split('.');
     const otro = Buffer.from(JSON.stringify({ f: body.folio, h: H, t: body.ts, e: usuarios.operador.id })).toString('base64url');
     expect(verificarSello(`${otro}.${firma}`)).toBeNull();
-    expect(verificarSello(`${cuerpo}.${firma.slice(0, -2)}AA`)).toBeNull();
+    // Se altera el PRIMER carácter de la firma (6 bits útiles): cambiar los últimos no siempre altera los bytes
+    // (en 64 bytes en base64url los dos últimos caracteres solo aportan 8 bits, así que ~1/256 de las veces 'AA' no cambiaba nada)
+    const firmaAlterada = (firma[0] === 'A' ? 'B' : 'A') + firma.slice(1);
+    expect(verificarSello(`${cuerpo}.${firmaAlterada}`)).toBeNull();
     const res = await ag.post('/api/firma/verificar-token').send({ token: `${otro}.${firma}` });
     expect(res.body.valido).toBe(false);
   });

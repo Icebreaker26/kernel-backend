@@ -1,11 +1,13 @@
 import { manejar } from '../../creditos/http.js';
 import * as svc from '../../creditos/services/creditoService.js';
-import { devolverSchema } from '../../creditos/schemas/creditosSchema.js';
+import { devolverSchema, listarCarteraSchema } from '../../creditos/schemas/creditosSchema.js';
 import * as cierre from '../services/cierreService.js';
 import { cierreSchema, tipoDocumentoSchema, firmadoSchema, tarifaSchema, mesSchema } from '../schemas/carteraSchema.js';
 
 // Cartera trabaja sobre los mismos expedientes que Créditos (misma lógica y misma regla de "listo"); aquí solo cambia el ACL
-export const listar = manejar(async (req, res) => res.json(await svc.listarCartera({ tab: req.query.tab, q: req.query.q })));
+export const listar = manejar(async (req, res) => res.json(await svc.listarCartera(listarCarteraSchema.parse(req.query))));
+export const resumen = manejar(async (req, res) => res.json(await svc.resumenCartera(listarCarteraSchema.parse(req.query))));
+export const filtros = manejar(async (req, res) => res.json(await svc.opcionesCartera()));
 export const obtener = manejar(async (req, res) => res.json(await svc.detalle(req.user, req.params.id)));
 export const urlArchivo = manejar(async (req, res) => res.json(await svc.urlArchivo(req.user, req.params.id, req.params.archivoId, req.ip)));
 export const integridad = manejar(async (req, res) => res.json(await svc.verificarIntegridad(req.user, req.params.id)));

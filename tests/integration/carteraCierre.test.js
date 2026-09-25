@@ -256,6 +256,12 @@ describe('Cierre de Cartera — Aval, desembolso neto y sellos', () => {
   let id;
   beforeAll(async () => { id = await llegarARecibida(A.a4); });
 
+  test('avisa si el desembolso ya se guardó o solo es la simulación', async () => {
+    expect((await cierre(id)).cierre_guardado).toBe(false);
+    await guardar(id, { con_aval: false });
+    expect((await cierre(id)).cierre_guardado).toBe(true);
+  });
+
   test('sin aval: el neto resta solo la firma electrónica externa', async () => {
     const r = await guardar(id, { con_aval: false });
     expect(r.status).toBe(200);

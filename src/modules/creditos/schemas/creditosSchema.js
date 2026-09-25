@@ -88,7 +88,7 @@ export const ESTADOS_SOLICITUD = ['en_tramite', 'entregada', 'recibida', 'devuel
 const numeroOpc = z.preprocess((v) => (v === '' || v == null ? undefined : Number(v)), z.number().min(0).max(9_999_999_999).optional());
 const bool1 = z.preprocess((v) => v === '1' || v === 'true' || v === true, z.boolean());
 export const ORDEN_LISTA = ['fecha', 'valor', 'dias', 'estado', 'asociado', 'radicado'];
-export const listarSchema = z.object({
+const listarBase = z.object({
   estado:    z.preprocess(vacioAUndef, z.enum(ESTADOS_SOLICITUD).optional()),
   q:         z.preprocess(vacioAUndef, z.string().trim().max(80).optional()),
   todas:     bool1.optional(),
@@ -105,7 +105,15 @@ export const listarSchema = z.object({
   accion:    bool1.optional(),   // solo lo que el asesor debe mover: en trámite o devuelta
   orden:     z.preprocess(vacioAUndef, z.enum(ORDEN_LISTA).optional()),
   dir:       z.preprocess(vacioAUndef, z.enum(['asc', 'desc']).optional()),
-}).strict().superRefine((d, ctx) => {
+});
+const validarRangos = (d, ctx) => {
   if (d.desde && d.hasta && d.desde > d.hasta) ctx.addIssue({ code: 'custom', path: ['hasta'], message: 'La fecha final es anterior a la inicial' });
   if (d.min != null && d.max != null && d.min > d.max) ctx.addIssue({ code: 'custom', path: ['max'], message: 'El valor máximo es menor que el mínimo' });
-});
+};
+export const listarSchema = listarBase.strict().superRefine(validarRangos);
+
+// Bandeja de Cartera: mismos filtros, pero el estado lo da la pestaña, Cartera ve siempre a todos los asesores y "requiere acción" no aplica
+export const TABS_CARTERA = ['entregadas', 'recibidas', 'completadas', 'devueltas', 'por_llegar', 'todas'];
+export const listarCarteraSchema = listarBase.omit({ estado: true, todas: true, accion: true })
+  .extend({ tab: z.preprocess(vacioAUndef, z.enum(TABS_CARTERA).default('entregadas')) })
+  .strict().superRefine(validarRangos);

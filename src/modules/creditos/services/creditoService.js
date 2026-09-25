@@ -422,11 +422,11 @@ const ORDEN_SQL = {
 };
 
 /** Arma el WHERE de la lista a partir de los filtros validados. `sinEstado` lo omite (para los conteos por estado). */
-const filtrosLista = async (user, f = {}, { sinEstado = false } = {}) => {
+const filtrosLista = async (user, f = {}, { sinEstado = false, sinAlcance = false } = {}) => {
   const where = ['s.is_active = true'];
   const params = [];
   const p = (v) => { params.push(v); return `$${params.length}`; };
-  const verTodas = !!f.todas && (await veTodas(user));
+  const verTodas = sinAlcance || (!!f.todas && (await veTodas(user)));   // sinAlcance: la bandeja de Cartera, que ya exige su propio permiso
   if (!verTodas) where.push(`s.asesor_uuid = ${p(user.id)}`);
   else if (f.asesor) where.push(`s.asesor_uuid = ${p(f.asesor)}`);   // filtrar por asesor solo tiene sentido viendo las de todos
   if (f.estado && !sinEstado) where.push(`s.estado = ${p(f.estado)}`);
@@ -475,17 +475,42 @@ export const opcionesFiltros = async (user, { todas } = {}) => {
   return { empresas, asesores };
 };
 
-// Bandeja de Cartera por pestaña
-export const listarCartera = async ({ tab = 'entregadas', q } = {}) => {
-  const estados = { por_llegar: ['en_tramite'], entregadas: ['entregada'], recibidas: ['recibida'], completadas: ['completada'], devueltas: ['devuelta'] }[tab];
-  if (!estados) throw new ErrorNegocio(400, 'Pestaña inválida');
-  const params = [estados];
-  let filtro = '';
-  if (q && String(q).trim().length >= 2) { params.push(`%${String(q).trim()}%`); filtro = `AND (s.radicado ILIKE $2 OR s.asociado_codigo ILIKE $2 OR (a.nombre || ' ' || a.apellido) ILIKE $2)`; }
+// Bandeja de Cartera: pestañas por estado y los mismos filtros que la lista de créditos, sobre los expedientes de todos los asesores
+const ESTADOS_TAB = { por_llegar: ['en_tramite'], entregadas: ['entregada'], recibidas: ['recibida'], completadas: ['completada'], devueltas: ['devuelta'] };
+const ESTADOS_BANDEJA = ['en_tramite', 'devuelta', 'entregada', 'recibida', 'completada'];
+
+export const listarCartera = async (f = {}) => {
+  const tab = f.tab ?? 'entregadas';
+  if (tab !== 'todas' && !ESTADOS_TAB[tab]) throw new ErrorNegocio(400, 'Pestaña inválida');
+  const { where, params } = await filtrosLista(null, f, { sinEstado: true, sinAlcance: true });
+  params.push(tab === 'todas' ? ESTADOS_BANDEJA : ESTADOS_TAB[tab]);
+  const orden = ORDEN_SQL[f.orden];
+  const dir = f.orden === 'dias' ? (f.dir === 'asc' ? 'DESC' : 'ASC') : (f.dir === 'asc' ? 'ASC' : 'DESC');
+  // Sin orden elegido, lo más antiguo primero: es lo que lleva más tiempo esperando a Cartera
+  const ordenSql = orden ? `${orden} ${dir}` : 'COALESCE(s.entregada_at, s.created_at) ASC';
   const { rows } = await pool.query(
-    `SELECT ${COLUMNAS_LISTA} ${FROM_LISTA} WHERE s.is_active = true AND s.estado = ANY($1) ${filtro}
-      ORDER BY COALESCE(s.entregada_at, s.created_at) ASC LIMIT 300`, params);
+    `SELECT ${COLUMNAS_LISTA} ${FROM_LISTA} WHERE ${where} AND s.estado = ANY($${params.length}) ORDER BY ${ordenSql}, s.id LIMIT ${LIMITE_LISTA}`, params);
   return rows;
+};
+
+/** Conteo y valor por estado de la bandeja, con los mismos filtros (sin pestaña): alimenta los contadores de las pestañas y las columnas del tablero */
+export const resumenCartera = async (f = {}) => {
+  const { where, params } = await filtrosLista(null, f, { sinEstado: true, sinAlcance: true });
+  params.push(ESTADOS_BANDEJA);
+  const { rows } = await pool.query(
+    `SELECT s.estado, COUNT(*)::int AS n, COALESCE(SUM(s.valor_solicitado), 0)::numeric AS valor ${FROM_LISTA} WHERE ${where} AND s.estado = ANY($${params.length}) GROUP BY s.estado`, params);
+  return { limite: LIMITE_LISTA, estados: rows.map((r) => ({ estado: r.estado, n: r.n, valor: Number(r.valor) })) };
+};
+
+/** Empresas, asesores y categorías que aparecen en la bandeja, para armar los filtros */
+export const opcionesCartera = async () => {
+  const { where, params } = await filtrosLista(null, {}, { sinAlcance: true });
+  const [{ rows: empresas }, { rows: asesores }, { rows: categorias }] = await Promise.all([
+    pool.query(`SELECT DISTINCT e.codigo, e.nombre ${FROM_LISTA} WHERE ${where} ORDER BY e.nombre`, params),
+    pool.query(`SELECT DISTINCT u.id, u.nombre ${FROM_LISTA} WHERE ${where} ORDER BY u.nombre`, params),
+    pool.query(`SELECT DISTINCT c.id, c.nombre ${FROM_LISTA} WHERE ${where} ORDER BY c.nombre`, params),
+  ]);
+  return { empresas, asesores, categorias };
 };
 
 export const faltantes = (p, s) => {

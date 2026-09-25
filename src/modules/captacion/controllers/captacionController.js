@@ -285,7 +285,7 @@ export const listarVinculaciones = async (req, res, next) => {
               v.seccion_financiera_at, v.seccion_beneficiarios_at,
               v.seccion_referencias_at, v.seccion_documentos_at, v.seccion_firma_at, v.seccion_aportes_at,
               v.valor_aporte, v.periodicidad_descuento,
-              v.debida_diligencia_ampliada, v.entregada_at
+              v.debida_diligencia_ampliada, v.entregada_at, v.solido_estado, v.solido_cargado_at
          FROM captacion_vinculaciones v
          JOIN captacion_prospectos p ON p.id = v.prospecto_id
          JOIN empresas e ON e.codigo = p.empresa_codigo

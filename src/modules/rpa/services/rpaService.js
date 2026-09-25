@@ -2,6 +2,8 @@ import crypto from 'crypto';
 import pool from '../../../db/database.js';
 import logger from '../../../config/logger.js';
 import { construirPayload, llaveCiudad, norm } from './payloadSolido.js';
+import { codigoDane } from './divipola.js';
+import { consultaVigente } from '../../captacion/listas/consultas.js';
 
 /**
  * Cola de cargas a SOLIDO.
@@ -35,7 +37,8 @@ const cargarEquivalencias = async (cn = pool) => {
   const mapa = new Map(rows.map((r) => [`${r.catalogo}|${r.texto_norm}`, r.codigo_solido]));
   return (catalogo, texto, depto) => {
     if (catalogo === 'ciudad') {
-      return (depto && mapa.get(`ciudad|${llaveCiudad(texto, depto)}`)) || mapa.get(`ciudad|${norm(texto)}`) || null;
+      // Una equivalencia manual siempre gana; si no hay, se traduce con el índice DANE (solo si es inequívoco)
+      return (depto && mapa.get(`ciudad|${llaveCiudad(texto, depto)}`)) || mapa.get(`ciudad|${norm(texto)}`) || codigoDane(texto, depto) || null;
     }
     return mapa.get(`${catalogo}|${norm(texto)}`) || null;
   };
@@ -64,7 +67,11 @@ export const armarPayload = async (vinculacionId, cn = pool) => {
     asesorCedula: r.asesor_cedula,
     eq,
   });
-  return { payload, faltantes, cedula: String(r.cedula).trim(), vinculacion: r };
+  // Sin el visto bueno vigente del Oficial de Cumplimiento nada se entrega al agente (aunque el job ya existiera: si después se
+  // corrigió la cédula o el nombre, la consulta deja de valer y el job vuelve a requiere_datos)
+  const cump = await estadoCumplimiento(vinculacionId, cn);
+  if (cump.estado !== 'validada') faltantes.unshift({ campo: 'cumplimiento', motivo: cump.estado, mensaje: cump.mensaje });
+  return { payload, faltantes, cedula: String(r.cedula).trim(), vinculacion: r, cumplimiento: cump };
 };
 
 const yaEstaEnPadron = async (cedula, cn = pool) => {
@@ -78,6 +85,7 @@ export const encolar = async (vinculacionId, usuarioId) => {
   const { payload: _p, faltantes, cedula, vinculacion } = await armarPayload(vinculacionId);
   if (!vinculacion.is_active) throw new ErrorRpa(409, 'La vinculación está inactiva');
   if (vinculacion.estado !== 'entregada') throw new ErrorRpa(409, 'Solo se cargan a SOLIDO las vinculaciones entregadas');
+  await exigirCumplimiento(vinculacionId);
 
   if (await yaEstaEnPadron(cedula)) {
     const { rows: [job] } = await pool.query(
@@ -164,10 +172,12 @@ export const resolverRevision = async (id, { resultado, nota }, usuarioId) => {
 
 // ── Lado del agente ───────────────────────────────────────────────────────────
 
-export const latido = async (agente, { version, huella_ui }) => {
+export const latido = async (agente, { version, huella_ui, sesion_bloqueada }) => {
   await pool.query(
-    `UPDATE rpa_agentes SET ultimo_latido = NOW(), version = COALESCE($2, version), huella_ui = COALESCE($3, huella_ui), updated_at = NOW()
-      WHERE id = $1`, [agente.id, version ?? null, huella_ui ?? null]);
+    `UPDATE rpa_agentes SET ultimo_latido = NOW(), version = COALESCE($2, version), huella_ui = COALESCE($3, huella_ui),
+            sesion_bloqueada = COALESCE($4, sesion_bloqueada), sesion_at = CASE WHEN $4::boolean IS NULL THEN sesion_at ELSE NOW() END,
+            updated_at = NOW()
+      WHERE id = $1`, [agente.id, version ?? null, huella_ui ?? null, sesion_bloqueada ?? null]);
   // Las capturas llevan datos personales: no se guardan más de RETENCION_CAPTURAS_DIAS
   await pool.query(`DELETE FROM rpa_capturas WHERE created_at < NOW() - make_interval(days => $1)`, [RETENCION_CAPTURAS_DIAS]);
   const { rows: [a] } = await pool.query(`SELECT pausado, permite_guardar FROM rpa_agentes WHERE id = $1`, [agente.id]);
@@ -298,6 +308,103 @@ export const registrarResultado = async (agente, jobId, body) => {
   } finally {
     cn.release();
   }
+};
+
+// ── Visto bueno del Oficial de Cumplimiento ───────────────────────────────────
+
+const MENSAJES_CUMPLIMIENTO = {
+  validada: 'El Oficial de Cumplimiento dio el visto bueno.',
+  observada: 'El Oficial de Cumplimiento dejó observaciones en la consulta: hay que resolverlas y consultar de nuevo.',
+  pendiente_validacion: 'La consulta en listas está hecha y espera el visto bueno del Oficial de Cumplimiento.',
+  desactualizada: 'Cambió la cédula o el nombre después de la consulta en listas: hay que consultar de nuevo y esperar el visto bueno.',
+  sin_consulta: 'Falta la consulta en listas y el visto bueno del Oficial de Cumplimiento.',
+};
+
+/** Estado de cumplimiento de una vinculación: solo 'validada' habilita subirla a SOLIDO. */
+export const estadoCumplimiento = async (vinculacionId, cn = pool) => {
+  const respuesta = (estado, extra = {}) => ({ estado, mensaje: MENSAJES_CUMPLIMIENTO[estado], ...extra });
+  const vigente = await consultaVigente(vinculacionId);
+  if (vigente) return respuesta('validada', { validada_at: vigente.validada_at });
+  const { rows: [c] } = await cn.query(
+    `SELECT c.estado, (c.cedula = p.cedula AND c.nombres = p.nombres AND c.apellidos = p.apellidos) AS igual
+       FROM captacion_consultas_listas c
+       JOIN captacion_vinculaciones v ON v.id = c.vinculacion_id
+       JOIN captacion_prospectos p ON p.id = v.prospecto_id
+      WHERE c.vinculacion_id = $1 AND c.estado <> 'anulada'
+      ORDER BY c.created_at DESC LIMIT 1`, [vinculacionId]);
+  if (!c) return respuesta('sin_consulta');
+  if (c.estado === 'validada' && !c.igual) return respuesta('desactualizada');
+  if (c.estado === 'observada') return respuesta('observada');
+  if (c.estado === 'cerrada') return respuesta(c.igual ? 'pendiente_validacion' : 'desactualizada');
+  return respuesta('sin_consulta');   // en_curso: la consulta aún no se cierra
+};
+
+/** Compuerta del servidor: sin visto bueno vigente del Oficial de Cumplimiento no se sube nada a SOLIDO. */
+export const exigirCumplimiento = async (vinculacionId) => {
+  const cump = await estadoCumplimiento(vinculacionId);
+  if (cump.estado !== 'validada') throw new ErrorRpa(409, cump.mensaje, { cumplimiento: cump.estado });
+  return cump;
+};
+
+// ── Estado del agente (activo / trabajando / sesión bloqueada / pausado / apagado) ─────────────────────────────────────
+
+const LATIDO_MAX_S = 360;      // el agente consulta cada 30 s; un llenado tarda 2-3 min sin latidos: 6 min de margen
+const ORDEN_ESTADO = { activo: 0, trabajando: 1, bloqueado: 2, pausado: 3, apagado: 4 };
+
+const derivarEstado = (a) => {
+  const sinLatido = a.segundos_sin_latido == null || a.segundos_sin_latido > LATIDO_MAX_S;
+  if (sinLatido && !a.trabajando) return 'apagado';          // PC apagado, sin internet o agente detenido
+  if (a.pausado) return 'pausado';                            // detenido desde Kernel o por un error fatal
+  if (a.trabajando) return 'trabajando';
+  if (a.sesion_bloqueada) return 'bloqueado';                 // en línea, pero la pantalla de Windows está bloqueada
+  return 'activo';
+};
+
+export const estadoAgentes = async () => {
+  const { rows } = await pool.query(
+    `SELECT a.id, a.nombre, a.pausado, a.permite_guardar, a.ultimo_latido, a.version, a.huella_ui, a.sesion_bloqueada, a.sesion_at, a.created_at,
+            EXTRACT(EPOCH FROM (NOW() - a.ultimo_latido))::int AS segundos_sin_latido,
+            EXISTS (SELECT 1 FROM rpa_jobs j WHERE j.agente_id = a.id AND j.estado IN ('llenando', 'guardando')
+                       AND j.updated_at > NOW() - INTERVAL '15 minutes') AS trabajando
+       FROM rpa_agentes a WHERE a.is_active ORDER BY a.nombre`);
+  return rows.map((a) => ({ ...a, estado: derivarEstado(a), en_linea: a.segundos_sin_latido != null && a.segundos_sin_latido <= LATIDO_MAX_S }));
+};
+
+/** Resumen para quien no administra agentes (el asesor): el mejor estado entre los agentes, sin datos internos. */
+export const resumenAgente = (agentes) => {
+  if (!agentes.length) return { estado: 'sin_agente', segundos_sin_latido: null };
+  const mejor = [...agentes].sort((x, y) => ORDEN_ESTADO[x.estado] - ORDEN_ESTADO[y.estado])[0];
+  return { estado: mejor.estado, segundos_sin_latido: mejor.segundos_sin_latido };
+};
+
+// ── Estado de una vinculación para el botón "Subir a SOLIDO" ──────────────────
+
+export const estadoVinculacion = async (vinculacionId) => {
+  const r = await cargarVinculacion(vinculacionId);
+  if (!r) throw new ErrorRpa(404, 'Vinculación no encontrada');
+  const [cumplimiento, agentes, { rows: [job] }] = await Promise.all([
+    estadoCumplimiento(vinculacionId),
+    estadoAgentes(),
+    pool.query(
+      `SELECT id, estado, error, faltantes, intentos, created_at, updated_at, terminado_at, aprobado_at
+         FROM rpa_jobs WHERE vinculacion_id = $1 AND is_active ORDER BY created_at DESC LIMIT 1`, [vinculacionId]),
+  ]);
+  const abierto = job && ABIERTOS.includes(job.estado) && job.estado !== 'requiere_datos';   // requiere_datos se reintenta desde el mismo botón
+  const yaCargado = ['cargado', 'ya_existe'].includes(job?.estado) || r.solido_estado === 'cargado';
+  let motivo = null;
+  if (r.estado !== 'entregada') motivo = 'La solicitud debe estar entregada.';
+  else if (yaCargado) motivo = 'El asociado ya está en SOLIDO.';
+  else if (abierto) motivo = 'Ya hay una carga en curso.';
+  else if (cumplimiento.estado !== 'validada') motivo = cumplimiento.mensaje;
+  return {
+    reintento: job?.estado === 'requiere_datos',
+    vinculacion: { estado: r.estado, solido_estado: r.solido_estado, solido_cargado_at: r.solido_cargado_at, asesor_uuid: r.asesor_uuid },
+    cumplimiento,
+    job: job ?? null,
+    agente: resumenAgente(agentes),
+    puede_subir: motivo === null,
+    motivo,
+  };
 };
 
 // ── Cédula de los asesores (SOLIDO la pide como "Asesor") ─────────────────────

@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { z } from 'zod';
 import pool from '../../../db/database.js';
 import {
   encolarSchema, equivalenciaSchema, equivalenciaUpdateSchema, cedulaUsuarioSchema, crearAgenteSchema,
@@ -122,13 +123,8 @@ export const asignarCedula = manejar(async (req, res) => {
 
 // ── Agentes (administración) ──────────────────────────────────────────────────
 
-export const listarAgentes = manejar(async (_req, res) => {
-  const { rows } = await pool.query(
-    `SELECT id, nombre, pausado, permite_guardar, ultimo_latido, version, huella_ui, created_at,
-            (ultimo_latido IS NOT NULL AND ultimo_latido > NOW() - INTERVAL '3 minutes') AS en_linea
-       FROM rpa_agentes WHERE is_active ORDER BY nombre`);
-  res.json(rows);
-});
+// Con su estado real: activo · trabajando · bloqueado (pantalla de Windows bloqueada) · pausado · apagado (sin latido reciente)
+export const listarAgentes = manejar(async (_req, res) => res.json(await svc.estadoAgentes()));
 
 export const crearAgente = manejar(async (req, res) => {
   const { nombre } = crearAgenteSchema.parse(req.body);
@@ -162,4 +158,53 @@ export const agenteReclamar = manejar(async (req, res) => {
 export const agenteResultado = manejar(async (req, res) => {
   const j = await svc.registrarResultado(req.agente, req.params.id, resultadoSchema.parse(req.body));
   res.json({ id: j.id, estado: j.estado });
+});
+
+// ── Botón "Subir a SOLIDO" (lo usa el asesor titular desde la vinculación) ────
+
+const uuid = (v) => z.string().uuid().parse(v);
+
+const titularDe = async (vinculacionId) => {
+  const { rows: [t] } = await pool.query(
+    `SELECT p.asesor_uuid FROM captacion_vinculaciones v JOIN captacion_prospectos p ON p.id = v.prospecto_id WHERE v.id = $1`, [vinculacionId]);
+  return t?.asesor_uuid ?? null;
+};
+
+const esTitular = (user, asesorUuid) => user.rol === 'admin' || user.id === asesorUuid;
+
+// Quien administra el RPA o ve las vinculaciones de todos los asesores también puede consultar el estado
+const veEstadoAjeno = async (user) => {
+  if (user.rol === 'admin') return true;
+  const { rowCount } = await pool.query(
+    `SELECT 1 FROM permisos p JOIN modulos m ON m.id = p.modulo_id JOIN acciones a ON a.id = p.accion_id
+      WHERE p.usuario_uuid = $1 AND ((m.nombre = 'rpa' AND a.nombre = 'READ') OR (m.nombre = 'captacion' AND a.nombre = 'READ_ALL')) LIMIT 1`, [user.id]);
+  return rowCount > 0;
+};
+
+export const estadoVinculacion = manejar(async (req, res) => {
+  const id = uuid(req.params.id);
+  const info = await svc.estadoVinculacion(id);
+  const titular = esTitular(req.user, info.vinculacion.asesor_uuid);
+  if (!titular && !(await veEstadoAjeno(req.user))) return res.status(403).json({ error: 'Sin permiso' });
+  const { asesor_uuid: _omitido, ...vinculacion } = info.vinculacion;
+  res.json({
+    ...info,
+    vinculacion,
+    es_titular: titular,
+    puede_subir: info.puede_subir && titular,
+    motivo: info.motivo ?? (titular ? null : 'Solo el asesor titular de la solicitud puede subirla a SOLIDO.'),
+  });
+});
+
+export const subirVinculacion = manejar(async (req, res) => {
+  const id = uuid(req.params.id);
+  const titular = await titularDe(id);
+  if (!titular) return res.status(404).json({ error: 'Vinculación no encontrada' });
+  if (!esTitular(req.user, titular)) return res.status(403).json({ error: 'Solo el asesor titular de la solicitud puede subirla a SOLIDO.' });
+  await svc.exigirCumplimiento(id);
+  const { rows: [abierto] } = await pool.query(
+    `SELECT id FROM rpa_jobs WHERE vinculacion_id = $1 AND estado = 'requiere_datos' AND is_active ORDER BY created_at DESC LIMIT 1`, [id]);
+  if (abierto) await svc.reevaluar(abierto.id);        // ya había un trabajo esperando datos: se revisa de nuevo
+  else await svc.encolar(id, req.user.id);
+  res.status(201).json(await svc.estadoVinculacion(id));
 });

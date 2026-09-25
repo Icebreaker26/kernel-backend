@@ -36,6 +36,8 @@ export const estadoAgenteSchema = z.object({
 export const latidoSchema = z.object({
   version : z.string().max(30).optional(),
   huella_ui: z.string().max(64).optional(),
+  // true si la pantalla de Windows del PC de SOLIDO está bloqueada (el agente espera sin tomar trabajos)
+  sesion_bloqueada: z.boolean().optional(),
 }).strict();
 
 export const resultadoSchema = z.object({

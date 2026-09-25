@@ -846,8 +846,8 @@ export const entregar = async (req, res, next) => {
               v.seccion_pep_at, v.seccion_firma_at, v.seccion_documentos_at, v.valor_aporte, v.origen_solicitud
          FROM captacion_vinculaciones v
          JOIN captacion_prospectos p ON p.id = v.prospecto_id
-        WHERE v.id = $1 AND p.asesor_uuid = $2 AND v.is_active = true`,
-      [req.params.id, req.user.id]
+        WHERE v.id = $1 AND ($2::uuid IS NULL OR p.asesor_uuid = $2) AND v.is_active = true`,
+      [req.params.id, ambitoAsesor(req)]   // el asesor entrega solo lo suyo; el admin puede entregar la de cualquiera
     );
     if (!v) return res.status(404).json({ error: 'Vinculación no encontrada' });
     if (v.estado === 'entregada') return res.status(400).json({ error: 'Ya fue entregada' });

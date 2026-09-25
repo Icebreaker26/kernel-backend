@@ -1179,6 +1179,43 @@ describe('Captacion — Vinculaciones internas', () => {
     expect(Number(res.body.valor_aporte)).toBe(30000);
   });
 
+  describe('entregar — quién puede', () => {
+    const conUsuario = async (email, rol, fn) => {
+      const hash = await bcrypt.hash(asesorPass, 4);
+      const { rows: [u] } = await pool.query(
+        `INSERT INTO global_usuarios (nombre, email, password_hash, rol, is_active, is_approved)
+         VALUES ('Entregar Test', $1, $2, $3, true, true)
+         ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, rol = EXCLUDED.rol RETURNING id`, [email, hash, rol]);
+      await pool.query(
+        `INSERT INTO permisos (usuario_uuid, modulo_id, accion_id)
+         SELECT $1, m.id, a.id FROM modulos m, acciones a
+         WHERE m.nombre = 'captacion' AND a.nombre IN ('READ', 'ENTREGAR') ON CONFLICT DO NOTHING`, [u.id]);
+      try {
+        const ag = agent();
+        await ag.post('/api/auth/login').send({ email, password: asesorPass });
+        await fn(ag);
+      } finally {
+        await pool.query(`DELETE FROM permisos WHERE usuario_uuid = $1`, [u.id]);
+        await pool.query(`DELETE FROM global_usuarios WHERE id = $1`, [u.id]);
+      }
+    };
+
+    test('otro asesor no puede entregar una vinculación ajena → 404', async () => {
+      await conUsuario('captacion-test-entrega-otro@kernel.test', 'asesor', async (ag) => {
+        const res = await ag.post(`/api/captacion/vinculaciones/${vinculacionId}/entregar`);
+        expect(res.status).toBe(404);
+      });
+    });
+
+    test('el admin sí puede entregar la de cualquier asesor: llega a las validaciones (cédula) en vez de 404', async () => {
+      await conUsuario('captacion-test-entrega-admin@kernel.test', 'admin', async (ag) => {
+        const res = await ag.post(`/api/captacion/vinculaciones/${vinculacionId}/entregar`);
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/cédula/i);
+      });
+    });
+  });
+
   test('POST /vinculaciones/:id/entregar — sin docs → 400', async () => {
     const ag = agent();
     await loginAsesor(ag);

@@ -63,6 +63,7 @@ beforeAll(async () => {
          SELECT $1, m.id, a.id FROM modulos m, acciones a WHERE m.nombre = $3 AND a.nombre = ANY($2) ON CONFLICT DO NOTHING`, [x.id, acciones, modulo]);
     }
   }
+  await pool.query(`UPDATE global_usuarios SET rol = 'admin' WHERE id = $1`, [u.admin.id]);      // solo el rol admin pide/cancela el flexible
   await limpiar();
   admin = await login(u.admin); soloRpa = await login(u.soloRpa); lector = await login(u.lector);
   ag = await crearAgente('agente-test-flex-1');
@@ -83,6 +84,13 @@ describe('Flexible — permisos y solicitud', () => {
     expect((await request(app).get('/api/rpa/flexibles')).status).toBe(401);
     expect((await lector.get('/api/rpa/flexibles')).status).toBe(200);
     expect((await lector.post('/api/rpa/flexibles')).status).toBe(403);
+  });
+
+  test('solo el rol admin pide o cancela el flexible: con permiso rpa WRITE pero otro rol → 403', async () => {
+    expect((await soloRpa.post('/api/rpa/flexibles')).status).toBe(403);
+    const s = await admin.post('/api/rpa/flexibles');
+    expect((await soloRpa.post(`/api/rpa/flexibles/${s.body.id}/cancelar`)).status).toBe(403);
+    expect((await admin.get(`/api/rpa/flexibles/${s.body.id}`)).body.estado).toBe('solicitada');
   });
 
   test('solicitar crea la tarea y no se permite una segunda mientras hay una en curso', async () => {

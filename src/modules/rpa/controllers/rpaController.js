@@ -240,8 +240,10 @@ export const agenteFlexibleFallo = manejar(async (req, res) => {
 
 export const listarFlexibles = manejar(async (_req, res) => res.json(await flex.listar()));
 export const getFlexible = manejar(async (req, res) => res.json(await flex.obtener(uuid(req.params.id))));
-export const solicitarFlexible = manejar(async (req, res) => res.status(201).json(await flex.solicitar(req.user.id)));
-export const cancelarFlexible = manejar(async (req, res) => res.json(await flex.cancelar(uuid(req.params.id))));
+// Pedir o cancelar el flexible es solo del administrador (es una exportación del padrón completo)
+const exigirAdmin = (req) => { if (req.user.rol !== 'admin') throw new svc.ErrorRpa(403, 'Solo el administrador puede pedir o cancelar el flexible de SOLIDO.'); };
+export const solicitarFlexible = manejar(async (req, res) => { exigirAdmin(req); res.status(201).json(await flex.solicitar(req.user.id)); });
+export const cancelarFlexible = manejar(async (req, res) => { exigirAdmin(req); res.json(await flex.cancelar(uuid(req.params.id))); });
 
 export const analizarFlexible = manejar(async (req, res) => {
   const { status, body } = await flex.analizar(uuid(req.params.id));

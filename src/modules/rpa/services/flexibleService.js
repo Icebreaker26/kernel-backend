@@ -76,6 +76,9 @@ export const reclamarTarea = async (agente) => {
     await cn.query('BEGIN');
     const { rows: [a] } = await cn.query(`SELECT pausado FROM rpa_agentes WHERE id = $1 FOR UPDATE`, [agente.id]);
     if (a.pausado) { await cn.query('COMMIT'); return null; }
+    // Un único bot en un único PC: NO se empieza a exportar mientras se está llenando o guardando una asociación
+    const { rows: [ocupado] } = await cn.query(`SELECT 1 FROM rpa_jobs WHERE is_active AND estado IN ('llenando', 'guardando') LIMIT 1`);
+    if (ocupado) { await cn.query('COMMIT'); return null; }
     const { rows: [f] } = await cn.query(
       `SELECT id FROM rpa_flexibles WHERE is_active AND estado = 'solicitada' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`);
     if (!f) { await cn.query('COMMIT'); return null; }

@@ -656,3 +656,54 @@ describe('RPA — Estado del agente: activo, trabajando, sesión bloqueada, paus
     expect(Object.keys(r.body.agente).sort()).toEqual(['estado', 'segundos_sin_latido']);
   });
 });
+
+describe('RPA — un solo bot: el flexible y las asociaciones no se mezclan', () => {
+  const tokenDe = async (nombre) => {
+    const r = await admin.post('/api/rpa/agentes').send({ nombre });
+    return r.body.token;
+  };
+  const reclamar = (token) => request(app).post('/api/rpa/agente/reclamar').set('Authorization', `Bearer ${token}`).send({});
+  const reclamarTarea = (token) => request(app).post('/api/rpa/agente/tareas/reclamar').set('Authorization', `Bearer ${token}`).send({});
+  const sqlFlexible = (estado) => pool.query(`INSERT INTO rpa_flexibles (estado, solicitada_por, iniciada_at) VALUES ($1, $2, NOW())`, [estado, u.admin.id]);
+  const limpiarFlexibles = () => pool.query(`DELETE FROM rpa_flexibles WHERE solicitada_por = $1`, [u.admin.id]);
+  afterEach(limpiarFlexibles);
+
+  test('mientras se exporta el flexible no se entrega ninguna asociación; al terminar, sí', async () => {
+    await admin.post('/api/rpa/equivalencias').send({ catalogo: 'ciudad', texto: 'Villa Ficticia', departamento: 'Risaralda', codigo_solido: '66001' });
+    const vid = await nuevaVinculacion('88801031');
+    const job = await admin.post('/api/rpa/jobs').send({ vinculacion_id: vid });
+    expect(job.body.estado).toBe('pendiente');
+    await pool.query(`UPDATE rpa_jobs SET estado = 'cancelado' WHERE estado IN ('pendiente','aprobado') AND id <> $1`, [job.body.id]);
+    const token = await tokenDe('agente-test-exclusion-1');
+    await sqlFlexible('ejecutando');
+    expect((await reclamar(token)).body.job).toBeNull();                       // el bot está exportando: no toma asociaciones
+    await pool.query(`UPDATE rpa_flexibles SET estado = 'recibida' WHERE solicitada_por = $1`, [u.admin.id]);
+    expect((await reclamar(token)).body.job).toMatchObject({ id: job.body.id, fase: 'llenar' });
+  });
+
+  test('mientras se llena o guarda una asociación no se empieza a exportar; al terminar, sí', async () => {
+    await sqlFlexible('solicitada');
+    const token = await tokenDe('agente-test-exclusion-2');
+    const { rows: [{ n }] } = await pool.query(`SELECT count(*)::int n FROM rpa_jobs WHERE estado IN ('llenando','guardando') AND is_active`);
+    if (n === 0) {
+      // sin asociación en curso la exportación sí se entrega
+      expect((await reclamarTarea(token)).body.tarea).not.toBeNull();
+      await pool.query(`UPDATE rpa_flexibles SET estado = 'solicitada', agente_id = NULL WHERE solicitada_por = $1`, [u.admin.id]);
+    }
+    const vid = await nuevaVinculacion('88801032');
+    const { rows: [j] } = await pool.query(
+      `INSERT INTO rpa_jobs (vinculacion_id, cedula, estado, creado_por) VALUES ($1, '88801032', 'llenando', $2) RETURNING id`, [vid, u.admin.id]);
+    expect((await reclamarTarea(token)).body.tarea).toBeNull();                // hay una asociación en proceso: la exportación espera
+    await pool.query(`UPDATE rpa_jobs SET estado = 'cargado', terminado_at = NOW() WHERE id = $1`, [j.id]);
+    await pool.query(`UPDATE rpa_jobs SET estado = 'cancelado' WHERE estado IN ('llenando','guardando')`);
+    expect((await reclamarTarea(token)).body.tarea).toMatchObject({ tipo: 'flexible' });
+  });
+
+  test('un flexible colgado más de 45 min no bloquea al bot para siempre', async () => {
+    await pool.query(`INSERT INTO rpa_flexibles (estado, solicitada_por, iniciada_at) VALUES ('ejecutando', $1, NOW() - interval '2 hours')`, [u.admin.id]);
+    const token = await tokenDe('agente-test-exclusion-3');
+    await reclamar(token);                                                    // al reclamar se da por fallido
+    const { rows: [f] } = await pool.query(`SELECT estado FROM rpa_flexibles WHERE solicitada_por = $1`, [u.admin.id]);
+    expect(f.estado).toBe('fallida');
+  });
+});

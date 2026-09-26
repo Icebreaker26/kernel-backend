@@ -25,9 +25,9 @@ export const REGLAS_FIJAS = Object.freeze({
   pais_nacimiento: '54',
   pais_residencia: '54',          // SOLIDO lo exige al guardar ("Código de país de residencia no existe o esta vacío"); Colombia
   clase: 'ASOCIADO',
-  clase_dscto_nomina: 'Nomina',   // empresa con descuento por nómina (tiene equivalencia)
-  clase_dscto_caja: 'Caja',       // particular: empresa por defecto
-  empresa_defecto: '0010',        // 0010 = PARTICULARES CAJA 10
+  clase_dscto_nomina: 'Nomina',   // TODAS las empresas descuentan por nómina...
+  clase_dscto_caja: 'Caja',       // ...menos Particulares (0010), que es por caja
+  empresa_defecto: '0010',        // 0010 = PARTICULARES CIA 10 (sin empresa en la solicitud)
   grupo_etnico: 'NINGUNO',
   factura: 'NO',
   direccion_envio: 'email',
@@ -46,6 +46,9 @@ export const norm = (s) => String(s ?? '')
 export const mayus = (s) => String(s ?? '').trim().replace(/\s+/g, ' ')
   .replace(/[ñÑ]/g, '\u0001').normalize('NFD').replace(/[̀-ͯ]/g, '')
   .toUpperCase().replace(/\u0001/g, 'Ñ');
+
+// Código de empresa de Kernel → código de SOLIDO: los numéricos van a 4 dígitos (10 → 0010, 138 → 0138); otros, tal cual
+export const codigoSolido = (c) => (/^\d{1,4}$/.test(String(c).trim()) ? String(c).trim().padStart(4, '0') : String(c).trim());
 
 // Llave de una ciudad: "ciudad|departamento" (más precisa) o solo "ciudad"
 export const llaveCiudad = (ciudad, departamento) => (departamento ? `${norm(ciudad)}|${norm(departamento)}` : norm(ciudad));
@@ -134,10 +137,14 @@ export const construirPayload = ({ v, p, asesorCedula, eq, hoy = fecha(new Date(
     empresa: null,       // se define abajo
     asesor: requerido('asesor', asesorCedula),
   };
-  // Empresa: la equivalencia de la empresa de Kernel (descuento por nómina) o, si no hay, 0010 Particulares (descuento por caja)
-  const empresaEq = vacio(p.empresa_codigo) ? null : eq('empresa', p.empresa_codigo);
-  pagina1.empresa = empresaEq ?? REGLAS_FIJAS.empresa_defecto;
-  pagina1.clase_dscto = empresaEq ? REGLAS_FIJAS.clase_dscto_nomina : REGLAS_FIJAS.clase_dscto_caja;
+  // Empresa: el código de la empresa de Kernel ES el de SOLIDO (la tabla `empresas` viene de SOLIDO, sin ceros a la izquierda; SOLIDO los
+  // muestra a 4 dígitos: 10 → 0010). Una equivalencia manual (`rpa_equivalencias`) sigue teniendo prioridad por si alguna difiere.
+  // Sin empresa en la solicitud → 0010 Particulares. Descuento: por Caja SOLO en 0010 Particulares; en todas las demás, por Nómina.
+  const codigoKernel = vacio(p.empresa_codigo) ? null : String(p.empresa_codigo).trim();
+  const empresaEq = codigoKernel ? eq('empresa', codigoKernel) : null;
+  const empresaCatalogo = codigoKernel && !empresaEq ? codigoSolido(codigoKernel) : null;
+  pagina1.empresa = empresaEq ?? empresaCatalogo ?? REGLAS_FIJAS.empresa_defecto;
+  pagina1.clase_dscto = codigoSolido(pagina1.empresa) === REGLAS_FIJAS.empresa_defecto ? REGLAS_FIJAS.clase_dscto_caja : REGLAS_FIJAS.clase_dscto_nomina;
 
   const pagina2 = {
     empresa: mayus(p.empresa_nombre ?? p.empresa_codigo) || null,
@@ -173,7 +180,7 @@ export const construirPayload = ({ v, p, asesorCedula, eq, hoy = fecha(new Date(
     bono_sorteo: v.bono_sorteo_activo ?? null,
     firmada_at: v.firma_at ? new Date(v.firma_at).toISOString() : null,
     // Para quien aprueba: si la empresa quedó por defecto (0010 Particulares / Caja) conviene revisar que no falte una equivalencia
-    empresa_origen: empresaEq ? 'equivalencia' : 'por_defecto',
+    empresa_origen: empresaEq ? 'equivalencia' : (empresaCatalogo ? 'catalogo' : 'por_defecto'),
     empresa_kernel: p.empresa_nombre ?? p.empresa_codigo ?? null,
   };
 

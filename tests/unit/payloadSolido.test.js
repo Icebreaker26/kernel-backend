@@ -1,4 +1,4 @@
-import { construirPayload, mayus, norm, llaveCiudad, REGLAS_FIJAS } from '../../src/modules/rpa/services/payloadSolido.js';
+import { construirPayload, mayus, norm, llaveCiudad, codigoSolido, REGLAS_FIJAS } from '../../src/modules/rpa/services/payloadSolido.js';
 
 const EQ = {
   'ciudad|pereira|risaralda': '66001', 'ciudad|dosquebradas': '66170',
@@ -107,18 +107,30 @@ describe('payloadSolido — faltantes', () => {
 });
 
 describe('payloadSolido — empresa y clase de descuento', () => {
-  test('sin equivalencia de la empresa: 0010 Particulares y descuento por Caja', () => {
-    const { payload, faltantes } = construirPayload({ ...base, p: { ...p, empresa_codigo: 'EMP-NUEVA' } });
+  test('empresa del catálogo de Kernel sin equivalencia manual: su código a 4 dígitos y descuento por Nómina (no cae a 0010)', () => {
+    const { payload, faltantes } = construirPayload({ ...base, p: { ...p, empresa_codigo: '138' } });
     expect(faltantes).toEqual([]);
-    expect(payload.pagina1).toMatchObject({ empresa: '0010', clase_dscto: 'Caja' });
-    expect(payload.informativo.empresa_origen).toBe('por_defecto');
+    expect(payload.pagina1).toMatchObject({ empresa: '0138', clase_dscto: 'Nomina' });
+    expect(payload.informativo.empresa_origen).toBe('catalogo');
   });
-  test('con equivalencia: su código y descuento por Nómina', () => {
+  test('Particulares (código 10) es la ÚNICA por Caja: 0010 y Caja', () => {
+    const { payload } = construirPayload({ ...base, p: { ...p, empresa_codigo: '10' } });
+    expect(payload.pagina1).toMatchObject({ empresa: '0010', clase_dscto: 'Caja' });
+    expect(payload.informativo.empresa_origen).toBe('catalogo');
+  });
+  test('una empresa cuyo código ya viene a 4 dígitos o con letras se envía tal cual', () => {
+    expect(construirPayload({ ...base, p: { ...p, empresa_codigo: '0106' } }).payload.pagina1).toMatchObject({ empresa: '0106', clase_dscto: 'Nomina' });
+    expect(construirPayload({ ...base, p: { ...p, empresa_codigo: 'EMP-NUEVA' } }).payload.pagina1).toMatchObject({ empresa: 'EMP-NUEVA', clase_dscto: 'Nomina' });
+  });
+  test('codigoSolido rellena a 4 dígitos solo los numéricos cortos', () => {
+    expect(['1', '10', '138', '0010', '12345', 'X-1'].map(codigoSolido)).toEqual(['0001', '0010', '0138', '0010', '12345', 'X-1']);
+  });
+  test('una equivalencia manual sigue teniendo prioridad sobre el código del catálogo (y decide Caja/Nómina por su código)', () => {
     const { payload } = construirPayload(base);
     expect(payload.pagina1).toMatchObject({ empresa: '0101', clase_dscto: 'Nomina' });
     expect(payload.informativo.empresa_origen).toBe('equivalencia');
   });
-  test('sin empresa en Kernel también cae a 0010 / Caja', () => {
+  test('sin empresa en la solicitud: 0010 / Caja (única vez que se usa por defecto)', () => {
     const { payload } = construirPayload({ ...base, p: { ...p, empresa_codigo: null } });
     expect(payload.pagina1).toMatchObject({ empresa: '0010', clase_dscto: 'Caja' });
   });

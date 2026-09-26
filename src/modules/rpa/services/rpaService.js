@@ -216,6 +216,11 @@ export const reclamar = async (agente) => {
 
     const { rows: [a] } = await cn.query(`SELECT pausado, permite_guardar FROM rpa_agentes WHERE id = $1 FOR UPDATE`, [agente.id]);
     if (a.pausado) { await cn.query('COMMIT'); return null; }
+    // Un único bot en un único PC: mientras se exporta el flexible no se toma ninguna asociación
+    await cn.query(`UPDATE rpa_flexibles SET estado = 'fallida', error = 'El agente dejó de responder durante la exportación', updated_at = NOW()
+                     WHERE estado = 'ejecutando' AND iniciada_at < NOW() - interval '45 minutes'`);          // un flexible colgado no bloquea al bot
+    const { rows: [exportando] } = await cn.query(`SELECT 1 FROM rpa_flexibles WHERE is_active AND estado = 'ejecutando' LIMIT 1`);
+    if (exportando) { await cn.query('COMMIT'); return null; }
 
     // Máximo 5 vueltas: si un job resulta inválido (faltantes nuevos, ya en el padrón) se aparta y se toma el siguiente
     for (let i = 0; i < 5; i++) {

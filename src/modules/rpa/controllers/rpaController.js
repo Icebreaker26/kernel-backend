@@ -6,6 +6,7 @@ import {
   estadoAgenteSchema, latidoSchema, resultadoSchema, resolverRevisionSchema,
 } from '../schemas/rpaSchema.js';
 import * as svc from '../services/rpaService.js';
+import { env } from '../../../config/env.js';
 import { norm, llaveCiudad } from '../services/payloadSolido.js';
 
 // Los ErrorRpa (409, 404…) se contestan con su mensaje; el errorHandler oculta el detalle de cualquier otro error en producción
@@ -204,7 +205,9 @@ export const subirVinculacion = manejar(async (req, res) => {
   await svc.exigirCumplimiento(id);
   const { rows: [abierto] } = await pool.query(
     `SELECT id FROM rpa_jobs WHERE vinculacion_id = $1 AND estado = 'requiere_datos' AND is_active ORDER BY created_at DESC LIMIT 1`, [id]);
-  if (abierto) await svc.reevaluar(abierto.id);        // ya había un trabajo esperando datos: se revisa de nuevo
-  else await svc.encolar(id, req.user.id);
+  // "Subir = aprobar" (RPA_GUARDADO_DIRECTO, por defecto true): el trabajo nace aprobado y el agente guarda sin revisión previa
+  const directo = env.RPA_GUARDADO_DIRECTO === 'true';
+  if (abierto) await svc.reevaluar(abierto.id, { directo, usuarioId: req.user.id });   // esperaba datos: se revisa de nuevo
+  else await svc.encolar(id, req.user.id, { directo });
   res.status(201).json(await svc.estadoVinculacion(id));
 });

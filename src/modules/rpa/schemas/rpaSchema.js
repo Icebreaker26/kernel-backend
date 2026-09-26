@@ -48,6 +48,8 @@ export const resultadoSchema = z.object({
   reintentable: z.boolean().default(false),
   // Diálogo desconocido, huella de interfaz distinta, etc.: se pausa el agente hasta que una persona lo reactive
   fatal     : z.boolean().default(false),
+  // En la fase de guardar: true si el fallo fue ANTES de pulsar Guardar (no hay nada que verificar en SOLIDO)
+  antes_de_guardar: z.boolean().default(false),
   capturas  : z.array(z.object({
     etiqueta: z.string().min(1).max(60),
     mime    : z.enum(['image/jpeg', 'image/png']).default('image/jpeg'),

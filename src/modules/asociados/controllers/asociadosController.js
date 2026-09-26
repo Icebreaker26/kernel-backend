@@ -474,7 +474,7 @@ const LINEAS_RELEVANTES = new Set(Object.keys(CATALOGO_LINEAS).map(Number));
 
 // ── Helper compartido de parsing ──────────────────────────────────────────────
 
-const parsearCSV = (buffer) => {
+export const parsearCSV = (buffer) => {
   let csvText;
   try {
     const decoded = buffer.toString('utf8');

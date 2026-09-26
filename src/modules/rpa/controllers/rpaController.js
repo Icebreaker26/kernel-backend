@@ -6,6 +6,7 @@ import {
   estadoAgenteSchema, latidoSchema, resultadoSchema, resolverRevisionSchema,
 } from '../schemas/rpaSchema.js';
 import * as svc from '../services/rpaService.js';
+import * as flex from '../services/flexibleService.js';
 import { env } from '../../../config/env.js';
 import { norm, llaveCiudad } from '../services/payloadSolido.js';
 
@@ -210,4 +211,56 @@ export const subirVinculacion = manejar(async (req, res) => {
   if (abierto) await svc.reevaluar(abierto.id, { directo, usuarioId: req.user.id });   // esperaba datos: se revisa de nuevo
   else await svc.encolar(id, req.user.id, { directo });
   res.status(201).json(await svc.estadoVinculacion(id));
+});
+
+// ── Flexible del maestro de cartera (exportación de SOLIDO → sync de asociados con aprobación humana) ─────────────────
+
+
+export const agenteTareaReclamar = manejar(async (req, res) => {
+  await svc.latido(req.agente, {});
+  res.json({ tarea: await flex.reclamarTarea(req.agente) });
+});
+
+export const agenteFlexibleArchivo = manejar(async (req, res) => {
+  const id = uuid(req.params.id);
+  const cuerpo = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+  const esperado = (req.get('x-sha256') || '').toLowerCase();
+  if (esperado && crypto.createHash('sha256').update(cuerpo).digest('hex') !== esperado) {
+    throw new svc.ErrorRpa(400, 'El archivo se alteró en el envío (el SHA-256 no coincide)');
+  }
+  const f = await flex.recibirArchivo(req.agente, id, cuerpo, decodeURIComponent(req.get('x-nombre-archivo') || 'flexible.csv'));
+  res.status(201).json({ id: f.id, estado: f.estado, filas: f.filas });
+});
+
+export const agenteFlexibleFallo = manejar(async (req, res) => {
+  const { error } = z.object({ error: z.string().min(1).max(2000) }).strict().parse(req.body);
+  const f = await flex.fallo(req.agente, uuid(req.params.id), error);
+  res.json({ id: f.id, estado: f.estado });
+});
+
+export const listarFlexibles = manejar(async (_req, res) => res.json(await flex.listar()));
+export const getFlexible = manejar(async (req, res) => res.json(await flex.obtener(uuid(req.params.id))));
+export const solicitarFlexible = manejar(async (req, res) => res.status(201).json(await flex.solicitar(req.user.id)));
+export const cancelarFlexible = manejar(async (req, res) => res.json(await flex.cancelar(uuid(req.params.id))));
+
+export const analizarFlexible = manejar(async (req, res) => {
+  const { status, body } = await flex.analizar(uuid(req.params.id));
+  res.status(status).json(body);
+});
+
+export const aplicarFlexible = manejar(async (req, res) => {
+  const r = await flex.aplicar(uuid(req.params.id), req.user);
+  res.status(r.aplicada ? 200 : r.status).json({ aplicada: r.aplicada, ...(r.body ?? {}) });
+});
+
+export const rechazarFlexible = manejar(async (req, res) => {
+  const { nota } = z.object({ nota: z.string().trim().min(5).max(500) }).strict().parse(req.body);
+  res.json(await flex.rechazar(uuid(req.params.id), req.user, nota));
+});
+
+export const descargarFlexible = manejar(async (req, res) => {
+  const f = await flex.descargar(uuid(req.params.id));
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${(f.nombre_archivo || 'flexible.csv').replace(/[^\w.\- ]/g, '_')}"`);
+  res.send(f.csv);
 });

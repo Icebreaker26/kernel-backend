@@ -474,6 +474,75 @@ const LINEAS_RELEVANTES = new Set(Object.keys(CATALOGO_LINEAS).map(Number));
 
 // ── Helper compartido de parsing ──────────────────────────────────────────────
 
+// ── Formato de los números del CSV ────────────────────────────────────────────
+// El flexible de SOLIDO lo escribe Excel con el formato regional del PC que lo exporta: el de Kernel/Platinum usa coma decimal ("2,14",
+// "1.234.567,89") y el PC de SOLIDO escribe punto decimal ("2.1881"). Los lectores numéricos del importador entienden solo el primero
+// (el punto es de miles): "2.1881" pasaba a 21881 y desbordaba tasa_interes NUMERIC(8,4). Aquí se detecta la convención de TODO el
+// archivo y, si es punto decimal, se lleva a coma decimal (sin miles) antes de validar; el resto del importador no cambia.
+const COLUMNAS_NUMERICAS = ['cuota', 'saldo', 'valor_obligacion', 'valor_solicitado', 'valor_desembolsad', 'tasa_interes', 'tasa_admon',
+  'cuota_admon', 'tasa_seguro', 'cuota_seguro', 'saldocapitalpendiente', 'interespendiente', 'saldomora', 'total_vencido', 'plazo'];
+const RE_MILES_PUNTO   = /^-?\d{1,3}(\.\d{3})+(,\d+)?$/;      // 1.234 · 1.234.567 · 1.234,56  (formato antiguo)
+const RE_PUNTO_DECIMAL = /^-?\d+\.\d+$/;                        // 2.1881 · 1234.56
+const RE_COMA_DECIMAL  = /^-?\d+,\d+$/;                          // 2,14 · 1234,56
+const RE_TRES_DIGITOS  = /^-?\d{1,3}\.\d{3}$/;                   // 1.234: ambiguo por sí solo (miles o decimal)
+
+/** Devuelve 'punto_decimal' | 'coma_decimal' | 'sin_decimales' y, si es punto decimal, reescribe los valores a coma decimal (en sitio). */
+export const normalizarNumeros = (registros) => {
+  let punto = 0; let coma = 0; let miles = 0;
+  for (const r of registros) {
+    for (const c of COLUMNAS_NUMERICAS) {
+      const v = String(r[c] ?? '').trim();
+      if (!v) continue;
+      if (RE_COMA_DECIMAL.test(v)) coma++;
+      else if (RE_MILES_PUNTO.test(v) && (v.includes(',') || (v.match(/\./g) || []).length > 1)) miles++;   // inequívoco: coma decimal o varios grupos
+      else if (RE_PUNTO_DECIMAL.test(v) && !RE_TRES_DIGITOS.test(v)) punto++;
+    }
+  }
+  if (punto > 0 && coma === 0 && miles === 0) {
+    for (const r of registros) {
+      for (const c of COLUMNAS_NUMERICAS) {
+        if (r[c] === undefined || r[c] === null || String(r[c]).trim() === '') continue;
+        r[c] = String(r[c]).trim().replace(/,/g, '').replace('.', ',');
+      }
+    }
+    return 'punto_decimal';
+  }
+  return coma > 0 || miles > 0 ? 'coma_decimal' : 'sin_decimales';
+};
+
+// Límites reales de las columnas destino: si un valor no cabe, el INSERT fallaba con un 500 "numeric field overflow" sin decir cuál
+const numeroCSV = (v) => {
+  const n = parseFloat(String(v ?? '').trim().replace(/[$\s.]/g, '').replace(',', '.'));
+  return Number.isNaN(n) ? null : n;
+};
+/** Valores del CSV que NO caben en su columna (asociados.valor_aporte/saldo_aporte y asociado_descuentos.*). Lista vacía = todo cabe. */
+export const valoresFueraDeRango = (registros) => {
+  const fuera = [];
+  const revisar = (r, columna, destino, maximo) => {
+    const n = numeroCSV(r[columna]);
+    if (n !== null && Math.abs(n) >= maximo) {
+      fuera.push({ codigo: String(r.codigo ?? '?').trim(), linea: String(r.linea ?? '').trim(), columna, valor_csv: String(r[columna]).trim(), destino, maximo });
+    }
+  };
+  for (const r of registros) {
+    const linea = parseInt(String(r.linea ?? '').trim(), 10);
+    if (linea === 1) {
+      revisar(r, 'cuota', 'asociados.valor_aporte', 1e8);
+      revisar(r, 'saldo', 'asociados.saldo_aporte', 1e10);
+    }
+    if (LINEAS_RELEVANTES.has(linea)) {
+      revisar(r, 'cuota', 'asociado_descuentos.valor', 1e10);
+      revisar(r, 'valor_obligacion', 'asociado_descuentos.valor_obligacion', 1e12);
+      revisar(r, 'saldo', 'asociado_descuentos.saldo_credito', 1e12);
+      revisar(r, 'tasa_interes', 'asociado_descuentos.tasa_interes', 1e4);
+    }
+  }
+  return fuera;
+};
+const mensajeFueraDeRango = (fuera) =>
+  `El archivo tiene ${fuera.length} valor(es) que no caben en la base de datos, p. ej. asociado ${fuera[0].codigo}: ${fuera[0].columna}=${fuera[0].valor_csv} ` +
+  `(máximo ${fuera[0].maximo.toLocaleString('es-CO')} en ${fuera[0].destino}). Revisa el formato de los números del archivo o ese dato en SOLIDO.`;
+
 export const parsearCSV = (buffer) => {
   let csvText;
   try {
@@ -486,6 +555,7 @@ export const parsearCSV = (buffer) => {
   const primeraLinea = csvText.slice(0, csvText.indexOf('\n'));
   const delimiter = (primeraLinea.split(';').length > primeraLinea.split(',').length) ? ';' : ',';
   const registros = parse(csvText, { columns: true, skip_empty_lines: true, trim: true, delimiter });
+  const formatoNumerico = normalizarNumeros(registros);
   const registrosFiltrados = registros.filter((r) => !r.linea || String(r.linea).trim() === '1');
   const errores = [];
   const validos = [];
@@ -494,7 +564,7 @@ export const parsearCSV = (buffer) => {
     if (!result.success) errores.push({ fila: fila.codigo ?? '?', error: result.error.flatten() });
     else validos.push(result.data);
   }
-  return { registros, registrosFiltrados, validos, errores };
+  return { registros, registrosFiltrados, validos, errores, formatoNumerico };
 };
 
 // ── Dry-run: analiza el CSV contra la BD sin escribir nada ────────────────────
@@ -503,7 +573,7 @@ export const previewImportarCSV = async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No se adjuntó ningún archivo' });
 
-    const { registrosFiltrados, validos, errores } = parsearCSV(req.file.buffer);
+    const { registros, registrosFiltrados, validos, errores, formatoNumerico } = parsearCSV(req.file.buffer);
     const guardsActivos = process.env.NODE_ENV !== 'test';
 
     if (guardsActivos && validos.length === 0) {
@@ -546,6 +616,10 @@ export const previewImportarCSV = async (req, res, next) => {
     const limiteRetiros  = Math.ceil(activosCount * 0.2);
 
     const advertencias = [];
+    const fuera = valoresFueraDeRango(registros);
+    if (fuera.length) {
+      advertencias.push({ tipo: 'valores_fuera_de_rango', mensaje: mensajeFueraDeRango(fuera), bloqueante: true, ejemplos: fuera.slice(0, 5) });
+    }
     if (guardsActivos && retiradosCount > limiteRetiros && retiradosCount > 50) {
       advertencias.push({
         tipo: 'retiros_excesivos',
@@ -558,6 +632,7 @@ export const previewImportarCSV = async (req, res, next) => {
       total_csv:       registrosFiltrados.length,
       validos:         validos.length,
       errores_formato: errores.length,
+      formato_numerico: formatoNumerico,          // 'punto_decimal' se convirtió a coma decimal antes de validar
       impacto: {
         nuevos:           Number(nuevosRes.rows[0].count),
         actualizados:     Number(actualizadosRes.rows[0].count),
@@ -609,6 +684,12 @@ export const importarCSV = async (req, res, next) => {
       return res.status(422).json({
         error: `El archivo tiene ${registrosFiltrados.length.toLocaleString('es-CO')} filas. El máximo permitido es ${MAX_FILAS.toLocaleString('es-CO')}.`,
       });
+    }
+
+    // Valores que no caben en su columna (p. ej. tasa_interes ≥ 10.000): se rechaza ANTES de escribir, diciendo cuál, en vez de un 500
+    const fuera = valoresFueraDeRango(registros);
+    if (fuera.length) {
+      return res.status(422).json({ error: mensajeFueraDeRango(fuera), valores_fuera_de_rango: fuera.slice(0, 10) });
     }
 
     await client.query('BEGIN');

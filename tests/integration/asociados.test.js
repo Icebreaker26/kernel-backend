@@ -990,6 +990,39 @@ describe('Asociados — importar preview (dry-run)', () => {
     expect(res.status).toBe(400);
   });
 
+  test('preview de un CSV con el formato del PC de SOLIDO (punto decimal): lo detecta y avisa el formato', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const csv = 'linea,codigo,apellido,nombre,cuota,saldo,tasa_interes\n1,777801,PRUEBA,ANA,37000,-2795048.89,0\n1004,777801,PRUEBA,ANA,150000,450000.5,2.1881\n';
+    const res = await ag.post('/api/asociados/importar/preview').attach('archivo', Buffer.from(csv), 'pc.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.formato_numerico).toBe('punto_decimal');
+    expect((res.body.advertencias || []).some((a) => a.tipo === 'valores_fuera_de_rango')).toBe(false);
+  });
+
+  test('preview con un valor que no cabe en la base de datos: advertencia bloqueante que dice cuál', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const csv = 'linea,codigo,apellido,nombre,cuota,saldo,tasa_interes\n1,777802,PRUEBA,BEA,37000,0,0\n1004,777802,PRUEBA,BEA,150000,0,21881\n';
+    const res = await ag.post('/api/asociados/importar/preview').attach('archivo', Buffer.from(csv), 'roto.csv');
+    expect(res.status).toBe(200);
+    const a = res.body.advertencias.find((x) => x.tipo === 'valores_fuera_de_rango');
+    expect(a).toMatchObject({ bloqueante: true });
+    expect(a.mensaje).toMatch(/777802.*tasa_interes=21881/);
+  });
+
+  test('importar con un valor fuera de rango → 422 con el motivo, SIN escribir nada (antes daba un 500 numeric overflow)', async () => {
+    const ag = agent();
+    await loginAdmin(ag);
+    const csv = 'linea,codigo,apellido,nombre,cuota,saldo,tasa_interes\n1,777803,PRUEBA,CEC,37000,0,0\n1004,777803,PRUEBA,CEC,150000,0,21881\n';
+    const res = await ag.post('/api/asociados/importar').attach('archivo', Buffer.from(csv), 'roto.csv');
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/no caben en la base de datos/);
+    expect(res.body.valores_fuera_de_rango[0]).toMatchObject({ codigo: '777803', columna: 'tasa_interes' });
+    const { rows } = await pool.query(`SELECT count(*)::int n FROM asociados WHERE codigo = '777803'`);
+    expect(rows[0].n).toBe(0);
+  });
+
   test('POST /api/asociados/importar/preview CSV válido → 200 con estructura de impacto', async () => {
     const ag = agent();
     await loginAdmin(ag);
